@@ -46,11 +46,14 @@
 #define MAX_ERRORS 128u
 #define MAX_REQUEST 1024u
 #define MAX_FIELD 4096u
+#define PF_KTHREAD 0x00200000u
 #define POLICY                                                                 \
   "gc-proc-helper/"                                                            \
   "v1;fd=3;request=1024;wall_ms=10000;pids=65536;env=16777216;output="         \
   "16777216;retained=16777216;errors=128;openat2=beneath,no_symlinks,no_"      \
-  "magiclinks;seccomp=default_errno_x86_64_v2;roots=exact_tmux_v1"
+  "magiclinks;seccomp=default_errno_x86_64_v2;roots=exact_tmux_v1;"             \
+  "kernel=pf_kthread_stat_v1;kernel_comm=excluded_from_coverage_v1;" \
+  "non_target_env=nul_no_gc_v1"
 struct binding {
   uint32_t pid, uid;
   uint64_t start;
@@ -58,7 +61,7 @@ struct binding {
 };
 struct process {
   uint32_t pid, ppid, pgid;
-  uint64_t start, epoch;
+  uint64_t start, epoch, flags;
   char *sid, *city, *template, *name;
   char token[65];
   bool valid, root, parent_infra;
@@ -220,6 +223,25 @@ static unsigned char *read_fd(int fd, size_t limit, size_t *size) {
   return b;
 }
 static unsigned char *read_proc(const char *path, size_t limit, size_t *size) {
+#ifdef GC_HELPER_TEST
+  /* A synthetic proc tree cannot naturally return environ ESRCH. The fixture
+   * alone can inject that read error; no such path exists in the release. */
+  size_t path_len = strlen(path);
+  if (fixture && path_len >= 8 && !strcmp(path + path_len - 8, "/environ")) {
+    char marker[96];
+    snprintf(marker, sizeof marker, "%s.fixture-errno", path);
+    int injected = fixed_open(ev.procfd, marker, 0);
+    if (injected >= 0) {
+      char error;
+      ssize_t count = read(injected, &error, 1);
+      close(injected);
+      if (count == 1 && error == '3') {
+        errno = ESRCH;
+        return NULL;
+      }
+    }
+  }
+#endif
   int fd = fixed_open(ev.procfd, path, 0);
   if (fd < 0)
     return NULL;
@@ -262,11 +284,13 @@ static bool parse_stat(const unsigned char *data, size_t n, struct process *p) {
     goto done;
   char *save = NULL, *part = strtok_r(end + 1, " \n", &save);
   unsigned field = 3;
-  uint64_t pp = 0, pg = 0, start = 0;
+  uint64_t pp = 0, pg = 0, start = 0, flags = 0;
   while (part) {
     if (field == 4 && !uint_value(part, &pp))
       goto done;
     if (field == 5 && !uint_value(part, &pg))
+      goto done;
+    if (field == 9 && !uint_value(part, &flags))
       goto done;
     if (field == 22 && !uint_value(part, &start))
       goto done;
@@ -278,6 +302,7 @@ static bool parse_stat(const unsigned char *data, size_t n, struct process *p) {
   p->ppid = (uint32_t)pp;
   p->pgid = (uint32_t)pg;
   p->start = start;
+  p->flags = flags;
   ok = true;
 done:
   free(b);
@@ -315,6 +340,22 @@ static bool parse_env(struct scan *s, struct process *p, unsigned char *b,
                       size_t n) {
   if (n && b[n - 1])
     return false;
+  /* sshd/nginx may replace their non-GC environment with process titles.
+   * Only a fully read, NUL-terminated environment with no GC_ entry can be
+   * classified as non-target. Any GC_ prefix retains the strict parser below. */
+  bool has_gc_entry = false;
+  for (size_t at = 0; at < n;) {
+    if (expired()) {
+      errno = ETIMEDOUT;
+      return false;
+    }
+    size_t len = strlen((char *)b + at);
+    if (len >= 3 && !memcmp(b + at, "GC_", 3))
+      has_gc_entry = true;
+    at += len + 1;
+  }
+  if (!has_gc_entry)
+    return true;
   char *seen[4096];
   size_t seen_n = 0;
   char *fallback = NULL;
@@ -403,27 +444,33 @@ static bool read_process(struct scan *s, struct process *p) {
   p->ppid = a.ppid;
   p->pgid = a.pgid;
   p->start = a.start;
+  p->flags = a.flags & PF_KTHREAD;
   char path[48];
-  snprintf(path, sizeof path, "%u/environ", pid);
   size_t n;
-  unsigned char *b = read_proc(path, MAX_ENV, &n);
-  if (!b) {
-    add_error(errno == EFBIG ? "limit_reached" : "process_unavailable",
-              "environ", pid, errno);
-    return false;
-  }
-  errno = EINVAL;
-  bool ok = parse_env(s, p, b, n);
-  volatile unsigned char *wipe = b;
-  for (size_t i = 0; i < n; i++)
-    wipe[i] = 0;
-  free(b);
-  if (!ok) {
-    add_error(errno == EFBIG       ? "limit_reached"
-              : errno == ETIMEDOUT ? "deadline"
-                                   : "malformed_environment",
-              "environ", pid, errno);
-    return false;
+  unsigned char *b;
+  /* Kernel threads have no user mm; environ returns ESRCH for a live thread.
+   * Do not drop their PID: both scans still prove stat/flags/comm identity. */
+  if (!(a.flags & PF_KTHREAD)) {
+    snprintf(path, sizeof path, "%u/environ", pid);
+    b = read_proc(path, MAX_ENV, &n);
+    if (!b) {
+      add_error(errno == EFBIG ? "limit_reached" : "process_unavailable",
+                "environ", pid, errno);
+      return false;
+    }
+    errno = EINVAL;
+    bool ok = parse_env(s, p, b, n);
+    volatile unsigned char *wipe = b;
+    for (size_t i = 0; i < n; i++)
+      wipe[i] = 0;
+    free(b);
+    if (!ok) {
+      add_error(errno == EFBIG       ? "limit_reached"
+                : errno == ETIMEDOUT ? "deadline"
+                                     : "malformed_environment",
+                "environ", pid, errno);
+      return false;
+    }
   }
   snprintf(path, sizeof path, "%u/comm", pid);
   b = read_proc(path, 256, &n);
@@ -443,7 +490,8 @@ static bool read_process(struct scan *s, struct process *p) {
     add_error("process_unavailable", "stat", pid, errno);
     return false;
   }
-  if (a.start != z.start || a.ppid != z.ppid || a.pgid != z.pgid) {
+  if (a.start != z.start || a.ppid != z.ppid || a.pgid != z.pgid ||
+      (a.flags & PF_KTHREAD) != (z.flags & PF_KTHREAD)) {
     add_error("incarnation_changed", "stat", pid, 0);
     return false;
   }
@@ -540,10 +588,15 @@ static void scan(struct scan *s) {
     }
     read_process(s, p);
     char identity[128];
-    snprintf(identity, sizeof identity, "%u:%u:%u:%" PRIu64 ":%" PRIu64 ":%d",
-             p->pid, p->ppid, p->pgid, p->start, p->epoch, p->valid);
+    snprintf(identity, sizeof identity,
+             "%u:%u:%u:%" PRIu64 ":%" PRIu64 ":%" PRIu64 ":%d",
+             p->pid, p->ppid, p->pgid, p->start, p->epoch, p->flags, p->valid);
     digest_field(&hash, identity);
-    digest_field(&hash, p->name);
+    // Kernel workqueue comm describes mutable work, not task incarnation.
+    // PF_KTHREAD was positively checked in both stat reads; all other stat
+    // identity, validity and host enumeration fields remain in the digest.
+    if (!(p->flags & PF_KTHREAD))
+      digest_field(&hash, p->name);
     digest_field(&hash, p->sid);
     digest_field(&hash, p->city);
     digest_field(&hash, p->template);
@@ -557,6 +610,10 @@ static void scan(struct scan *s) {
     struct process *par = parent(s, p->ppid);
     if (p->ppid > 1 && (!par || !par->valid)) {
       add_error("parent_unavailable", "stat", p->pid, 0);
+      continue;
+    }
+    if (par && (par->flags & PF_KTHREAD)) {
+      add_error("parent_not_user_process", "stat", p->pid, 0);
       continue;
     }
     if (par && par->sid && !strcmp(par->sid, p->sid) && !infra(par->name))

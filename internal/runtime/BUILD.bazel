@@ -3,7 +3,6 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "runtime",
     srcs = [
-        "process_evidence.go",
         "beacon.go",
         "carrier.go",
         "dialog.go",
@@ -18,6 +17,7 @@ go_library(
         "privatedir.go",
         "probe.go",
         "process_control.go",
+        "process_evidence.go",
         "process_table_scanner.go",
         "protocol.go",
         "provider_core.go",
@@ -39,7 +39,7 @@ go_library(
 go_test(
     name = "runtime_test",
     srcs = [
-        "process_evidence_test.go",
+        "attach_observer_test.go",
         "beacon_test.go",
         "capacity_test.go",
         "carrier_test.go",
@@ -61,6 +61,7 @@ go_test(
         "liveness_test.go",
         "privatedir_test.go",
         "probe_test.go",
+        "process_evidence_test.go",
         "process_table_scanner_test.go",
         "provider_core_test.go",
         "redact_test.go",

@@ -11,9 +11,9 @@ import (
 )
 
 // TestCheckGomodReplaceGuard verifies the check-gomod-replace script:
-//   - FAILS on pseudo-version, local-path, and git-ref replace targets
+//   - FAILS on any replace except the exact approved beads fork
 //   - PASSES when no replace directives are present
-//   - PASSES when all replaces point to released semver tags
+//   - PASSES for beads v1.3.0 with the exact approved SHOW fork
 //
 // Regression guard for the 2026-06-11 incident where PR #3489 shipped a
 // pseudo-version replace (`=> v1.0.5-0.20260611054652-dc0561af28e9`) that
@@ -53,14 +53,37 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		}
 	})
 
-	t.Run("passes_released_semver_replace", func(t *testing.T) {
+	t.Run("rejects_other_released_replace", func(t *testing.T) {
 		gomod := fmt.Sprintf("module github.com/example/mod\n\ngo 1.22\n\nreplace %s\n",
 			"github.com/steveyegge/beads v1.0.4 => github.com/steveyegge/beads v1.0.5")
 		out, code := runScript(t, gomod)
-		if code != 0 {
-			t.Fatalf("expected exit 0 for released semver replace, got %d\n%s", code, out)
+		if code == 0 {
+			t.Fatalf("expected non-zero exit for unapproved released replace, got 0\n%s", out)
 		}
 	})
+
+	const approvedReplace = "github.com/steveyegge/beads => github.com/AlexBelous/beads v1.1.1-0.20260928222722-da08f27390f1"
+	approvedCases := []struct {
+		name     string
+		manifest string
+		wantFail bool
+	}{
+		{"exact", "require github.com/steveyegge/beads v1.3.0\nreplace " + approvedReplace + "\n", false},
+		{"grouped", "require github.com/steveyegge/beads v1.3.0\nreplace (\n\t" + approvedReplace + "\n)\n", false},
+		{"newer_beads", "require github.com/steveyegge/beads v1.3.1\nreplace " + approvedReplace + "\n", true},
+		{"missing_requirement", "replace " + approvedReplace + "\n", true},
+		{"duplicate", "require github.com/steveyegge/beads v1.3.0\nreplace " + approvedReplace + "\nreplace " + approvedReplace + "\n", true},
+		{"extra_replace", "require github.com/steveyegge/beads v1.3.0\nreplace " + approvedReplace + "\nreplace example.com/other => example.com/fork v1.0.0\n", true},
+		{"different_commit", "require github.com/steveyegge/beads v1.3.0\nreplace " + strings.Replace(approvedReplace, "da08f27390f1", "da08f27390f2", 1) + "\n", true},
+	}
+	for _, testCase := range approvedCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			out, code := runScript(t, "module github.com/example/mod\n\ngo 1.22\n\n"+testCase.manifest)
+			if (code != 0) != testCase.wantFail {
+				t.Fatalf("exit code = %d, want failure %t\n%s", code, testCase.wantFail, out)
+			}
+		})
+	}
 
 	pseudoVersionCases := []struct {
 		name  string
@@ -152,32 +175,32 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 	}
 
 	multiLineBlockCases := []struct {
-		name  string
-		gomod string
+		name     string
+		gomod    string
+		wantFail bool
 	}{
 		{
 			"multi_line_block_pseudo_version",
 			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads v1.0.5 => github.com/steveyegge/beads v1.0.5-0.20260611054652-dc0561af28e9\n)\n",
+			true,
 		},
 		{
 			"multi_line_block_local_path",
 			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads => ./local/beads\n)\n",
+			true,
 		},
 		{
-			"multi_line_block_passes_released",
+			"multi_line_block_rejects_other_released",
 			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads v1.0.4 => github.com/steveyegge/beads v1.0.5\n)\n",
+			true,
 		},
 	}
 	for _, tc := range multiLineBlockCases {
 		tc := tc
-		wantFail := !strings.HasSuffix(tc.name, "_released")
 		t.Run(tc.name, func(t *testing.T) {
 			out, code := runScript(t, tc.gomod)
-			if wantFail && code == 0 {
-				t.Fatalf("expected non-zero exit for multi-line block case %q, got 0\n%s", tc.name, out)
-			}
-			if !wantFail && code != 0 {
-				t.Fatalf("expected exit 0 for multi-line block released case %q, got %d\n%s", tc.name, code, out)
+			if (code != 0) != tc.wantFail {
+				t.Fatalf("exit code = %d, want failure %t for %q\n%s", code, tc.wantFail, tc.name, out)
 			}
 		})
 	}
@@ -205,7 +228,7 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		{
 			"inline_comment_released_semver",
 			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads v1.0.4 => github.com/steveyegge/beads v1.0.5 // bump\n",
-			false,
+			true,
 		},
 		{
 			"multi_line_block_inline_comment_pseudo_version",
@@ -215,7 +238,7 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		{
 			"multi_line_block_inline_comment_released",
 			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads v1.0.4 => github.com/steveyegge/beads v1.0.5 // bump\n)\n",
-			false,
+			true,
 		},
 	}
 	for _, tc := range inlineCommentCases {
@@ -237,7 +260,7 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		if code == 0 {
 			t.Fatal("expected non-zero exit")
 		}
-		for _, want := range []string{"released", "human"} {
+		for _, want := range []string{"exact", "v1.3.0"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("failure message should mention %q:\n%s", want, out)
 			}

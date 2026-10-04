@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 EXE = Path(sys.argv.pop(1)).resolve()
@@ -20,9 +21,11 @@ NONCE = "a" * 64
 TOKEN = "never-output-raw-token"
 
 
-def stat(pid, parent=1, start=100):
+def stat(pid, parent=1, start=100, flags=0):
     # Fields 3..22; comm contains spaces/parentheses to exercise kernel stat grammar.
-    return f"{pid} (name (with) spaces) S {parent} {pid} " + "0 " * 16 + f"{start}\n"
+    fields = ["0"] * 16
+    fields[3] = str(flags)  # kernel stat field 9
+    return f"{pid} (name (with) spaces) S {parent} {pid} " + " ".join(fields) + f" {start}\n"
 
 
 class HelperTests(unittest.TestCase):
@@ -62,14 +65,14 @@ class HelperTests(unittest.TestCase):
             f"GC_INSTANCE_TOKEN={TOKEN}\0UNRELATED_SECRET=never-output-either\0"
         ).encode()
 
-    def process(self, pid, parent=1, start=100, name="worker", env=b""):
+    def process(self, pid, parent=1, start=100, name="worker", env=b"", flags=0):
         p = self.proc / str(pid)
         p.mkdir(exist_ok=True)
-        (p / "stat").write_text(stat(pid, parent, start))
+        (p / "stat").write_text(stat(pid, parent, start, flags))
         (p / "comm").write_text(name + "\n")
         (p / "environ").write_bytes(env)
 
-    def run_helper(self, request=None, extra=b"", rights=False, executable=EXE, close_peer=False):
+    def run_helper(self, request=None, extra=b"", rights=False, executable=EXE, close_peer=False, after_spawn=None):
         if executable != EXE:
             self.binding.write_text(self.binding.read_text().replace(
                 hashlib.sha256(EXE.read_bytes()).hexdigest(),
@@ -96,6 +99,8 @@ class HelperTests(unittest.TestCase):
                     os.dup2(backup, 3)
                     os.close(backup)
         child.close()
+        if after_spawn is not None:
+            after_spawn()
         # parent originally used fd3 in many cases; move socket before fd replacement.
         if request is None:
             request = {"schema": "observe-host-processes/v1", "request_nonce": NONCE}
@@ -195,6 +200,160 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(result["errors"])
         self.assertEqual(len(result["roots"]), 1)
 
+    def test_kernel_flag_proves_no_user_environment_without_losing_pid_coverage(self):
+        self.process(903, name="kworker", flags=0x00200000)
+        (self.proc / "903/environ").unlink()
+        code, result = self.run_helper()
+        self.assertEqual(code, 0)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["enumerated_count_before"], 5)
+        self.assertEqual(result["enumerated_count_after"], 5)
+        self.assertEqual(result["enumeration_digest_before"], result["enumeration_digest_after"])
+        self.assertEqual(result["errors_total"], 0)
+        self.assertEqual([r["pid"] for r in result["roots"]], [902])
+        # The same comm without the kernel flag cannot excuse unreadable env.
+        (self.proc / "903/stat").write_text(stat(903))
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e["pid"] == 903 and e["operation"] == "environ" for e in result["errors"]))
+
+    def test_non_gc_process_title_environment_is_not_managed_identity(self):
+        self.process(903, name="sshd", env=b"process-title\0=not-an-assignment\0")
+        code, result = self.run_helper()
+        self.assertEqual(code, 0)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["enumerated_count_before"], 5)
+        self.assertEqual([r["pid"] for r in result["roots"]], [902])
+        # Any GC_ entry reactivates strict parsing of the entire environment.
+        (self.proc / "903/environ").write_bytes(self.env() + b"process-title\0")
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e["pid"] == 903 and e["reason"] == "malformed_environment" for e in result["errors"]))
+
+    def test_kernel_classification_requires_readable_strict_stat(self):
+        self.process(903, name="kworker", flags=0x00200000)
+        target = self.proc / "903/stat"
+        for data in [stat(903, flags="not-decimal"), "903 (kworker) S 2 0\n"]:
+            target.write_text(data)
+            code, result = self.run_helper()
+            self.assertEqual(code, 1)
+            self.assertTrue(any(e["pid"] == 903 and e["operation"] == "stat" for e in result["errors"]))
+        target.unlink()
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e["pid"] == 903 and e["operation"] == "stat" for e in result["errors"]))
+
+    def test_kernel_named_tmux_cannot_attribute_managed_child(self):
+        self.process(901, name="tmux: server", flags=0x00200000)
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["roots"], [])
+        self.assertTrue(any(e["reason"] == "parent_not_user_process" for e in result["errors"]))
+
+    def test_user_esrch_is_not_excused_by_kernel_name_or_parent(self):
+        self.process(2, parent=0, name="kthreadd", flags=0x00200000)
+        self.process(903, parent=2, name="[kworker]", env=self.env())
+        (self.proc / "903/environ.fixture-errno").write_text("3")
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertFalse(result["complete"])
+        self.assertTrue(any(e["pid"] == 903 and e["operation"] == "environ" and e["errno"] == 3 for e in result["errors"]))
+
+    def test_kernel_bit_change_between_stat_reads_is_unknown(self):
+        self.process(903, name="kworker", flags=0x00200000)
+        comm = self.proc / "903/comm"
+        comm.unlink()
+        os.mkfifo(comm)
+        errors = []
+
+        def transition_at_comm_read():
+            try:
+                # Opening the private FIFO proves the helper reached comm
+                # after statA; EOF releases it to read statZ, without sleeps.
+                with comm.open("wb") as output:
+                    (self.proc / "903/stat").write_text(stat(903))
+                    regular_comm = comm.with_name("comm.next")
+                    regular_comm.write_text("kworker\n")
+                    os.replace(regular_comm, comm)
+                    output.write(b"kworker\n")
+            except Exception as error:
+                errors.append(error)
+
+        writer = threading.Thread(target=transition_at_comm_read, daemon=True)
+        code, result = self.run_helper(after_spawn=writer.start)
+        writer.join(timeout=10)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e["pid"] == 903 and e["reason"] == "incarnation_changed" for e in result["errors"]))
+
+    def test_kernel_comm_change_does_not_change_incarnation_digest(self):
+        for kernel in [True, False]:
+            with self.subTest(kernel=kernel):
+                self.process(903, name="worker-old", flags=0x00200000 if kernel else 0)
+                comm = self.proc / "903/comm"
+                comm.unlink()
+                os.mkfifo(comm)
+                errors = []
+
+                def transition_at_comm_read():
+                    try:
+                        # The first scan holds this FIFO inode; the next sees
+                        # the replacement. PID/start/stat flags remain exact.
+                        with comm.open("wb") as output:
+                            replacement = comm.with_name("comm.next")
+                            replacement.write_text("worker-new\n")
+                            os.replace(replacement, comm)
+                            output.write(b"worker-old\n")
+                    except Exception as error:
+                        errors.append(error)
+
+                writer = threading.Thread(target=transition_at_comm_read, daemon=True)
+                code, result = self.run_helper(after_spawn=writer.start)
+                writer.join(timeout=10)
+                self.assertFalse(writer.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(code, 0 if kernel else 1)
+                self.assertEqual(result["complete"], kernel)
+                self.assertEqual(result["enumerated_count_before"], result["enumerated_count_after"])
+                if kernel:
+                    self.assertEqual(result["enumeration_digest_before"], result["enumeration_digest_after"])
+                else:
+                    self.assertTrue(any(e["reason"] == "coverage_changed" for e in result["errors"]))
+
+    def test_kernel_start_or_count_change_still_denies_coverage(self):
+        for mode in ["start", "count"]:
+            with self.subTest(mode=mode):
+                self.process(903, name="kworker", flags=0x00200000)
+                comm = self.proc / "903/comm"
+                comm.unlink()
+                os.mkfifo(comm)
+                errors = []
+
+                def transition_at_comm_read():
+                    try:
+                        with comm.open("wb") as output:
+                            if mode == "start":
+                                (self.proc / "903/stat").write_text(stat(903, start=101, flags=0x00200000))
+                            else:
+                                self.process(904, name="new-kworker", flags=0x00200000)
+                            replacement = comm.with_name("comm.next")
+                            replacement.write_text("kworker\n")
+                            os.replace(replacement, comm)
+                            output.write(b"kworker\n")
+                    except Exception as error:
+                        errors.append(error)
+
+                writer = threading.Thread(target=transition_at_comm_read, daemon=True)
+                code, result = self.run_helper(after_spawn=writer.start)
+                writer.join(timeout=10)
+                self.assertFalse(writer.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(code, 1)
+                self.assertFalse(result["complete"])
+                reason = "incarnation_changed" if mode == "start" else "coverage_changed"
+                self.assertTrue(any(e["reason"] == reason for e in result["errors"]))
+
     @unittest.skipIf(os.getuid() == 0, "permission fixture requires unprivileged test UID")
     def test_permission_denied_is_unknown(self):
         target = self.proc / "902/environ"
@@ -236,7 +395,7 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(any(e["reason"] == "limit_reached" for e in result["errors"]))
 
     def test_duplicate_and_unterminated_gc_identity(self):
-        for data in [self.env() + b"GC_TEMPLATE=other\0", self.env()[:-1], b"BAD_ENTRY\0"]:
+        for data in [self.env() + b"GC_TEMPLATE=other\0", self.env()[:-1], b"GC_BAD_ENTRY\0"]:
             with self.subTest(data_length=len(data)):
                 (self.proc / "902/environ").write_bytes(data)
                 code, result = self.run_helper()

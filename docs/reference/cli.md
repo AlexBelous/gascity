@@ -3344,8 +3344,12 @@ gc pack release verify <source> [flags]
 Read-only probe of the pool start live census
 
 ```
-gc pool-admission-probe
+gc pool-admission-probe [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--per-session` | bool |  | Emit managed-session-observation/v1; incomplete coverage exits nonzero |
 
 ## gc prime
 

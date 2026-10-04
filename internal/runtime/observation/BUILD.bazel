@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "observation",
+    srcs = ["observation.go"],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/observation",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/runtime",
+        "//internal/runtime/proctable",
+    ],
+)
+
+go_test(
+    name = "observation_test",
+    srcs = ["observation_test.go"],
+    data = glob(["testdata/**"]),
+    embed = [":observation"],
+    deps = [
+        "//internal/runtime",
+        "//internal/runtime/auto",
+        "//internal/runtime/proctable",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)

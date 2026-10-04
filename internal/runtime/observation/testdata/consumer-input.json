@@ -1,0 +1,19 @@
+{
+  "city_path": "/city",
+  "now": "2026-10-04T08:00:00Z",
+  "templates": ["clerk", "clerk", "gastown.mayor"],
+  "status": {
+    "ok": true, "running": true, "controller": {"running": true},
+    "health": {"usable": true}, "_cache_age_s": 0,
+    "agents": [{"qualified_name": "clerk", "running": true},
+               {"qualified_name": "gastown.mayor", "running": true}]
+  },
+  "identities": [{"id":"sid-a","template":"clerk"},
+                 {"id":"sid-b","template":"clerk"},
+                 {"id":"sid-p","template":"gastown.mayor"},
+                 {"id":"dead-durable","template":"clerk","state":"active"}],
+  "routes": [{"qualified_name":"clerk","suspended":false,"pool":{"max":2}},
+             {"qualified_name":"gastown.mayor","suspended":false}],
+  "expected_count": 2,
+  "expected_active": ["sid-a", "sid-b"]
+}

@@ -85,7 +85,19 @@ const (
 	// Bumped again (gascity-kb#32): only packages-cmd-gc-integration's
 	// outer job cap moves 15 -> 35 minutes. Its Go runtime deadline remains
 	// 30m; commands, selected tests, routing, and required gates are unchanged.
-	expectedCIExecutionHash     = "d409d878397c4a7980526898d3800170de926dbe6d300e8f33631a9cc1a402c3"
+	//
+	// Bumped again (ga-nr9epw, restoring ga-1037rg / ga-yoxtux regression
+	// coverage without re-widening test-bd-cli-contract's own -run regex,
+	// which TestAcceptanceTargetsSeparateTierAFromExternalBdContracts pins as
+	// an exact literal substring): one new step, "bd CLI contract HOME
+	// isolation (...)", added immediately after the existing "bd CLI contract
+	// (...)" step in each of contract-acceptance-previous, contract-
+	// acceptance-current and contract-radar-bd-head. Each new step runs `make
+	// test-bd-cli-contract-home-isolation`, a separate Makefile target driving
+	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
+	// acceptance_bd_contract tag and bd binary the preceding step already
+	// resolved onto PATH. No new job, trigger or permission.
+	expectedCIExecutionHash     = "a19ee2fddf938fe545d30f46e2bb42cb547fc726dfa437a4f475469221a0acbd"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

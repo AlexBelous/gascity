@@ -219,6 +219,7 @@
               "storage-preflight",
               "nudge-drop",
               "beads-city-migrate-proxied",
+              "storage-repair-sequence",
               "pool-admission-probe"
             ]
           },

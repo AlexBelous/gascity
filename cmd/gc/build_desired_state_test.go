@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -2474,7 +2475,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil, nil, nil, "")
+	}, nil, nil, nil, nil, "", nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2517,7 +2518,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 
 	countListCalls := func(n int) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "")
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -2540,7 +2541,7 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
 	countListCalls := func(cfg *config.City) int {
 		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
-		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "")
+		readyAssignedWorkAssignees(cfg, store, nil, nil, nil, "", nil)
 		return store.listCalls
 	}
 
@@ -6159,7 +6160,7 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	}
 	pinTestOwnedBDHome(t)
 
-	cityPath := t.TempDir()
+	cityPath := beadstest.GuardedTempDir(t)
 	registerRealBDServerStop(t, cityPath)
 	beadsDir := filepath.Join(cityPath, ".beads")
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(jqPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
@@ -6170,9 +6171,9 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	runExternal(t, cityPath, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
 	runExternal(t, cityPath, bdPath, "config", "set", "types.custom", "session")
 
-	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(map[string]string{
+	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(map[string]string{
 		"BEADS_DIR": beadsDir,
-	}))
+	})))
 	if _, err := store.Create(beads.Bead{
 		Title:  "queued polecat work",
 		Type:   "task",
@@ -13132,6 +13133,7 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 		nil,
 		io.Discard,
 		nil,
+		nil,
 	)
 	if len(work) != 2 {
 		t.Fatalf("collected work count = %d, want both same-ID rows from independent stores", len(work))
@@ -13200,6 +13202,7 @@ func TestCollectOpenUnassignedRoutedWorkReportsCanonicalStoreRefs(t *testing.T) 
 		map[string]beads.Store{"fixture": listFailStore{Store: beads.NewMemStore()}},
 		nil,
 		&stderr,
+		nil,
 		nil,
 	)
 	for _, want := range []string{"city:test-city: List(open)", "rig:fixture: List(open)"} {

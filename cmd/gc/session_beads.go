@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1792,11 +1793,30 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if !ok {
 				continue
 			}
-			if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
+			beadSessionName := strings.TrimSpace(b.Metadata["session_name"])
+			if beadSessionName == spec.SessionName {
 				continue
 			}
+			// Canonical-singleton pool step-aside carve-out (ga-vixyn5.1): a
+			// pool instance's runtime name always carries poolRuntimeNameSuffix
+			// (session_name_lookup.go) so it never collides with the name a
+			// configured named session reserves. FindCanonicalNamedSessionInfo's
+			// alias pass legitimately adopts exactly this bead as canonical one
+			// tick earlier; treating that adoption as a genuine reconfiguration
+			// would contradict that decision instead of agreeing with it. The
+			// close attempt below still runs unchanged for this shape -- it
+			// already only closes an unassigned, stopped bead, and a no-work
+			// adopted pool bead recycling as reconfigured is correct, not the
+			// bug (TestK88_Observation_AdoptedPoolNamedBeadWithoutWorkIsClosedAsReconfigured).
+			// Only the failure side effect changes: this identity must not
+			// enter blockedReconfiguredNamedIdentities, since it was never a
+			// real reconfiguration conflict to begin with. The step-aside name is
+			// bounded exactly as poolRuntimeSessionName bounds it.
+			carveOut := spec.Agent != nil && spec.Agent.UsesCanonicalSingletonPoolIdentity() && beadSessionName == boundSessionNameLength(spec.SessionName+poolRuntimeNameSuffix)
 			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(cityPath, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
-				blockedReconfiguredNamedIdentities[identity] = true
+				if !carveOut {
+					blockedReconfiguredNamedIdentities[identity] = true
+				}
 				continue
 			}
 			existing[i].Status = "closed"
@@ -1811,9 +1831,6 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		agentCfg := templateParamsToConfig(tp)
 		liveHash := runtime.LiveFingerprint(agentCfg)
 		isConfiguredNamed := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
-		if isConfiguredNamed && blockedReconfiguredNamedIdentities[strings.TrimSpace(tp.ConfiguredNamedIdentity)] {
-			continue
-		}
 		origin := templateParamsSessionOrigin(tp)
 
 		agentName := tp.TemplateName
@@ -1847,6 +1864,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 
 		b, exists := bySessionName[sn]
+		if !exists && isConfiguredNamed && blockedReconfiguredNamedIdentities[strings.TrimSpace(tp.ConfiguredNamedIdentity)] {
+			// The old bead for this identity is still open awaiting close (it
+			// has assigned work) -- do not mint or resurrect a second one at
+			// its new/adopted name while it waits. An ALREADY-existing bead at
+			// this exact session_name (e.g. the canonical-singleton pool
+			// adopted shape handled above) is a different case and reaches the
+			// refresh logic below unaffected: only creation is gated here,
+			// never metadata refresh of a bead that already exists (ga-vixyn5.1).
+			continue
+		}
 		if !exists && isConfiguredNamed {
 			if liveBead, ok, freshErr := findOpenSessionBeadBySessionName(store, sn); freshErr != nil {
 				fmt.Fprintf(stderr, "session beads: refreshing open bead for %s: %v\n", sn, freshErr) //nolint:errcheck
@@ -2826,6 +2853,7 @@ func reapStaleSessionBeads(
 	store beads.Store,
 	sp runtime.Provider,
 	dt *drainTracker,
+	holdsPendingCreate func(session.Info) bool,
 	clk clock.Clock,
 	stderr io.Writer,
 ) int {
@@ -2892,6 +2920,12 @@ func reapStaleSessionBeads(
 			continue
 		}
 		pendingCreate := info.PendingCreateClaim
+		// A never-started row held by its endpoint's capacity breaker is
+		// queued demand, not a phantom; the breaker's hold outlasts the lease
+		// windows below (endpointCapacityGuard.HoldsPendingCreate).
+		if strings.TrimSpace(info.LastWokeAt) == "" && holdsPendingCreate != nil && holdsPendingCreate(info) {
+			continue
+		}
 		// Never-started pending creates (pending_create_claim=true with no
 		// last_woke_at) have not reached preWakeCommit, so their start may
 		// still be in flight behind a busy pool start queue. Defer entirely to
@@ -3119,6 +3153,14 @@ func deadRuntimeBelongsToRow(info session.Info, name string, sp runtime.Provider
 	return dead
 }
 
+// cleanupDeadRuntimeSessionCorpses stops visible runtimes whose panes are all
+// dead and closes the open rows that claimed them (#2437); with the runtime
+// server absent it reaps the rows that provably died with a reboot instead.
+//
+// inv, when set, nominates the names to check and skips names its pass saw
+// with a live pane. Every Stop still follows a fresh IsDeadRuntimeSession on
+// that name, and an absent server seen by the lane only sends the pass to a
+// fresh listing, whose own ServerAbsent the pre-boot reap needs.
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
 	_ map[string]beads.Store,
@@ -3126,6 +3168,7 @@ func cleanupDeadRuntimeSessionCorpses(
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
+	inv *runtimeInventoryView,
 	clk clock.Clock,
 	stderr io.Writer,
 ) int {
@@ -3139,7 +3182,19 @@ func cleanupDeadRuntimeSessionCorpses(
 	if !ok {
 		return 0
 	}
-	visible, err := sp.ListRunning("")
+	var visible []string
+	var err error
+	if inv != nil {
+		visible, err = inv.listing()
+		if runtime.IsRuntimeServerAbsent(err) {
+			inv = nil
+		} else {
+			inv.corpses.source = inventorySourceLane
+		}
+	}
+	if inv == nil {
+		visible, err = sp.ListRunning("")
+	}
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions for dead cleanup: %v\n", err) //nolint:errcheck
@@ -3185,6 +3240,14 @@ func cleanupDeadRuntimeSessionCorpses(
 			continue
 		}
 		seen[name] = true
+		if inv != nil {
+			inv.corpses.candidates++
+			if inv.livePane(name) {
+				inv.corpses.filtered++
+				continue
+			}
+			inv.corpses.confirms++
+		}
 		dead, err := deadChecker.IsDeadRuntimeSession(name)
 		if err != nil {
 			fmt.Fprintf(stderr, "session reconciler: confirming dead runtime session %s: %v\n", name, err) //nolint:errcheck
@@ -3264,11 +3327,17 @@ func cleanupDeadRuntimeSessionCorpses(
 // confirms is closed. A runtime without a readable GC_SESSION_ID, or one whose
 // bead is still open or cannot be fetched (e.g. another rig, or a transient
 // store error), is left untouched. Active drains are left to the drainTracker.
+//
+// inv, when set, nominates the names to check and skips names whose listed
+// incarnation the lane attributed to a bead the snapshot holds open. Every
+// Stop still follows a fresh GetMeta of that name and a fresh exact-name
+// listing that still shows it.
 func reapRuntimesBoundToClosedBeads(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
+	inv *runtimeInventoryView,
 	stderr io.Writer,
 ) int {
 	if store == nil || sp == nil {
@@ -3277,7 +3346,14 @@ func reapRuntimesBoundToClosedBeads(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	visible, err := sp.ListRunning("")
+	var visible []string
+	var err error
+	if inv != nil {
+		inv.closedBound.source = inventorySourceLane
+		visible, err = inv.listing()
+	} else {
+		visible, err = sp.ListRunning("")
+	}
 	partialList := runtime.IsPartialListError(err)
 	if err != nil && !partialList {
 		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions for closed-bead reap: %v\n", err) //nolint:errcheck
@@ -3298,6 +3374,20 @@ func reapRuntimesBoundToClosedBeads(
 			continue
 		}
 		seen[name] = true
+		if inv != nil {
+			inv.closedBound.candidates++
+			// The lane read GC_SESSION_ID once per incarnation. This filter
+			// rests on GC_SESSION_ID never changing within an incarnation:
+			// a runtime rebound to another bead is a new incarnation, which
+			// carries no owner until the lane enriches it.
+			if owner, ok := inv.owner(name); ok {
+				if _, open := sessionBeads.FindInfoByID(owner); open {
+					inv.closedBound.filtered++
+					continue
+				}
+			}
+			inv.closedBound.confirms++
+		}
 
 		// Attribute the runtime to a bead via GC_SESSION_ID. Without it we
 		// cannot tell which bead owns the runtime, so we leave it alone.
@@ -3317,8 +3407,10 @@ func reapRuntimesBoundToClosedBeads(
 		}
 
 		// The bead is not open. Confirm it is actually closed before reaping —
-		// a missing or unreadable record must not trigger a stop.
-		bead, err := store.Get(liveID)
+		// a missing or unreadable record must not trigger a stop. The read
+		// goes past any cache: a reopen another process wrote without an
+		// event leaves a cached row still saying closed.
+		bead, err := beads.HandlesFor(store).Live.Get(liveID)
 		if err != nil {
 			continue
 		}
@@ -3329,6 +3421,16 @@ func reapRuntimesBoundToClosedBeads(
 		// Teardown ordering for draining beads belongs to the drainTracker.
 		if dt != nil && dt.get(liveID) != nil {
 			continue
+		}
+
+		// A lane-nominated name may be gone by now, and providers whose
+		// GetMeta reads sidecar files (acp, subprocess) answer for a gone
+		// name. Stop only a name a fresh exact-name listing still shows,
+		// as a live listing would have.
+		if inv != nil {
+			if names, _ := sp.ListRunning(name); !slices.Contains(names, name) {
+				continue
+			}
 		}
 
 		if err := sp.Stop(name); err != nil {
@@ -3432,7 +3534,9 @@ func sweepProcessTableOrphans(
 		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
 			continue
 		}
-		bead, err := store.Get(live.SessionID)
+		// The second read must be independent of the snapshot, and a cached
+		// Get is not: it can hold the same stale closed row. Read live.
+		bead, err := beads.HandlesFor(store).Live.Get(live.SessionID)
 		switch {
 		case err == nil && bead.Status != "closed":
 			continue // bead still open — leave the runtime alone

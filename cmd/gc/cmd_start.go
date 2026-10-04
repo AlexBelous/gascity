@@ -804,6 +804,25 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	for _, w := range prov.Warnings {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
+	// Refuse an inadmissible session_reconciler before any init, so a refused
+	// start (including --dry-run) starts no bead store and opens no event log.
+	// runController latches again (newControllerWiring) for the mode it runs.
+	// The two cannot disagree: both read only cfg's session_reconciler, which
+	// nothing below rewrites, and reconcilerModeLookupEnv's override, which no
+	// gc code sets.
+	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// The one-shot reconcile below calls the legacy session reconciler
+	// directly, behind no legacySessionEntry guard, so v2 refuses it rather
+	// than run legacy session work under a v2 latch. Production never reaches
+	// it (A6, F11); --dry-run reconciles nothing.
+	if mode == reconcilerV2 && !controllerMode && !dryRunMode {
+		fmt.Fprintln(stderr, "gc start: session_reconciler = \"v2\" has no one-shot reconcile; run the controller (gc start --foreground) or remove the key") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cityName := loadedCityName(cfg, cityPath)
 
@@ -996,7 +1015,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
 		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
-			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
+			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, defaultConfigDebounce, recorder, eventProv, stdout, stderr)
 	}
 
 	// One-shot reconciliation (default): no drain (kill is fine).

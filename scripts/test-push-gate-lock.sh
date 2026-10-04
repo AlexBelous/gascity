@@ -180,6 +180,7 @@ FDSPAN_OUT="$(LIB="$LIB" DIR="$WORK/fdspan-slots" ANCHOR="$WORK/fdspan-anchor" \
     PUSH_GATE_MAX_CONCURRENT=1 PUSH_GATE_MAX_WAIT_SECONDS=5 PUSH_GATE_POLL_SECONDS=1 \
     bash -c '
         . "$LIB"
+        PUSH_GATE_FD_SPAN=16
         : >"$ANCHOR"
         for (( n = PUSH_GATE_FD_BASE; n < PUSH_GATE_FD_BASE + PUSH_GATE_FD_SPAN; n++ )); do
             eval "exec $n<>\"\$ANCHOR\"" || { echo SETUP_FAILED; exit 0; }

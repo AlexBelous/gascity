@@ -230,13 +230,14 @@ func (c startCandidate) logicalTemplate(cfg *config.City) string {
 }
 
 type preparedStart struct {
-	candidate     startCandidate
-	cfg           runtime.Config
-	coreHash      string
-	coreBreakdown runtime.BreakdownV1
-	liveHash      string
-	provisionHash string
-	launchHash    string
+	admissionContext context.Context
+	candidate        startCandidate
+	cfg              runtime.Config
+	coreHash         string
+	coreBreakdown    runtime.BreakdownV1
+	liveHash         string
+	provisionHash    string
+	launchHash       string
 	// promptDelivered reports whether a delivery mechanism was selected for
 	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
 	// — a pure routing decision, not I/O: it means delivery was
@@ -1660,7 +1661,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
+	startedFresh, err := startPreparedStartCandidate(sessionpkg.WithCapacityAdmission(startCtx, item.admissionContext), item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
@@ -2663,6 +2664,14 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	if errors.Is(result.err, sessionpkg.ErrCapacityAdmission) {
+		// The preflight can lose a race to another SID's grant spend. No provider
+		// launch occurred, so retain the durable intent and conversation identity.
+		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "capacity_deferred", result.started, result.finished, result.err, result.phases)
+		return
+	}
+
 	// Every exit from this function is a failed start attempt, so record it
 	// here once rather than at each arm below — mirrors the single call site
 	// on the success path (commitStartResultTraced) and closes the gap where
@@ -3532,18 +3541,17 @@ func executePlannedStartsTraced(
 						}
 					}
 				}
-				if candidate.info.PoolManaged {
-					allowed, reason := claimPoolStartAdmission(cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, store)
-					if !allowed {
-						if release != nil {
-							release()
-						}
-						if done != nil {
-							done()
-						}
-						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), reason, time.Time{}, time.Time{}, nil)
-						continue
+
+				admittedCtx, allowed, reason := sessionpkg.AdmitCapacityStart(ctx, cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, store)
+				if !allowed {
+					if release != nil {
+						release()
 					}
+					if done != nil {
+						done()
+					}
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), reason, time.Time{}, time.Time{}, nil)
+					continue
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
@@ -3558,6 +3566,7 @@ func executePlannedStartsTraced(
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)
 					continue
 				}
+				item.admissionContext = admittedCtx
 				if startOpts.async {
 					asyncPrepared = append(asyncPrepared, asyncPreparedStart{item: *item, release: release, done: done})
 				} else {

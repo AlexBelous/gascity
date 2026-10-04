@@ -22,6 +22,7 @@ var ErrOperationUnsupported = errors.New("worker operation is unsupported")
 // session target that has no bead-backed session identity.
 type RuntimeHandleConfig struct {
 	Provider     runtime.Provider
+	CityPath     string
 	SessionName  string
 	ProviderName string
 	Transport    string
@@ -34,6 +35,7 @@ type RuntimeHandleConfig struct {
 // pending interaction operations.
 type RuntimeHandle struct {
 	provider     runtime.Provider
+	cityPath     string
 	sessionName  string
 	providerName string
 	transport    string
@@ -57,6 +59,7 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 	}
 	return &RuntimeHandle{
 		provider:     cfg.Provider,
+		cityPath:     cfg.CityPath,
 		sessionName:  strings.TrimSpace(cfg.SessionName),
 		providerName: strings.TrimSpace(cfg.ProviderName),
 		transport:    strings.TrimSpace(cfg.Transport),
@@ -92,6 +95,13 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, 
 	if strings.TrimSpace(startCfg.Command) == "" {
 		err = fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
 		return err
+	}
+	route := startCfg.Env["GC_TEMPLATE"]
+	// Runtime-only handles have no durable SID, so a managed cold start cannot
+	// spend a grant. An unmanaged protected route keeps its existing behavior.
+	allowed, reason := sessionpkg.ClaimCapacityStart(h.cityPath, route, "", time.Now().UTC(), h.provider, nil)
+	if !allowed {
+		return sessionpkg.CapacityAdmissionError(reason)
 	}
 	err = h.provider.Start(ctx, h.sessionName, startCfg)
 	return err

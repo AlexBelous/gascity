@@ -54,6 +54,7 @@ go_library(
 go_test(
     name = "worker_test",
     srcs = [
+        "admission_start_test.go",
         "activity_memo_test.go",
         "factory_resolved_test.go",
         "factory_test.go",

@@ -351,6 +351,13 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if sessionKey == "" && freshCmd == resumeCommand {
 		return false, nil
 	}
+	ctx, admitErr := m.admitRuntime(ctx, id, b.Metadata["template"])
+	if admitErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, admitErr
+	}
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
@@ -368,7 +375,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+	if err := m.startRuntime(ctx, sessName, cfg); err != nil {
 		if unroute != nil {
 			unroute()
 		}
@@ -551,6 +558,14 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
 
+	ctx, admitErr := m.admitRuntime(ctx, id, b.Metadata["template"])
+	if admitErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return admitErr
+	}
+
 	cfg := hints
 	cfg.Command = resumeCommand
 	if cfg.WorkDir == "" {
@@ -598,7 +613,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		}
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+	if err := m.startRuntime(ctx, sessName, cfg); err != nil {
 		// A capacity refusal is also a startup death, but the endpoint refused
 		// the launch: that says nothing about the resume key, so it falls
 		// through to the plain failure below instead of the stale-key recovery.
@@ -680,6 +695,14 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
 
+	ctx, admitErr := m.admitRuntime(ctx, id, b.Metadata["template"])
+	if admitErr != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return admitErr
+	}
+
 	cfg := hints
 	cfg.Command = resumeCommand
 	if cfg.WorkDir == "" {
@@ -728,7 +751,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		}
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+	if err := m.startRuntime(ctx, sessName, cfg); err != nil {
 		switch {
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).

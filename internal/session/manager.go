@@ -1001,6 +1001,15 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return nil
 		}
 
+		admittedCtx, admitErr := m.admitRuntime(ctx, b.ID, template)
+		if admitErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(admitErr, rbErr)
+			}
+			return admitErr
+		}
+		ctx = admittedCtx
+
 		// If the provider supports Generate & Pass, inject --session-id into command.
 		startCommand := command
 		if resume.SessionIDFlag != "" && sessionKey != "" {
@@ -1033,7 +1042,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
-		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		if err := m.startRuntime(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
 				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
 					return metaErr

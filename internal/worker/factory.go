@@ -49,6 +49,7 @@ type Factory struct {
 	manager               *sessionpkg.Manager
 	store                 beads.Store
 	provider              runtime.Provider
+	cityPath              string
 	searchPaths           []string
 	recorder              events.Recorder
 	usageSink             usage.Sink
@@ -100,6 +101,7 @@ func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error
 		manager:               manager,
 		store:                 cfg.Store,
 		provider:              cfg.Provider,
+		cityPath:              cfg.CityPath,
 		searchPaths:           append([]string(nil), cfg.SearchPaths...),
 		recorder:              cfg.Recorder,
 		usageSink:             usageSink,
@@ -248,6 +250,7 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 	}
 	return NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:     f.provider,
+		CityPath:     f.cityPath,
 		SessionName:  sessionName,
 		ProviderName: providerName,
 		Transport:    transport,

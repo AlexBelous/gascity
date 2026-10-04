@@ -85,14 +85,66 @@ serialize real `Observe` results from controlled provider/process boundaries.
 explicit, hash-pinned consumer source. Negative cases must return `count: null`,
 not a free slot; protected roles stay covered, never drain candidates.
 
+## Shared start admission
+
+The session-owned `ClaimCapacityStart` fence now requires snapshot v5,
+`managed-live-census/v1`, complete non-null counts, matching full row objects,
+unique managed SIDs, cap 1..2, and UTC publication/observation/oldest evidence
+ages in 0..60 seconds. It rejects these before spending any grant. A recent
+publication cannot refresh old underlying evidence.
+
+`AdmitCapacityStart` spends one SID claim under the existing reader/writer flock
+before continuation reset or orphan cleanup. An opaque invocation-local context
+proof carries that same claim from controller preparation to the manager. The
+proof is bound to city, exact logical route and SID; it expires at oldest
+evidence +60s and is consumed once before the provider call. It is never an
+environment credential or durable-row permission. Failed preparation or an
+ambiguous provider start retain the ledger claim until the reader expires it;
+a managed stale-key retry cannot reuse that consumed claim. Cities without
+scheduler state keep existing fresh-retry behavior.
+
+Controller pool, exact named and dedicated candidates share this boundary.
+Direct manager create, ordinary wake/resume, runtime-only resume and fresh-retry
+paths admit before start effects. A local denial releases ACP routing and does
+not reset conversation identity, terminate an orphan, drain a target, or become
+a controller wake failure. Runtime-only cold targets with no durable SID cannot
+spend a managed grant. Missing authoritative `GC_TEMPLATE` is unknown rather
+than an unmanaged runtime alias; an explicit protected template remains allowed.
+The ledger schema, shared lock, retained SID claims and start-spacing policy are
+unchanged. New-start CLI/API calls still use the canonical worker factory.
+
+## Scan-scope decision required before deployment
+
+The Cloud readback at 2026-10-04T08:13:21Z proves controller PID435977 and currently
+observed launchers/agent roots use UID1000. It does not prove the ownership scope
+of future launches. The same inspection found seven unreadable environments
+under UID1000, in addition to cross-UID failures. UID-only filtering therefore
+neither fixes completeness nor establishes safe exclusions. Generic subprocess,
+tmux and ACP launchers can execute configured commands; this source does not
+promise those commands cannot change credentials or escape an inferred tree.
+
+Options for owner review (neither applied by this package):
+
+| Option | Required reviewed work | Consequence |
+|---|---|---|
+| Keep strict host-wide observation and the deployment hold | No privileges or exclusions change | Current permission failures remain UNKNOWN; no autonomous managed start acceptance |
+| Separate bounded observation helper (recommended design to review) | A fixed reviewed executable using only the required process-read capabilities in the host namespaces, a caller-restricted local interface, typed/redacted output, syscall restrictions excluding signalling, tracing, memory writes and process launch, plus exact source/controller binding and complete live readback | Retains host-wide orphan coverage; requires explicit privilege/interface approval and a separate implementation/test/recovery review |
+| Enforced launcher ownership boundary | Prove and enforce every provider/launcher/future child and orphan's membership, including credential changes and reparenting; test unreadable in-scope processes as UNKNOWN | Larger launch-contract change; current UID/cgroup snapshots alone are insufficient |
+
+Linux documents `/proc/PID/environ` access as a ptrace `PTRACE_MODE_READ_FSCREDS`
+check ([proc_pid_environ(5)](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html)).
+`CAP_SYS_PTRACE` has powers beyond read-only observation, including tracing and
+process memory writes ([capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html)).
+It must not be granted to the whole controller or treated as a read-only switch.
+The proposed helper still needs actual privilege/namespace/LSM verification:
+capability names alone do not establish complete coverage. Any unreadable or
+raced potentially relevant PID continues to make the result incomplete.
+
 ## Remaining release gates
 
-This observation adapter is not an operational admission fix. The existing
-native fence does not yet enforce snapshot v5 / census v1 / oldest-evidence
-freshness of 60 seconds. That compatibility repair must have tests against
-`claimPoolStartAdmission` before spending a grant. The existing reservation
-ledger, lock, SID claims, and start spacing remain the authority boundary.
-Named/dedicated starts are not covered merely because the pool-managed caller
-uses that fence. Independent caller coverage, strict deployment scan scope,
-review, and installation remain separate release gates. No production install
-or worker start is authorized by this source package.
+Observer and common start fence are source work under #27, not production
+acceptance. Required gates still include exact-source independent review,
+bounded broader checks, an approved and verified strict deployment scan scope,
+source/controller binary agreement, recovery and coordinated installation.
+Darwin remains unsupported for strict coverage. No production install, privilege
+change, worker start or #32 cutover is authorized by this source package.

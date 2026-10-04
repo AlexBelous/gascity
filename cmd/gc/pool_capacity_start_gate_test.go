@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestLiveCityPoolAdmissionProviderScanner(t *testing.T) {
 // One shared admission must bound the actual provider starts even when two
 // already-assigned pool sessions request resume independently of scale_check.
 func TestExecutePlannedStartsTraced_PoolResumeUsesSharedAdmission(t *testing.T) {
-	now := time.Date(2026, 9, 27, 1, 40, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	cityPath := t.TempDir()
 	writePoolScope(t, cityPath)
 	writeJSON := func(name string, value any) {
@@ -56,6 +57,9 @@ func TestExecutePlannedStartsTraced_PoolResumeUsesSharedAdmission(t *testing.T) 
 		path := filepath.Join(cityPath, ".gc", "runtime", name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
+		}
+		if strings.HasSuffix(name, "/snapshot.json") {
+			value = versionedPoolSnapshotFixture(value)
 		}
 		data, err := json.Marshal(value)
 		if err != nil {
@@ -154,8 +158,8 @@ func TestClaimPoolStartAdmission_FailsClosedOnUnsafeCapacityState(t *testing.T) 
 		{"yellow", "yellow", []any{}, true, 0, "capacity_not_admissible"},
 		{"red", "red", []any{}, true, 0, "capacity_not_admissible"},
 		{"missing_ledger", "green", []any{}, false, 0, "capacity_state_unavailable"},
-		{"stale_snapshot", "green", []any{}, true, 16 * time.Minute, "capacity_snapshot_stale"},
-		{"invalid_active", "green", []any{map[string]any{"id": "q", "route": "deal-qualifier", "state": "asleep"}}, true, 0, "capacity_active_invalid"},
+		{"stale_snapshot", "green", []any{}, true, 16 * time.Minute, "capacity_census_stale"},
+		{"invalid_active", "green", []any{map[string]any{"id": "q", "route": "deal-qualifier", "state": "asleep"}}, true, 0, "capacity_census_row_invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := t.TempDir()
@@ -165,6 +169,9 @@ func TestClaimPoolStartAdmission_FailsClosedOnUnsafeCapacityState(t *testing.T) 
 				path := filepath.Join(cityPath, ".gc", "runtime", name)
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
+				}
+				if strings.HasSuffix(name, "/snapshot.json") {
+					value = versionedPoolSnapshotFixture(value)
 				}
 				data, err := json.Marshal(value)
 				if err != nil {
@@ -200,7 +207,7 @@ func TestClaimPoolStartAdmission_ConfiguredCityMissingAllRuntimeState(t *testing
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte("[queue]\nmanaged_exact_routes = [\"deal-executor\"]\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("[queue]\nmanaged_exact_routes = [\"deal-executor\", \"deal-qualifier\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	allowed, reason := claimPoolStartAdmission(cityPath, "deal-executor", "session-1", time.Now().UTC(), runtime.NewFake(), beads.NewMemStore())
@@ -254,7 +261,7 @@ func writePoolScope(t *testing.T, cityPath string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("[queue]\nmanaged_exact_routes = [\"deal-executor\"]\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("[queue]\nmanaged_exact_routes = [\"deal-executor\", \"deal-qualifier\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -277,6 +284,9 @@ func writePoolAdmissionState(t *testing.T, cityPath string, now time.Time, capac
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
+		if strings.HasSuffix(name, "/snapshot.json") {
+			value = versionedPoolSnapshotFixture(value)
+		}
 		data, err := json.Marshal(value)
 		if err != nil {
 			t.Fatal(err)
@@ -295,6 +305,9 @@ func TestClaimPoolStartAdmission_RejectsLiveProcessMissingFromSnapshot(t *testin
 		path := filepath.Join(cityPath, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
+		}
+		if strings.HasSuffix(name, "/snapshot.json") {
+			value = versionedPoolSnapshotFixture(value)
 		}
 		data, err := json.Marshal(value)
 		if err != nil {
@@ -353,7 +366,7 @@ func TestClaimPoolStartAdmission_RejectsLiveProcessMissingFromSnapshot(t *testin
 }
 
 func TestExecutePlannedStartsTraced_AssignedPoolResumeSpendsOneGrant(t *testing.T) {
-	now := time.Date(2026, 9, 27, 1, 40, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	cityPath := t.TempDir()
 	writePoolScope(t, cityPath)
 	write := func(name string, value any) {
@@ -361,6 +374,9 @@ func TestExecutePlannedStartsTraced_AssignedPoolResumeSpendsOneGrant(t *testing.
 		path := filepath.Join(cityPath, ".gc", "runtime", name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
+		}
+		if strings.HasSuffix(name, "/snapshot.json") {
+			value = versionedPoolSnapshotFixture(value)
 		}
 		data, err := json.Marshal(value)
 		if err != nil {
@@ -414,4 +430,103 @@ func TestExecutePlannedStartsTraced_AssignedPoolResumeSpendsOneGrant(t *testing.
 	if woken != 1 {
 		t.Fatalf("started %d assigned pool resumes with one grant; want 1", woken)
 	}
+}
+
+func TestExecutePlannedStartsTraced_DedicatedResumeSpendsOneGrant(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	cityPath := t.TempDir()
+	writePoolScope(t, cityPath)
+	write := func(name string, value any) {
+		t.Helper()
+		path := filepath.Join(cityPath, ".gc", "runtime", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasSuffix(name, "/snapshot.json") {
+			value = versionedPoolSnapshotFixture(value)
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("capacity-scheduler-v2/snapshot.json", map[string]any{
+		"generated_at": now.Format(time.RFC3339), "zone": "green",
+		"hysteresis": map[string]any{"green_streak": 3, "cooldown_until": now.Add(-time.Hour).Format(time.RFC3339)},
+		"capacity":   map[string]any{"managed_active_count": 0, "managed_worker_cap": 1, "over_cap_by": 0, "active": []any{}},
+	})
+	write("pool-capacity-admission/reservations.json", map[string]any{
+		"schema": 1, "reservations": map[string]any{
+			"deal-executor": map[string]any{"slots": 1, "active_at_reservation": 0, "created_at": now.Format(time.RFC3339)},
+		},
+	})
+	cfg := &config.City{Agents: []config.Agent{{Name: "deal-executor", MaxActiveSessions: intPtr(2)}}}
+	store := beads.NewMemStore()
+	provider := runtime.NewFake()
+	desired := map[string]TemplateParams{}
+	var candidates []startCandidate
+	for _, name := range []string{"deal-executor-1", "deal-executor-2"} {
+		tp := TemplateParams{Command: name, SessionName: name, TemplateName: "deal-executor"}
+		desired[name] = tp
+		created, err := store.Create(beads.Bead{
+			ID: name + "-id", Title: name, Type: sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"state": "asleep", "session_name": name, "template": "deal-executor",
+				"generation": "1", "continuation_epoch": "1",
+				"instance_token": "tok-" + name, "session_key": "prior-key", "started_config_hash": "prior-hash",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Create(beads.Bead{
+			ID: "work-" + name, Title: "assigned work", Type: "task", Status: "in_progress",
+			Assignee: created.ID, Metadata: map[string]string{"gc.routed_to": "deal-executor"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, created), tp: tp})
+	}
+	woken := executePlannedStartsTraced(context.Background(), candidates, cfg, desired,
+		provider, store, "test-city", cityPath, &clock.Fake{Time: now},
+		events.Discard, 5*time.Second, io.Discard, io.Discard, nil)
+	if woken != 1 {
+		t.Fatalf("started %d dedicated resumes with one grant; want 1", woken)
+	}
+	for _, candidate := range candidates {
+		if provider.IsRunning(candidate.name()) {
+			continue
+		}
+		b, err := store.Get(candidate.info.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Status == "closed" || b.Metadata["session_key"] != "prior-key" || b.Metadata["started_config_hash"] != "prior-hash" || b.Metadata["wake_attempts"] != "" || b.Metadata["continuation_reset_pending"] != "" {
+			t.Fatalf("deferred dedicated identity changed: %v", b.Metadata)
+		}
+	}
+}
+
+// Keep the existing grant/caller fixtures on the reader's current contract.
+// Version rejection cases deliberately bypass this helper in the v5 test.
+func versionedPoolSnapshotFixture(value any) any {
+	snapshot, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	capacity, ok := snapshot["capacity"].(map[string]any)
+	if !ok {
+		return value
+	}
+	snapshot["schema_version"] = 5
+	snapshot["live_census"] = map[string]any{
+		"contract": "managed-live-census/v1", "complete": true,
+		"observed_at": snapshot["generated_at"], "evidence_at": snapshot["generated_at"],
+		"count": capacity["managed_active_count"], "active": capacity["active"],
+	}
+	return snapshot
 }

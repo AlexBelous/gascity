@@ -300,9 +300,9 @@ func validateControllerObservationReply(r controllerObservationReply, city, sour
 	return nil
 }
 
-// Only two authenticated, untruncated helper frames proving transient host
-// enumeration/stat disappearance permit another whole attempt. All other
-// process/provider/contract failures remain terminal UNKNOWN.
+// Only two authenticated, untruncated helper frames describing enumeration
+// change or typed stat/environment read disappearance permit another whole
+// attempt. All other process/provider/contract failures remain terminal UNKNOWN.
 func controllerObservationRetryable(r controllerObservationReply) bool {
 	if !r.ProviderComplete || r.ProcessComplete || len(r.ProcessDiagnostics) != 2 || len(r.UnknownReasons) == 0 {
 		return false
@@ -334,7 +334,9 @@ func controllerObservationRetryable(r controllerObservationReply) bool {
 			if e.Reason == "coverage_changed" && e.Operation == "enumerate" && e.PID == 0 && e.Errno == 0 {
 				continue
 			}
-			if e.Reason != "process_unavailable" || e.Operation != "stat" || e.PID <= 0 || e.Errno != 2 {
+			statGone := e.Operation == "stat" && e.Errno == 2
+			environmentGone := e.Operation == "environ" && e.Errno == 3
+			if e.Reason != "process_unavailable" || e.PID <= 0 || (!statGone && !environmentGone) {
 				return false
 			}
 		}

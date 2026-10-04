@@ -160,7 +160,7 @@ func controllerRetryFrame(name string, partial bool) (procobserver.Response, err
 }
 
 func TestControllerObservationRetriesWholeAttempt(t *testing.T) {
-	for _, mode := range []string{"transient", "second frame only", "all incomplete"} {
+	for _, mode := range []string{"transient", "second frame only", "all incomplete", "transient environ ESRCH", "second environ ESRCH frame only", "all environ ESRCH incomplete"} {
 		t.Run(mode, func(t *testing.T) {
 			svc, _, p := controllerRetryFixture(t)
 			reads, lists, policyLoads := 0, 0, 0
@@ -175,11 +175,16 @@ func TestControllerObservationRetriesWholeAttempt(t *testing.T) {
 					t.Fatal("retry created a new request context")
 				}
 				reads++
-				partial := mode == "all incomplete" || reads <= 2
-				if mode == "second frame only" && reads == 1 {
+				partial := strings.HasPrefix(mode, "all ") || reads <= 2
+				if strings.HasPrefix(mode, "second ") && reads == 1 {
 					partial = false
 				}
 				r, err := controllerRetryFrame(p.name, partial)
+				if partial && strings.Contains(mode, "environ ESRCH") {
+					r.Errors[0].Operation = "environ"
+					r.Errors[0].Errno = 3
+					r.Errors[0].PID = 400 + reads
+				}
 				if reads == 3 {
 					selectedStart = r.StartedAt
 				}
@@ -199,16 +204,23 @@ func TestControllerObservationRetriesWholeAttempt(t *testing.T) {
 				}
 			}
 			wantReads := 4
-			if mode == "all incomplete" {
+			if strings.HasPrefix(mode, "all ") {
 				wantReads = 6
 			}
 			if reads != wantReads || lists != wantReads || policyLoads != 1 || len(r.ProcessDiagnostics) != 2 {
 				t.Fatalf("whole attempts not bounded/fresh: reads=%d metadata=%d policy=%d diagnostics=%d", reads, lists, policyLoads, len(r.ProcessDiagnostics))
 			}
-			if !r.ProviderComplete || r.ProcessComplete != (mode != "all incomplete") || len(r.Processes) != 1 || r.Processes[0].PID != 202 || len(r.Sessions) != 1 || r.Sessions[0].SessionID != "selected" {
+			if !r.ProviderComplete || r.ProcessComplete != !strings.HasPrefix(mode, "all ") || len(r.Processes) != 1 || r.Processes[0].PID != 202 || len(r.Sessions) != 1 || r.Sessions[0].SessionID != "selected" {
 				t.Fatalf("selected attempt mixed or promoted: %+v", r)
 			}
-			if mode != "all incomplete" {
+			if mode == "all environ ESRCH incomplete" {
+				for i, d := range r.ProcessDiagnostics {
+					if d.Complete || d.Errors[0].Operation != "environ" || d.Errors[0].Errno != 3 || d.Errors[0].PID != 405+i {
+						t.Fatalf("persistent ESRCH lost final-attempt evidence: %+v", d)
+					}
+				}
+			}
+			if !strings.HasPrefix(mode, "all ") {
 				if r.ObservedAt.Before(earlierFinish) || r.ObservedAt.After(selectedStart) || r.ProcessDiagnostics[0].StartedAt.Before(r.ObservedAt) || !r.ProcessDiagnostics[0].Complete || !r.ProcessDiagnostics[1].Complete {
 					t.Fatal("successful attempt retained earlier frames or wrong interval")
 				}
@@ -222,7 +234,7 @@ func TestControllerObservationRetriesWholeAttempt(t *testing.T) {
 }
 
 func TestControllerObservationRetryTerminalFailures(t *testing.T) {
-	for _, mode := range []string{"pin", "future", "truncated", "permission", "environment", "limit", "zero pid", "unidentified", "provider incarnation", "tracking", "empty diagnostics"} {
+	for _, mode := range []string{"pin", "future", "truncated", "permission", "environment ENOENT", "environment EACCES", "environment EPERM", "environment zero pid", "environment malformed", "mixed environment ESRCH and EPERM", "limit", "zero pid", "unidentified", "provider incarnation", "tracking", "empty diagnostics"} {
 		t.Run(mode, func(t *testing.T) {
 			svc, _, p := controllerRetryFixture(t)
 			reads := 0
@@ -239,8 +251,24 @@ func TestControllerObservationRetryTerminalFailures(t *testing.T) {
 					r.ErrorsTotal++
 				case "permission":
 					r.Errors[0].Errno = 13
-				case "environment":
+				case "environment ENOENT":
 					r.Errors[0].Operation = "environ"
+				case "environment EACCES", "environment EPERM", "environment zero pid", "environment malformed", "mixed environment ESRCH and EPERM":
+					r.Errors[0].Operation = "environ"
+					r.Errors[0].Errno = 3
+					switch mode {
+					case "environment EACCES":
+						r.Errors[0].Errno = 13
+					case "environment EPERM":
+						r.Errors[0].Errno = 1
+					case "environment zero pid":
+						r.Errors[0].PID = 0
+					case "environment malformed":
+						r.Errors[0].Reason = "environment_malformed"
+					case "mixed environment ESRCH and EPERM":
+						r.Errors = append(r.Errors, procobserver.EvidenceError{Reason: "process_unavailable", Operation: "environ", PID: 405, Errno: 1})
+						r.ErrorsTotal = len(r.Errors)
+					}
 				case "limit":
 					r.Errors[0].Reason = "process_limit"
 				case "zero pid":
@@ -284,6 +312,42 @@ func TestControllerObservationRetryGenerationFence(t *testing.T) {
 	}
 	if r := svc.observe(context.Background()); reads != 2 || r.ProviderComplete || r.ProcessComplete {
 		t.Fatalf("generation changed but retry continued: reads=%d %+v", reads, r)
+	}
+}
+
+func TestControllerObservationEnvironmentRetryFences(t *testing.T) {
+	for _, mode := range []string{"generation", "deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, cs, p := controllerRetryFixture(t)
+			deadline := time.Now().Add(20 * time.Second)
+			ctx, cancel := context.WithDeadline(context.Background(), deadline)
+			defer cancel()
+			reads := 0
+			svc.readEvidence = func(ctx context.Context, _ procobserver.Policy) (procobserver.Response, error) {
+				reads++
+				if got, ok := ctx.Deadline(); !ok || !got.Equal(deadline) {
+					t.Fatal("environment retry extended the caller's outer deadline")
+				}
+				if mode == "generation" && reads == 2 {
+					cs.mu.Lock()
+					cs.observationGeneration++
+					cs.sp = runtime.NewFake()
+					cs.mu.Unlock()
+				}
+				r, err := controllerRetryFrame(p.name, true)
+				r.Errors[0].Operation = "environ"
+				r.Errors[0].Errno = 3
+				return r, err
+			}
+			r := svc.observe(ctx)
+			wantReads := 6
+			if mode == "generation" {
+				wantReads = 2
+			}
+			if reads != wantReads || r.ProcessComplete || r.ProviderComplete != (mode == "deadline") {
+				t.Fatalf("environment retry crossed %s fence: reads=%d %+v", mode, reads, r)
+			}
+		})
 	}
 }
 

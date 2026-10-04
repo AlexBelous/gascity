@@ -241,7 +241,8 @@ check-residency-boundary:
 ## check-gomod-replace: block unreleased replace directives (pseudo-version, local path, git ref)
 ## Tripwire for the 2026-06-11 incident where PR #3489 shipped a pseudo-version replace
 ## (=> v1.0.5-0.20260611054652-dc0561af28e9) that violated the public-project release policy.
-## Policy: only released semver tags allowed; human-operator bypass required for exceptions.
+## Policy: only the approved beads v1.3.0 / SHOW da08 fork pair is allowed.
+## Public release workflows retain their separate no-replace gate.
 check-gomod-replace:
 	bash scripts/check-gomod-replace.sh go.mod
 

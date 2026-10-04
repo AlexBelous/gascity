@@ -16,8 +16,7 @@ package main
 //     so an out-of-tree provider cannot leak back here by accident;
 //   - the whole storage surface compiles identically with CGO on and off, so
 //     the pure-Go driver choice is a checked property rather than a comment;
-//   - the module graph carries no replace directive, so a build of this repo
-//     resolves the dependencies its manifest names and nothing else.
+//   - the module graph carries only the approved beads v1.3.0 fork replacement.
 //
 // The last two are what a downstream fork relies on. A fork appends its own
 // factory in its own tree; these arms are what keep the seam it appends to
@@ -42,6 +41,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/testpolicy/resourcecensus"
+	"golang.org/x/mod/modfile"
 )
 
 const (
@@ -202,15 +202,11 @@ func TestStorageSurfaceCompilesIdenticallyWithAndWithoutCGO(t *testing.T) {
 	}
 }
 
-// TestModuleGraphCarriesNoReplaceDirective is the module-graph guarantee a
-// downstream fork builds on: this repo's dependencies are exactly what its
-// manifest names, at released versions, with nothing redirected. It is the
-// tree-side companion to scripts/check-gomod-replace.sh's released-semver-only
-// policy — that script gates what a change adds, this arm gates the result.
+// TestModuleGraphCarriesOnlyApprovedBeadsReplace checks the exact module pin.
 //
 // A replace this parser cannot read is a violation, not a pass: silently
 // ignoring a line we cannot parse is how a guard goes blind.
-func TestModuleGraphCarriesNoReplaceDirective(t *testing.T) {
+func TestModuleGraphCarriesOnlyApprovedBeadsReplace(t *testing.T) {
 	root := moduleRoot(t)
 	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
@@ -220,12 +216,62 @@ func TestModuleGraphCarriesNoReplaceDirective(t *testing.T) {
 	if len(malformed) > 0 {
 		t.Fatalf("go.mod has replace directives this guard cannot parse (lines %v); a manifest we cannot read is a violation, not a pass", malformed)
 	}
-	for _, directive := range directives {
-		t.Errorf("go.mod line %d replaces %q with %q; this module graph carries no replace directive, so a build resolves the dependencies the manifest names and nothing else",
-			directive.line, directive.oldPath, directive.newPath)
+	if !approvedBeadsModulePin(goMod, directives) {
+		t.Errorf("go.mod must require github.com/steveyegge/beads v1.3.0 and carry only its exact approved SHOW fork replacement; got %+v", directives)
 	}
 	if anyGoWorkFile(t, root) {
 		t.Error("the tree commits a go.work; a workspace redirects the module graph for every go invocation started at or below it")
+	}
+}
+
+func approvedBeadsModulePin(goMod []byte, directives []replaceDirective) bool {
+	parsed, err := modfile.Parse("go.mod", goMod, nil)
+	if err != nil || len(directives) != 1 {
+		return false
+	}
+	requireCount := 0
+	for _, requirement := range parsed.Require {
+		if requirement.Mod.Path == "github.com/steveyegge/beads" {
+			requireCount++
+			if requirement.Mod.Version != "v1.3.0" {
+				return false
+			}
+		}
+	}
+	directive := directives[0]
+	return requireCount == 1 &&
+		directive.oldPath == "github.com/steveyegge/beads" &&
+		directive.oldVersion == "" &&
+		directive.newPath == "github.com/AlexBelous/beads" &&
+		directive.newVersion == "v1.1.1-0.20260928222722-da08f27390f1"
+}
+
+func TestApprovedBeadsModulePinRejectsDrift(t *testing.T) {
+	const required = "require github.com/steveyegge/beads v1.3.0\n"
+	const replacement = "replace github.com/steveyegge/beads => github.com/AlexBelous/beads v1.1.1-0.20260928222722-da08f27390f1\n"
+	cases := []struct {
+		name     string
+		manifest string
+		approved bool
+	}{
+		{"exact", required + replacement, true},
+		{"missing_replace", required, false},
+		{"newer_beads", strings.Replace(required, "v1.3.0", "v1.3.1", 1) + replacement, false},
+		{"different_fork_commit", required + strings.Replace(replacement, "da08f27390f1", "da08f27390f2", 1), false},
+		{"version_scoped_replace", required + strings.Replace(replacement, "beads =>", "beads v1.3.0 =>", 1), false},
+		{"extra_replace", required + replacement + "replace example.com/other => example.com/fork v1.0.0\n", false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			manifest := []byte("module example.com/test\n\ngo 1.26.0\n\n" + testCase.manifest)
+			directives, malformed := replaceDirectives(string(manifest))
+			if len(malformed) > 0 {
+				t.Fatalf("fixture has malformed replacement: %v", malformed)
+			}
+			if approved := approvedBeadsModulePin(manifest, directives); approved != testCase.approved {
+				t.Errorf("approved = %t, want %t", approved, testCase.approved)
+			}
+		})
 	}
 }
 

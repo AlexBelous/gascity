@@ -33,14 +33,30 @@ var controllerObservationFlight = make(chan struct{}, 1)
 
 type controllerObservationReply struct {
 	observation.Observation
-	SourceRevision          string `json:"source_revision"`
-	ControllerBinding       string `json:"controller_binding"`
-	ControllerPID           int    `json:"controller_pid"`
-	ControllerBinarySHA256  string `json:"controller_binary_sha256"`
-	ControllerStartIdentity string `json:"controller_start_identity"`
-	ControllerBootID        string `json:"controller_boot_id"`
-	HelperBinarySHA256      string `json:"helper_binary_sha256"`
-	HelperPolicyDigest      string `json:"helper_policy_digest"`
+	SourceRevision          string                         `json:"source_revision"`
+	ControllerBinding       string                         `json:"controller_binding"`
+	ControllerPID           int                            `json:"controller_pid"`
+	ControllerBinarySHA256  string                         `json:"controller_binary_sha256"`
+	ControllerStartIdentity string                         `json:"controller_start_identity"`
+	ControllerBootID        string                         `json:"controller_boot_id"`
+	HelperBinarySHA256      string                         `json:"helper_binary_sha256"`
+	HelperPolicyDigest      string                         `json:"helper_policy_digest"`
+	ProcessDiagnostics      []controllerProcessDiagnostics `json:"process_diagnostics,omitempty"`
+}
+
+// The two independently decoded helper frames retain only bounded, redacted
+// diagnostics. They do not replace the provider/process join or authorize it.
+type controllerProcessDiagnostics struct {
+	StartedAt               time.Time                    `json:"started_at"`
+	FinishedAt              time.Time                    `json:"finished_at"`
+	Complete                bool                         `json:"complete"`
+	EnumeratedCountBefore   int                          `json:"enumerated_count_before"`
+	EnumeratedCountAfter    int                          `json:"enumerated_count_after"`
+	EnumerationDigestBefore string                       `json:"enumeration_digest_before"`
+	EnumerationDigestAfter  string                       `json:"enumeration_digest_after"`
+	Errors                  []procobserver.EvidenceError `json:"errors"`
+	ErrorsTotal             int                          `json:"errors_total"`
+	ErrorsTruncated         bool                         `json:"errors_truncated"`
 }
 
 type controllerSocketOptions struct {
@@ -48,14 +64,15 @@ type controllerSocketOptions struct {
 }
 
 type controllerObservationService struct {
-	ctx         context.Context
-	city        string
-	mu          sync.Mutex
-	state       *controllerState
-	policy      *procobserver.Policy
-	loadPolicy  func() (procobserver.Policy, error)
-	checkCaller func(procobserver.Policy) error
-	collect     func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply
+	ctx          context.Context
+	city         string
+	mu           sync.Mutex
+	state        *controllerState
+	policy       *procobserver.Policy
+	loadPolicy   func() (procobserver.Policy, error)
+	checkCaller  func(procobserver.Policy) error
+	readEvidence func(context.Context, procobserver.Policy) (procobserver.Response, error)
+	collect      func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply
 }
 
 func newControllerObservationService(ctx context.Context, city string) *controllerObservationService {
@@ -64,13 +81,25 @@ func newControllerObservationService(ctx context.Context, city string) *controll
 		return procobserver.LoadPolicy(controllerObservationPolicyPath, commit)
 	}
 	s.checkCaller = procobserver.CheckCaller
+	s.readEvidence = procobserver.ReadContext
 	s.collect = func(ctx context.Context, p procobserver.Policy, sp runtime.Provider) controllerObservationReply {
+		diagnostics := []controllerProcessDiagnostics{}
 		observed := observation.ObserveProcessEvidenceContext(ctx, s.city, sp, func() observation.ProcessEvidence {
-			evidence, err := procobserver.ReadContext(ctx, p)
+			evidence, err := s.readEvidence(ctx, p)
+			// A contract/pin failure returns a zero Response, not trusted details.
+			if evidence.Schema != "" {
+				diagnostics = append(diagnostics, controllerProcessDiagnostics{
+					StartedAt: evidence.StartedAt, FinishedAt: evidence.FinishedAt, Complete: evidence.Complete,
+					EnumeratedCountBefore: evidence.EnumeratedCountBefore, EnumeratedCountAfter: evidence.EnumeratedCountAfter,
+					EnumerationDigestBefore: evidence.EnumerationDigestBefore, EnumerationDigestAfter: evidence.EnumerationDigestAfter,
+					Errors: append([]procobserver.EvidenceError{}, evidence.Errors...), ErrorsTotal: evidence.ErrorsTotal, ErrorsTruncated: evidence.ErrorsTruncated,
+				})
+			}
 			return observation.ProcessEvidence{Roots: evidence.ObservedRoots(), StartedAt: evidence.StartedAt, FinishedAt: evidence.FinishedAt, Err: err}
 		}, time.Now)
 		r := s.unknown("")
 		r.Observation = observed
+		r.ProcessDiagnostics = diagnostics
 		r.ControllerPID = p.CallerBinding.PID
 		r.ControllerBinarySHA256 = p.CallerBinding.ControllerBinarySHA256
 		r.ControllerStartIdentity = p.CallerBinding.StartTicks
@@ -227,6 +256,22 @@ func validateControllerObservationReply(r controllerObservationReply, city, sour
 	}
 	if r.ObservedAt.IsZero() || r.ProcessObservedAt.IsZero() || r.FinishedAt.IsZero() || r.ProcessObservedAt.Before(r.ObservedAt) || r.ProcessObservedAt.After(r.FinishedAt) || r.FinishedAt.Before(r.ObservedAt) || r.FinishedAt.After(now) || now.Sub(r.ObservedAt) > 60*time.Second || r.FinishedAt.Sub(r.ObservedAt) > 60*time.Second {
 		return fmt.Errorf("controller observation interval invalid or stale")
+	}
+	if len(r.ProcessDiagnostics) > 2 {
+		return fmt.Errorf("controller process diagnostics exceed frame bound")
+	}
+	for _, d := range r.ProcessDiagnostics {
+		if d.StartedAt.IsZero() || d.FinishedAt.Before(d.StartedAt) || d.StartedAt.Before(r.ObservedAt) || d.FinishedAt.After(r.FinishedAt) || d.FinishedAt.Sub(d.StartedAt) > procobserver.Timeout || d.EnumeratedCountBefore < 1 || d.EnumeratedCountBefore > procobserver.MaxProcesses || d.EnumeratedCountAfter < 1 || d.EnumeratedCountAfter > procobserver.MaxProcesses || !controllerObservationHex(d.EnumerationDigestBefore, 64) || !controllerObservationHex(d.EnumerationDigestAfter, 64) || d.Errors == nil || len(d.Errors) > 256 || d.ErrorsTotal < len(d.Errors) || d.ErrorsTruncated != (d.ErrorsTotal > len(d.Errors)) {
+			return fmt.Errorf("controller process diagnostics invalid")
+		}
+		for _, e := range d.Errors {
+			if len(e.Reason) < 1 || len(e.Reason) > 64 || len(e.Operation) < 1 || len(e.Operation) > 32 || e.PID < 0 || e.Errno < 0 || e.Errno > 4095 {
+				return fmt.Errorf("controller process diagnostic item invalid")
+			}
+		}
+		if r.ProcessComplete && (!d.Complete || d.ErrorsTotal != 0 || d.ErrorsTruncated || d.EnumeratedCountBefore != d.EnumeratedCountAfter || d.EnumerationDigestBefore != d.EnumerationDigestAfter) {
+			return fmt.Errorf("controller complete reply has partial helper diagnostics")
+		}
 	}
 	if r.ProviderComplete && r.ProcessComplete {
 		start, err := strconv.ParseUint(r.ControllerStartIdentity, 10, 64)

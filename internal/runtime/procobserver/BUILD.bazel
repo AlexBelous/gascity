@@ -28,7 +28,9 @@ go_test(
     srcs = [
         "client_linux_test.go",
         "client_test.go",
+        "client_transport_integration_test.go",
         "observation_test.go",
+        "observation_transport_integration_test.go",
         "testenv_import_test.go",
     ],
     data = ["//internal/runtime/observation:consumer_fixture"],

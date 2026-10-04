@@ -973,6 +973,7 @@ go_test(
         "controller_debug_log_test.go",
         "controller_hang_deadline_lint_test.go",
         "controller_observation_test.go",
+        "controller_observation_transport_integration_test.go",
         "controller_stop_client_test.go",
         "controller_test.go",
         "controller_watcher_fd_test.go",

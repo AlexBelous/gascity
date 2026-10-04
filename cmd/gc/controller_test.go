@@ -233,7 +233,23 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	var observerMu sync.Mutex
+	var observerCallback func(context.Context) controllerObservationReply
+	observe := func(ctx context.Context) controllerObservationReply {
+		observerMu.Lock()
+		callback := observerCallback
+		observerMu.Unlock()
+		if callback == nil {
+			return controllerObservationFixture(cityPath)
+		}
+		return callback(ctx)
+	}
+	setObserver := func(callback func(context.Context) controllerObservationReply) {
+		observerMu.Lock()
+		observerCallback = callback
+		observerMu.Unlock()
+	}
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh, controllerSocketOptions{observe: observe})
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -275,6 +291,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	default:
 		t.Fatal("reload did not enqueue poke")
 	}
+	assertControllerObservationSharedDispatcher(t, cityPath, setObserver)
 	if !tryStopController(cityPath, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, want true via fallback socket")
 	}

@@ -3,13 +3,13 @@ package ssh
 import (
 	"context"
 	"errors"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // fakeRunner captures the remote argv it is asked to run and returns a
@@ -105,18 +105,15 @@ func TestSSHArgs_MinimalEndpoint(t *testing.T) {
 }
 
 func TestSSHArgs_HostileRemoteArgumentStaysLiteral(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "injected")
-	payload := "value'; touch '" + marker + "'; echo 'value"
+	payload := "value'; touch /tmp/injected; echo 'value $(id)"
 	args := sshArgs(Endpoint{Host: "box"}, []string{"printf", "%s", payload})
-	output, err := exec.Command("sh", "-c", args[len(args)-1]).CombinedOutput()
-	if err != nil {
-		t.Fatalf("remote shell command: %v: %s", err, output)
+	command := args[len(args)-1]
+	want := `'printf' '%s' 'value'\''; touch /tmp/injected; echo '\''value $(id)'`
+	if command != want {
+		t.Fatalf("remote shell command = %q, want %q", command, want)
 	}
-	if string(output) != payload {
-		t.Fatalf("remote shell output = %q, want %q", output, payload)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("injection marker stat = %v, want not exist", err)
+	if got := shellquote.Split(command); !slices.Equal(got, []string{"printf", "%s", payload}) {
+		t.Fatalf("remote shell argv = %q, want literal payload", got)
 	}
 }
 

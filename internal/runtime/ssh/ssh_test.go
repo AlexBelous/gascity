@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // fakeRunner captures the remote argv it is asked to run and returns a
@@ -100,6 +101,30 @@ func TestSSHArgs_MinimalEndpoint(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("sshArgs = %v, want %v", got, want)
+	}
+}
+
+func TestSSHArgs_HostileRemoteArgumentStaysLiteral(t *testing.T) {
+	payload := "value'; touch /tmp/injected; echo 'value $(id)"
+	args := sshArgs(Endpoint{Host: "box"}, []string{"printf", "%s", payload})
+	command := args[len(args)-1]
+	want := `'printf' '%s' 'value'\''; touch /tmp/injected; echo '\''value $(id)'`
+	if command != want {
+		t.Fatalf("remote shell command = %q, want %q", command, want)
+	}
+	if got := shellquote.Split(command); !slices.Equal(got, []string{"printf", "%s", payload}) {
+		t.Fatalf("remote shell argv = %q, want literal payload", got)
+	}
+}
+
+func TestSSHArgs_StopsOptionParsingBeforeHostileHost(t *testing.T) {
+	host := "-oProxyCommand=touch /tmp/unexpected"
+	args := sshArgs(Endpoint{Host: host}, []string{"true"})
+	if got := args[len(args)-3]; got != "--" {
+		t.Fatalf("option terminator = %q, want --", got)
+	}
+	if got := args[len(args)-2]; got != host {
+		t.Fatalf("destination = %q, want %q", got, host)
 	}
 }
 

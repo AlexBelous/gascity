@@ -183,6 +183,86 @@ func (s *Server) storeResponse(key string, index uint64, v any) {
 	}
 }
 
+// responseCacheEpoch returns the current invalidation generation for key.
+// Callers that build a response outside responseCacheMu can retain this value
+// and use storeResponseAtEpoch so a concurrent control mutation cannot put a
+// pre-mutation body back into the cache.
+func (s *Server) responseCacheEpoch(key string) uint64 {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	return s.responseCacheEpochs[key]
+}
+
+// storeResponseAtEpoch stores v only when key has not been invalidated since
+// the caller started building it. It returns false when the build lost that
+// race and must be discarded.
+func (s *Server) storeResponseAtEpoch(key string, index uint64, v any, epoch uint64) bool {
+	if key == "" {
+		return false
+	}
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEpochs[key] != epoch {
+		return false
+	}
+	if s.responseCacheEntries == nil {
+		s.responseCacheEntries = make(map[string]responseCacheEntry)
+	}
+	now := time.Now()
+	if _, exists := s.responseCacheEntries[key]; !exists && len(s.responseCacheEntries) >= responseCacheMaxEntries {
+		s.evictResponseCache(now)
+	}
+	s.responseCacheEntries[key] = responseCacheEntry{index: index, storedAt: now, value: v}
+	return true
+}
+
+// invalidateResponseCache removes the named entries and advances their
+// generations. Advancing the generation also rejects an older build that is
+// already running and reaches storeResponseAtEpoch after this call.
+func (s *Server) invalidateResponseCache(keys ...string) {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEpochs == nil {
+		s.responseCacheEpochs = make(map[string]uint64)
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		delete(s.responseCacheEntries, key)
+		s.responseCacheEpochs[key]++
+	}
+}
+
+// alignResponseCacheVersion invalidates keys when their external source
+// generation changes. Unlike invalidateResponseCache, this is safe to call on
+// every read: an unchanged generation is a no-op. The epoch advance also
+// fences a response build that started before the external write was seen.
+func (s *Server) alignResponseCacheVersion(version string, keys ...string) {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEpochs == nil {
+		s.responseCacheEpochs = make(map[string]uint64)
+	}
+	if s.responseCacheVersions == nil {
+		s.responseCacheVersions = make(map[string]string)
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		previous, observed := s.responseCacheVersions[key]
+		if observed && previous == version {
+			continue
+		}
+		if observed {
+			delete(s.responseCacheEntries, key)
+			s.responseCacheEpochs[key]++
+		}
+		s.responseCacheVersions[key] = version
+	}
+}
+
 // evictResponseCache drops expired entries, and — if the cache is still
 // over cap — the single oldest-stored remaining entry. Called under
 // the cache mutex.
@@ -227,6 +307,73 @@ func (s *Server) cachedResponseWithinAge(key string, maxAge time.Duration) (any,
 		return nil, false
 	}
 	return entry.value, true
+}
+
+// staleResponse returns the cached value for key regardless of its age,
+// together with how old it is. Unlike cachedResponse / cachedResponseWithinAge
+// this never rejects an entry on staleness — it is the last-resort read for
+// callers implementing stale-while-revalidate (ra-4u2eqc): when both the
+// index/bucket-keyed and age-bounded lookups miss, this is what lets a
+// handler serve the last-known-good body instead of blocking on a rebuild.
+// Returns ok=false only when nothing has ever been cached under key (the
+// genuine cold-start case, where there is no stale value to serve).
+func (s *Server) staleResponse(key string) (value any, age time.Duration, ok bool) {
+	if key == "" {
+		return nil, 0, false
+	}
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEntries == nil {
+		return nil, 0, false
+	}
+	entry, found := s.responseCacheEntries[key]
+	if !found {
+		return nil, 0, false
+	}
+	return entry.value, time.Since(entry.storedAt), true
+}
+
+// staleResponseAs is staleResponse for typed callers: deep-copies the cached
+// value via a JSON roundtrip the same way cachedResponseAs does.
+func staleResponseAs[T any](s *Server, key string) (T, time.Duration, bool) {
+	v, age, ok := s.staleResponse(key)
+	if !ok {
+		var zero T
+		return zero, 0, false
+	}
+	body, ok := cloneCachedValue[T](v)
+	if !ok {
+		var zero T
+		return zero, 0, false
+	}
+	return body, age, true
+}
+
+// beginResponseRefresh reports whether the caller won the right to run a
+// background stale-while-revalidate refresh for key. Returns false when a
+// refresh for key is already in flight, so concurrent cache-miss requests
+// for the same key coalesce onto a single background rebuild instead of
+// each launching their own (ra-4u2eqc). Pair with endResponseRefresh, which
+// the refresh must call on every exit path (including panics via defer).
+func (s *Server) beginResponseRefresh(key string) bool {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseRefreshing == nil {
+		s.responseRefreshing = make(map[string]bool)
+	}
+	if s.responseRefreshing[key] {
+		return false
+	}
+	s.responseRefreshing[key] = true
+	return true
+}
+
+// endResponseRefresh releases the in-flight guard beginResponseRefresh took
+// for key, so the next cache-miss request may trigger another refresh.
+func (s *Server) endResponseRefresh(key string) {
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	delete(s.responseRefreshing, key)
 }
 
 // cachedResponseAs is a generic helper: retrieve the cached value and

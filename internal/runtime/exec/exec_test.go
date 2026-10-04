@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 const (
@@ -251,6 +254,12 @@ func TestStart(t *testing.T) {
 // stop call to stopFile. This is the shape of the sandbox leak: the box exists
 // by the time start reports failure.
 func startFailureScript(createFile, stopFile, startStderr string) string {
+	return startExitScript(createFile, stopFile, startStderr, 1)
+}
+
+// startExitScript is startFailureScript with the start op's exit code chosen by
+// the caller.
+func startExitScript(createFile, stopFile, startStderr string, code int) string {
 	return `
 op="$1"
 name="$2"
@@ -260,7 +269,7 @@ case "$op" in
     cat > /dev/null
     echo "$name" >> "` + createFile + `"
     echo "` + startStderr + `" >&2
-    exit 1
+    exit ` + strconv.Itoa(code) + `
     ;;
   stop) echo "stop $name" >> "` + stopFile + `" ;;
   *) exit 2 ;;
@@ -1528,7 +1537,7 @@ esac
 
 // TestProvider_StartCancellationInterruptsForegroundChild proves cooperative
 // cancellation reaches a foreground child of the adapter, not just the shell
-// leader. The adapter shell blocks in a foreground `sleep` far longer than the
+// leader. The adapter shell blocks in a foreground child longer than the
 // provider's WaitDelay (mimicking a `ready_delay_ms` readiness delay). A
 // process-only interrupt would be deferred by the shell until the child
 // returned, so WaitDelay would force-kill the shell before its rollback trap
@@ -1538,16 +1547,21 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
+	childInterruptFile := filepath.Join(dir, "child-interrupted")
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    %s -test.run '^TestProviderForegroundInterruptChild$' -- gc-foreground-interrupt-child %s %s
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, readyFile))
+	`, interruptFile, quote(testExecutable), quote(readyFile), quote(childInterruptFile)))
 	p := NewProvider(script)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1557,8 +1571,10 @@ esac
 		done <- p.Start(ctx, "test-sess", runtime.Config{})
 	}()
 
-	// Wait until the adapter is blocked in the foreground sleep.
-	readyDeadline := time.NewTimer(5 * time.Second)
+	// Only the foreground child publishes readiness, after installing its
+	// interrupt handler. A marker written by the shell before fork/exec does
+	// not establish that the child can receive the group interrupt.
+	readyDeadline := time.NewTimer(testutil.ExecRaceTimeout)
 	defer readyDeadline.Stop()
 	readyPoll := time.NewTicker(10 * time.Millisecond)
 	defer readyPoll.Stop()
@@ -1583,7 +1599,7 @@ esac
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Start error = %v, want context.Canceled", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.ExecRaceTimeout):
 		t.Fatal("Start did not return after cancellation; foreground child blocked the rollback trap")
 	}
 
@@ -1593,6 +1609,35 @@ esac
 	}
 	if got := strings.TrimSpace(string(data)); got != "interrupted" {
 		t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+	}
+	data, err = os.ReadFile(childInterruptFile)
+	if err != nil || strings.TrimSpace(string(data)) != "interrupted" {
+		t.Fatalf("foreground child interrupt marker = %q, err = %v; want interrupted", data, err)
+	}
+}
+
+// TestProviderForegroundInterruptChild runs only when the adapter invokes this
+// test executable as its foreground child. The timeout bounds a stranded helper
+// if cancellation regresses to signaling only the shell, whose trap cannot run
+// until the child returns. It does not change the provider's two-second grace.
+func TestProviderForegroundInterruptChild(t *testing.T) {
+	if len(os.Args) < 4 || os.Args[len(os.Args)-3] != "gc-foreground-interrupt-child" {
+		return
+	}
+	readyFile, interruptFile := os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
+	if err := os.WriteFile(readyFile, []byte("ready\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-interrupts:
+		if err := os.WriteFile(interruptFile, []byte("interrupted\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(testutil.ExecRaceTimeout):
+		t.Fatal("foreground child did not receive an interrupt")
 	}
 }
 

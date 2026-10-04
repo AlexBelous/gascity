@@ -49,9 +49,8 @@ func currentGCBinaryForTests(t *testing.T) string {
 			testGCBinaryErr = fmt.Errorf("getwd: %w", err)
 			return
 		}
-		cmd := exec.Command("go", "build", "-trimpath", "-o", realBinPath, ".")
+		cmd := exec.Command("go", "build", "-o", realBinPath, ".")
 		cmd.Dir = wd
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			testGCBinaryErr = fmt.Errorf("go build -o %s .: %w\n%s", realBinPath, err, string(out))

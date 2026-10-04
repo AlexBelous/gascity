@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -85,6 +87,18 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	if err := cacheLiveOr503(store); err != nil {
 		return nil, err
 	}
+	// gc suspend/resume normally reaches the API, whose PATCH handler
+	// invalidates this cache directly. If API discovery fails, however, the CLI
+	// deliberately falls back to updating suspension-state.json itself. Observe
+	// that file's write generation before any cache lookup so the next status
+	// read reflects the completed out-of-process mutation immediately.
+	if suspension, err := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath()); err == nil {
+		s.alignResponseCacheVersion(
+			suspension.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			"status",
+			"status?lite",
+		)
+	}
 	bp := input.toBlockingParams()
 	blocking := bp.isBlocking()
 	if blocking {
@@ -107,6 +121,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	if input.Lite {
 		cacheKey = "status?lite"
 	}
+	cacheEpoch := s.responseCacheEpoch(cacheKey)
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
@@ -115,14 +130,72 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
 			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
 		}
+		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
+		// both missed, so any entry that exists is older than
+		// statusResponseTTLFloor. buildStatusBody's fan-out (per-rig work
+		// counts, the session snapshot, StoreHealth's closed-history scan)
+		// measured ~3.65s on a 26-agent/1.2GB city — the same failure class
+		// that used to 503 the legacy runs/census endpoint at its internal
+		// budget. Rather than let a request pay that cost inline, serve the
+		// stale body immediately and refresh in the background so the next
+		// poll gets a fresh body. A genuine cold cache (nothing ever built)
+		// has nothing to serve here and falls through to the synchronous
+		// build below, same as before this change.
+		//
+		// CacheAgeS reports the GREATER of the two staleness signals: how
+		// long ago this response entry was built, and cacheAgeSeconds(store)
+		// — the age of the CachingStore snapshot the body was built from.
+		// Reporting only the response-entry age would let a recently built
+		// entry sitting on top of a lagging reconciler under-report true
+		// staleness and suppress the banner `gc status` renders above
+		// cacheAgeBannerThresholdSeconds; reporting only the store age would
+		// hide the SWR delay. The max preserves both.
+		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
+			return &IndexOutput[StatusBody]{
+				Index:     index,
+				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
+				Body:      body,
+			}, nil
+		}
 	}
 
 	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
-		s.storeResponse(cacheKey, bucket, resp)
+		s.storeResponseAtEpoch(cacheKey, bucket, resp, cacheEpoch)
 	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
+}
+
+// refreshStatusResponseInBackground kicks a detached rebuild of the /status
+// body for cacheKey and stores the result under the time bucket current at
+// completion, so the next poll (bucket or TTL-floor lookup) is served a
+// fresh body without any caller paying the rebuild cost inline (ra-4u2eqc).
+// Coalesced via beginResponseRefresh: a refresh already in flight for
+// cacheKey is not duplicated. Uses runBackground's detached context (bounded
+// by extmsgNotifyTimeout) rather than the triggering request's context,
+// since the refresh must outlive the request that happened to trigger it and
+// benefits every subsequent poller, not just this one.
+func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
+	if !s.beginResponseRefresh(cacheKey) {
+		return
+	}
+	cacheEpoch := s.responseCacheEpoch(cacheKey)
+	s.runBackground(func(ctx context.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				// The background refresh is best-effort: a panic here must not
+				// take the controller down. The request path's recover
+				// (withRecovery, middleware.go) does not cover detached
+				// goroutines, and the next poll simply rebuilds.
+				log.Printf("api: panic in background /status refresh: %v\n%s", r, debug.Stack())
+			}
+		}()
+		defer s.endResponseRefresh(cacheKey)
+		resp := s.buildStatusBody(ctx, lite)
+		s.storeResponseAtEpoch(cacheKey, responseCacheTimeBucket(time.Now()), resp, cacheEpoch)
+	})
 }
 
 // buildStatusBody constructs the status response body. ctx bounds the
@@ -189,7 +262,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			if rigName != "" {
 				perRigAgentTotals[rigName]++
 			}
-			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, sessionSnapshot)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
 			// An agent whose work runs under a relocated-graph wisp session is
@@ -1027,6 +1100,63 @@ func statusSessionStateInfo(info session.Info) session.State {
 	default:
 		return state
 	}
+}
+
+// statusRuntimeSessionName resolves the runtime session name an expanded agent
+// actually runs under.
+//
+// The canonical derivation (agent.SessionNameFor) is not the only name a
+// session may legitimately hold. An unaliased pool instance runs under a
+// bead-scoped name (<template>-<beadID>, PoolSessionName), and rows minted by
+// pre-release builds may carry a "-pool" step-aside name (poolRuntimeSessionName
+// in cmd/gc/session_name_lookup.go). Both are recorded on the session bead and
+// cannot be re-derived from the agent identity, so a status path that only
+// derives the canonical name reports a live seat as not running.
+//
+// Resolution order, strongest evidence first:
+//  1. a session bead sitting on the canonical name — today's behavior, kept
+//     exactly so canonically named sessions are unaffected;
+//  2. a session bead whose recorded agent identity IS this instance;
+//  3. for a single-instance identity, the one session bead recorded against
+//     it as template.
+//
+// Anything ambiguous falls back to the canonical name rather than guessing.
+func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, snapshot statusSessionSnapshot) string {
+	canonical := agentSessionName(cityName, qualifiedName, sessTmpl)
+	if _, ok := snapshot.bySessionName[canonical]; ok {
+		return canonical
+	}
+
+	candidates := snapshot.byTemplate[qualifiedName]
+	if groupName != "" && groupName != qualifiedName {
+		candidates = append(append([]statusSessionInfo(nil), candidates...), snapshot.byTemplate[groupName]...)
+	}
+
+	// (2) an explicit per-instance identity match is unambiguous.
+	for _, info := range candidates {
+		if info.agentName != "" && info.agentName == qualifiedName && info.sessionName != "" {
+			return info.sessionName
+		}
+	}
+
+	// (3) a session recorded against this identity as its template, with no
+	// competing sibling. Deterministic by construction: more than one
+	// candidate means the pool has instances we cannot tell apart here, so
+	// the canonical name is the honest answer.
+	var only string
+	for _, info := range snapshot.byTemplate[qualifiedName] {
+		if info.sessionName == "" {
+			continue
+		}
+		if only != "" && only != info.sessionName {
+			return canonical
+		}
+		only = info.sessionName
+	}
+	if only != "" {
+		return only
+	}
+	return canonical
 }
 
 func statusProviderRunning(sp interface{ IsRunning(string) bool }, sessionName string) bool {

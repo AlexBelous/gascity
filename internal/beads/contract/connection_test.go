@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,75 @@ func TestResolveDoltConnectionTargetLegacyExternalCity(t *testing.T) {
 		t.Fatalf("legacy external city derived %+v", target)
 	}
 	if !target.External || target.Host != "db.example.com" || target.Port != "4406" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestResolveDoltConnectionTargetUnixSocketExternal(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	socket := filepath.Join(city, "dolt.sock")
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginCityCanonical, EndpointStatus: EndpointStatusVerified, DoltSocket: socket, DoltUser: "sock-user"})
+	writeCanonicalMetadata(t, fs, city, "sockdb")
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if !target.External || target.Socket != socket || target.Host != "" || target.Port != "" || target.Database != "sockdb" || target.User != "sock-user" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestResolveDoltConnectionTargetUnixSocketRejectsTCPConflict(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginCityCanonical, DoltSocket: filepath.Join(city, "dolt.sock"), DoltPort: "3306"})
+	if _, err := ResolveDoltConnectionTarget(fs, city, city); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %v, want socket/TCP conflict", err)
+	}
+}
+
+func TestResolveDoltConnectionTargetUnixSocketDoesNotOverrideCanonicalTCP(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/tmp/ambient.sock")
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginCityCanonical, DoltHost: "db.example", DoltPort: "3306"})
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.Socket != "" || target.Host != "db.example" || target.Port != "3306" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestResolveDoltConnectionTargetAmbientSocketDoesNotOverrideManaged(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/tmp/ambient.sock")
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginManagedCity, EndpointStatus: EndpointStatusVerified})
+	port := writeReachableRuntimeState(t, fs, city)
+	target, err := ResolveDoltConnectionTarget(fs, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if target.Socket != "" || target.Host != "127.0.0.1" || target.Port != port || target.External {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestResolveDoltConnectionTargetInheritedUnixSocket(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	rig := filepath.Join(t.TempDir(), "rig")
+	socket := filepath.Join(city, "dolt.sock")
+	writeCanonicalConfig(t, fs, city, ConfigState{IssuePrefix: "gc", EndpointOrigin: EndpointOriginCityCanonical, EndpointStatus: EndpointStatusVerified, DoltSocket: socket, DoltUser: "city-user"})
+	writeCanonicalConfig(t, fs, rig, ConfigState{IssuePrefix: "rig", EndpointOrigin: EndpointOriginInheritedCity, EndpointStatus: EndpointStatusVerified, DoltSocket: socket, DoltUser: "city-user"})
+	target, err := ResolveDoltConnectionTarget(fs, city, rig)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() error = %v", err)
+	}
+	if !target.External || target.EndpointOrigin != EndpointOriginInheritedCity || target.Socket != socket || target.User != "city-user" {
 		t.Fatalf("target = %+v", target)
 	}
 }
@@ -1047,6 +1117,17 @@ func writeReachableRuntimeStateOnHostWithPID(t *testing.T, fs fsys.FS, city, hos
 
 func writeReachableRuntimeStateOnHostWithPIDAndDataDir(t *testing.T, fs fsys.FS, city, host string, pid int, dataDir string) string {
 	t.Helper()
+	port := listenReachablePort(t, host)
+	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%s,"port":%s,"data_dir":%q}`, strconv.Itoa(pid), port, dataDir))
+	return port
+}
+
+// listenReachablePort opens a listener on host and returns its port, keeping
+// the listener alive for the test. Resolution probes reachability before it
+// trusts any record of a running server, so a fixture that wants to be believed
+// needs something actually accepting connections on that port.
+func listenReachablePort(t *testing.T, host string) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		// Some hosts aren't bindable on every OS — notably, darwin doesn't
@@ -1063,9 +1144,7 @@ func writeReachableRuntimeStateOnHostWithPIDAndDataDir(t *testing.T, fs fsys.FS,
 		t.Skipf("cannot bind %s: %v (typical on darwin where 127.0.0.0/8 secondary loopback aliases aren't installed by default)", net.JoinHostPort(host, "0"), err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	port := listener.Addr().(*net.TCPAddr).Port
-	writeRuntimeState(t, fs, city, fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, pid, port, dataDir))
-	return fmt.Sprintf("%d", port)
+	return strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 }
 
 func reachableNonLoopbackHost(t *testing.T) string {
@@ -1167,26 +1246,24 @@ func TestResolveDoltConnectionTargetManagedCity_EnvOverride(t *testing.T) {
 	}
 }
 
-// TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToTarget sets
-// the env to an invalid host and asserts the liveness check fails — proving
-// the override reaches the reachability probe, not just the returned target.
-// If the probe were still hardcoded to 127.0.0.1, it would succeed (the
-// listener is on loopback) and this test would fail.
-func TestResolveDoltConnectionTargetManagedCity_EnvOverrideAppliesToReachability(t *testing.T) {
-	// Use a non-routable TEST-NET-1 address so DialTimeout fails fast.
+// TestValidManagedRuntimeState_EnvOverrideAppliesToReachability proves the
+// selected host reaches the probe without relying on TEST-NET routing or VPNs.
+func TestValidManagedRuntimeState_EnvOverrideAppliesToReachability(t *testing.T) {
 	t.Setenv(ManagedCityHostEnv, "192.0.2.1")
-	fs := fsys.OSFS{}
-	city := t.TempDir()
-	writeCanonicalConfig(t, fs, city, ConfigState{
-		IssuePrefix:    "gc",
-		EndpointOrigin: EndpointOriginManagedCity,
-		EndpointStatus: EndpointStatusVerified,
+	city := "/city"
+	state := managedRuntimeState{
+		Running: true, PID: os.Getpid(), Port: 43127,
+		DataDir: filepath.Join(city, ".beads", "dolt"),
+	}
+	called := false
+	valid := validManagedRuntimeStateWithProbe(state, city, func(host, port string) bool {
+		called = true
+		if host != "192.0.2.1" || port != "43127" {
+			t.Errorf("probe target = %s:%s, want 192.0.2.1:43127", host, port)
+		}
+		return false
 	})
-	writeCanonicalMetadata(t, fs, city, "hq")
-	writeReachableRuntimeState(t, fs, city)
-
-	_, err := ResolveDoltConnectionTarget(fs, city, city)
-	if err == nil || !strings.Contains(err.Error(), "dolt runtime state unavailable") {
-		t.Fatalf("ResolveDoltConnectionTarget() error = %v, want unavailable (override routed liveness probe elsewhere)", err)
+	if valid || !called {
+		t.Fatalf("valid = %v, probe called = %v; want false, true", valid, called)
 	}
 }

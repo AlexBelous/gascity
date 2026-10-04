@@ -165,6 +165,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	patch := AgentPatch{
 		Dir:                     "target-dir",
@@ -181,16 +182,19 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
+		ContextAdvisory:         contextAdvisory,
 		Upstream:                strVal("bedrock"),
 		Args:                    Fragments("--custom-arg"),
 		StartCommand:            strVal("claude --dangerously"),
 		Lifecycle:               strVal(AgentLifecycleOneShot),
 		Nudge:                   strVal("wake up"),
+		WorkQueryFederated:      &trueVal,
 		IdleTimeout:             strVal("15m"),
 		MaxSessionAge:           strVal("5h"),
 		MaxSessionAgeJitter:     strVal("15m"),
 		AssignedWorkDeferLimit:  intVal(3),
 		SleepAfterIdle:          strVal("30s"),
+		AutoReclaimStaleClaims:  &trueVal,
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
 		InjectAssignedSkills:    &trueVal,
@@ -321,6 +325,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	trueVal := true
 	strVal := func(s string) *string { return &s }
 	intVal := func(n int) *int { return &n }
+	contextAdvisory := &ContextAdvisory{Enabled: &trueVal}
 
 	override := AgentOverride{
 		Agent:                   "target",
@@ -337,16 +342,19 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
+		ContextAdvisory:         contextAdvisory,
 		Upstream:                strVal("bedrock"),
 		Args:                    Fragments("--custom-arg"),
 		StartCommand:            strVal("claude --dangerously"),
 		Lifecycle:               strVal(AgentLifecycleOneShot),
 		Nudge:                   strVal("wake up"),
+		WorkQueryFederated:      &trueVal,
 		IdleTimeout:             strVal("15m"),
 		MaxSessionAge:           strVal("5h"),
 		MaxSessionAgeJitter:     strVal("15m"),
 		AssignedWorkDeferLimit:  intVal(3),
 		SleepAfterIdle:          strVal("30s"),
+		AutoReclaimStaleClaims:  &trueVal,
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
 		InjectAssignedSkills:    &trueVal,

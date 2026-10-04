@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "tmux",
     srcs = [
+        "process_evidence.go",
         "adapter.go",
         "agent_slice.go",
         "cutover.go",
@@ -52,6 +53,7 @@ go_library(
 go_test(
     name = "tmux_test",
     srcs = [
+        "process_evidence_test.go",
         "activity_poke_integration_test.go",
         "activity_poke_test.go",
         "adapter_unit_test.go",

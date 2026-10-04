@@ -3,6 +3,7 @@
 package observation
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -73,11 +74,47 @@ func TokenDigest(token string) string {
 // must provide strict host-wide coverage, not the legacy best-effort scan.
 // Neither durable state nor a role's running aggregate establishes a SID.
 func Observe(city string, sp runtime.Provider, readRoots func() ([]proctable.ObservedRoot, error), now func() time.Time) Observation {
+	return observe(context.Background(), city, sp, readRoots, nil, now)
+}
+
+// ProcessEvidence carries the producer's original interval and coverage error.
+// A partial producer must return Err even when Roots is empty.
+type ProcessEvidence struct {
+	Roots                 []proctable.ObservedRoot
+	StartedAt, FinishedAt time.Time
+	Err                   error
+}
+
+// ObserveProcessEvidence joins external process evidence through positive live
+// provider PID attribution. It never repeats a best-effort environ scan.
+func ObserveProcessEvidence(city string, sp runtime.Provider, read func() ProcessEvidence, now func() time.Time) Observation {
+	return ObserveProcessEvidenceContext(context.Background(), city, sp, read, now)
+}
+
+// ObserveProcessEvidenceContext stops further reads on controller/request cancellation.
+func ObserveProcessEvidenceContext(ctx context.Context, city string, sp runtime.Provider, read func() ProcessEvidence, now func() time.Time) Observation {
+	return observe(ctx, city, sp, nil, read, now)
+}
+
+func observe(ctx context.Context, city string, sp runtime.Provider, readRoots func() ([]proctable.ObservedRoot, error), readEvidence func() ProcessEvidence, now func() time.Time) Observation {
 	out := Observation{Schema: Schema, CityPath: city, ObservedAt: now().UTC(), ProviderType: fmt.Sprintf("%T", sp), Sessions: []Session{}, Processes: []Process{}, UnknownReasons: []string{}}
 	fail := func(reason string) { out.UnknownReasons = append(out.UnknownReasons, reason) }
-	if city == "" || !filepath.IsAbs(city) || sp == nil || readRoots == nil {
+	if city == "" || !filepath.IsAbs(city) || sp == nil || (readRoots == nil && readEvidence == nil) {
 		fail("observation context unavailable")
 		out.FinishedAt = now().UTC()
+		return out
+	}
+	canceled := func() bool {
+		if ctx.Err() == nil {
+			return false
+		}
+		out.ProviderComplete = false
+		out.ProcessComplete = false
+		fail("observation canceled")
+		out.FinishedAt = now().UTC()
+		return true
+	}
+	if canceled() {
 		return out
 	}
 	city = filepath.Clean(city)
@@ -92,7 +129,10 @@ func Observe(city string, sp runtime.Provider, readRoots func() ([]proctable.Obs
 	bySID := map[string]Session{}
 	seenNames := map[string]bool{}
 	for _, name := range names {
-		row, err := readProviderSession(sp, name)
+		if canceled() {
+			return out
+		}
+		row, err := readProviderSessionContext(ctx, sp, name)
 		if err != nil || seenNames[name] {
 			providerOK = false
 			fail("provider incarnation identity unavailable or ambiguous")
@@ -108,19 +148,58 @@ func Observe(city string, sp runtime.Provider, readRoots func() ([]proctable.Obs
 		out.Sessions = append(out.Sessions, row)
 	}
 	scanner, capable := runtime.AsProcessTableScanner(sp)
+	tracker, trackCapable := sp.(runtime.ProcessRootTracker)
+	if readEvidence != nil {
+		capable = trackCapable
+	}
 	processOK := capable
 	if !capable {
 		fail("provider lacks process-table coverage")
 	}
 	out.ProcessObservedAt = now().UTC()
-	strict, strictErr := readRoots()
+	var evidence []ProcessEvidence
+	readStrict := func() ([]proctable.ObservedRoot, error) {
+		if readEvidence == nil {
+			return readRoots()
+		}
+		e := readEvidence()
+		evidence = append(evidence, e)
+		if !e.StartedAt.IsZero() && e.StartedAt.Before(out.ObservedAt) {
+			out.ObservedAt = e.StartedAt.UTC()
+		}
+		if len(evidence) == 1 {
+			out.ProcessObservedAt = e.StartedAt.UTC()
+		}
+		if e.StartedAt.IsZero() || e.FinishedAt.IsZero() || e.StartedAt.After(e.FinishedAt) || e.FinishedAt.After(now()) {
+			return e.Roots, fmt.Errorf("process evidence interval invalid")
+		}
+		return e.Roots, e.Err
+	}
+	if canceled() {
+		return out
+	}
+	strict, strictErr := readStrict()
+	if canceled() {
+		return out
+	}
 	if strictErr != nil {
 		processOK = false
 		fail("strict process scan incomplete: " + strictErr.Error())
 	}
 	var scanned []runtime.LiveRuntime
 	if capable {
-		scanned, err = scanner.FindRuntimesBySessionID("")
+		if canceled() {
+			return out
+		}
+		if readEvidence == nil {
+			scanned, err = scanner.FindRuntimesBySessionID("")
+		} else {
+			supplied := make([]runtime.LiveRuntime, 0, len(strict))
+			for _, root := range strict {
+				supplied = append(supplied, root.Runtime)
+			}
+			scanned, err = tracker.TrackProcessRoots(supplied)
+		}
 		if err != nil {
 			processOK = false
 			fail("provider process scan incomplete")
@@ -170,6 +249,9 @@ func Observe(city string, sp runtime.Provider, readRoots func() ([]proctable.Obs
 	}
 	// Fence changes during the observation without turning durable rows into
 	// liveness. A restarted run with the same provider handle must also deny.
+	if canceled() {
+		return out
+	}
 	after, listErr := sp.ListRunning("")
 	after = append([]string{}, after...)
 	sort.Strings(after)
@@ -178,16 +260,39 @@ func Observe(city string, sp runtime.Provider, readRoots func() ([]proctable.Obs
 		fail("provider changed during observation")
 	}
 	for _, row := range out.Sessions {
-		current, readErr := readProviderSession(sp, row.RuntimeName)
+		if canceled() {
+			return out
+		}
+		current, readErr := readProviderSessionContext(ctx, sp, row.RuntimeName)
 		if readErr != nil || current != row {
 			providerOK = false
 			fail("provider incarnation changed during observation")
 		}
 	}
-	rechecked, recheckErr := readRoots()
+	if canceled() {
+		return out
+	}
+	rechecked, recheckErr := readStrict()
+	if canceled() {
+		return out
+	}
+	if readEvidence != nil && trackCapable {
+		supplied := make([]runtime.LiveRuntime, 0, len(rechecked))
+		for _, root := range rechecked {
+			supplied = append(supplied, root.Runtime)
+		}
+		trackingAfter, trackingErr := tracker.TrackProcessRoots(supplied)
+		if trackingErr != nil || !reflect.DeepEqual(scanned, trackingAfter) {
+			processOK = false
+			fail("provider process ownership changed or became unavailable")
+		}
+	}
 	if recheckErr != nil || !reflect.DeepEqual(strict, rechecked) {
 		processOK = false
 		fail("process identities changed or became unavailable during observation")
+	}
+	if canceled() {
+		return out
 	}
 	out.FinishedAt = now().UTC()
 	if out.ProcessObservedAt.Before(out.ObservedAt) || out.ProcessObservedAt.After(out.FinishedAt) || out.FinishedAt.Before(out.ObservedAt) || out.FinishedAt.Sub(out.ObservedAt) > 60*time.Second {
@@ -202,12 +307,15 @@ func Observe(city string, sp runtime.Provider, readRoots func() ([]proctable.Obs
 	return out
 }
 
-func readProviderSession(sp runtime.Provider, name string) (Session, error) {
+func readProviderSessionContext(ctx context.Context, sp runtime.Provider, name string) (Session, error) {
 	row := Session{RuntimeName: name, Running: true}
 	if name == "" {
 		return row, fmt.Errorf("empty provider handle")
 	}
 	for _, key := range []string{"GC_SESSION_ID", "GC_TEMPLATE", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN"} {
+		if ctx.Err() != nil {
+			return row, ctx.Err()
+		}
 		value, err := sp.GetMeta(name, key)
 		if err != nil || value == "" {
 			return row, fmt.Errorf("incarnation metadata missing")

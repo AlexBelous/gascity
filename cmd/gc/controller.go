@@ -150,6 +150,7 @@ func startControllerSocket(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	options ...controllerSocketOptions,
 ) (net.Listener, error) {
 	if !hostingMode.known() {
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
@@ -170,7 +171,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, hostingMode, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, options...)
 		}
 	}()
 	return lis, nil
@@ -192,15 +193,17 @@ func handleControllerConn(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	options ...controllerSocketOptions,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
-	scanner := bufio.NewScanner(conn)
-	// Increase scanner buffer for convergence commands which may carry large payloads.
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	if scanner.Scan() {
-		line := scanner.Text()
+	reader := bufio.NewReaderSize(conn, 64*1024)
+	lineBytes, readErr := readControllerCommandLine(reader)
+	if readErr == nil {
+		line := string(lineBytes)
 		switch {
+		case line == controllerObservationCommand:
+			handleControllerObservation(conn, reader, cityPath, options)
 		case line == "stop":
 			cancelFn()
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
@@ -1313,7 +1316,8 @@ func runController(
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	observer := newControllerObservationService(ctx, cityPath)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, controllerSocketOptions{observe: observer.observe})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1398,6 +1402,7 @@ func runController(
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
+	observer.install(cs)
 
 	// One-time startup hygiene: release stale runtime name claims held by
 	// closed configured named-session beads so on-demand respawn is not blocked

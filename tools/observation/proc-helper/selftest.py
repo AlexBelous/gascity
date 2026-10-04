@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Disposable synthetic proc trees. Never starts production helper or scans live proc."""
+import array
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+
+EXE = Path(sys.argv.pop(1)).resolve()
+LIMIT_EXE = Path(sys.argv.pop(1)).resolve()
+BOOT = "01234567-89ab-cdef-0123-456789abcdef"
+NONCE = "a" * 64
+TOKEN = "never-output-raw-token"
+
+
+def stat(pid, parent=1, start=100):
+    # Fields 3..22; comm contains spaces/parentheses to exercise kernel stat grammar.
+    return f"{pid} (name (with) spaces) S {parent} {pid} " + "0 " * 16 + f"{start}\n"
+
+
+class HelperTests(unittest.TestCase):
+    def test_disposable_syscalls_denied(self):
+        result = subprocess.run([str(EXE), "--sandbox-selftest"], capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
+
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp(prefix="gc-observer-fixture-"))
+        self.proc = self.temp / "proc"
+        (self.proc / "sys/kernel/random").mkdir(parents=True)
+        (self.proc / "sys/kernel/random/boot_id").write_text(BOOT + "\n")
+        (self.proc / "fixture_namespace").write_text("pid:[12345]\n")
+        self.pid = os.getpid()
+        self.process(1, name="init")
+        self.process(self.pid, start=555, name="controller")
+        self.process(901, name="tmux: server")
+        self.process(902, parent=901, name="worker", env=self.env())
+        self.binding = self.temp / "binding.conf"
+        self.binding.write_text(
+            f"boot_id={BOOT}\ncontroller_pid={self.pid}\ncontroller_uid={os.getuid()}\n"
+            "controller_start_ticks=555\ncontroller_source_revision=" + "b" * 40 + "\n"
+            "controller_binary_sha256=" + "c" * 64 + "\npid_namespace_identity=pid:[12345]\n"
+            "helper_binary_sha256=" + hashlib.sha256(EXE.read_bytes()).hexdigest() + "\n"
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.temp)
+
+    @staticmethod
+    def env():
+        return (
+            "GC_SESSION_ID=controller-session-2\0GC_CITY_PATH=/fixture/city\0"
+            "GC_TEMPLATE=fixture.clerk\0GC_RUNTIME_EPOCH=8\0"
+            f"GC_INSTANCE_TOKEN={TOKEN}\0UNRELATED_SECRET=never-output-either\0"
+        ).encode()
+
+    def process(self, pid, parent=1, start=100, name="worker", env=b""):
+        p = self.proc / str(pid)
+        p.mkdir(exist_ok=True)
+        (p / "stat").write_text(stat(pid, parent, start))
+        (p / "comm").write_text(name + "\n")
+        (p / "environ").write_bytes(env)
+
+    def run_helper(self, request=None, extra=b"", rights=False, executable=EXE, close_peer=False):
+        if executable != EXE:
+            self.binding.write_text(self.binding.read_text().replace(
+                hashlib.sha256(EXE.read_bytes()).hexdigest(),
+                hashlib.sha256(executable.read_bytes()).hexdigest()))
+        parent, child = socket.socketpair()
+        # fd3 reserved in child, no inherited arbitrary descriptors.
+        childfd = child.fileno()
+        # Preserve fd3 through close_fds: use pass_fds including a temporary fd3
+        # in the parent. This fixture uses only this process's private sockets.
+        backup = None
+        if childfd != 3:
+            try:
+                backup = os.dup(3)
+            except OSError:
+                pass
+            os.dup2(childfd, 3)
+        try:
+            p = subprocess.Popen([str(executable), str(self.proc), str(self.binding)], pass_fds=(3,), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        finally:
+            if childfd != 3:
+                if backup is None:
+                    os.close(3)
+                else:
+                    os.dup2(backup, 3)
+                    os.close(backup)
+        child.close()
+        # parent originally used fd3 in many cases; move socket before fd replacement.
+        if request is None:
+            request = {"schema": "observe-host-processes/v1", "request_nonce": NONCE}
+        payload = request if isinstance(request, bytes) else json.dumps(request).encode()
+        wire = struct.pack("!I", len(payload)) + payload + extra
+        try:
+            if rights:
+                with open(self.binding, "rb") as f:
+                    parent.sendmsg([wire], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [f.fileno()]))])
+            else:
+                parent.sendall(wire)
+            parent.shutdown(socket.SHUT_WR)
+            if close_peer:
+                parent.close()
+                response = b""
+            else:
+                chunks = []
+                while True:
+                    chunk = parent.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                response = b"".join(chunks)
+        except (ConnectionResetError, BrokenPipeError):
+            response = b""
+        finally:
+            parent.close()
+        stdout, stderr = p.communicate(timeout=12)
+        self.assertEqual(stdout, b"")
+        self.assertEqual(stderr, b"")
+        if response:
+            self.assertGreaterEqual(len(response), 4)
+            size = struct.unpack("!I", response[:4])[0]
+            self.assertEqual(len(response), size + 4)
+            self.assertNotIn(TOKEN.encode(), response)
+            self.assertNotIn(b"never-output-either", response)
+            return p.returncode, json.loads(response[4:])
+        return p.returncode, None
+
+    def test_closed_peer_returns_failure_without_sigpipe_death(self):
+        code, result = self.run_helper(close_peer=True)
+        self.assertEqual(code, 2)
+        self.assertIsNone(result)
+
+    def test_complete_redacted_root_and_sha(self):
+        code, result = self.run_helper()
+        self.assertEqual(code, 0)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["scope"], "fixture_procfs")
+        self.assertEqual(result["errors_total"], 0)
+        self.assertEqual(result["enumerated_count_before"], 4)
+        self.assertEqual(result["enumeration_digest_before"], result["enumeration_digest_after"])
+        self.assertEqual(len(result["roots"]), 1)
+        root = result["roots"][0]
+        self.assertEqual(root["pid"], 902)
+        self.assertEqual(root["start_ticks"], "100")
+        self.assertTrue(root["parent_is_provider_infrastructure"])
+        self.assertEqual(root["parent_name"], "tmux: server")
+        self.assertEqual(root["instance_token_sha256"], hashlib.sha256(TOKEN.encode()).hexdigest())
+
+    def test_exact_pid_limit_and_one_more_are_unknown(self):
+        # Test-only limit=4 hits the end of the getdents chunk in the exact case.
+        for extra in [False, True]:
+            with self.subTest(extra=extra):
+                if extra:
+                    self.process(903)
+                code, result = self.run_helper(executable=LIMIT_EXE)
+                self.assertEqual(code, 1)
+                self.assertFalse(result["complete"])
+                self.assertTrue(any(e["reason"] == "limit_reached" for e in result["errors"]))
+
+    def test_invalid_boot_namespace_cannot_inject_response(self):
+        original = self.binding.read_text()
+        for old, new in [(BOOT, 'x"malicious'), ("pid:[12345]", 'x"malicious')]:
+            self.binding.write_text(original.replace(old, new))
+            code, result = self.run_helper()
+            self.assertEqual(code, 2)
+            self.assertIsNone(result)
+
+    def test_gc_child_is_not_second_root(self):
+        self.process(903, parent=902, env=self.env())
+        code, result = self.run_helper()
+        self.assertEqual(code, 0)
+        self.assertEqual([r["pid"] for r in result["roots"]], [902])
+
+    def test_tmux_substring_is_not_excluded(self):
+        (self.proc / "902/comm").write_text("tmux-worker\n")
+        code, result = self.run_helper()
+        self.assertEqual(code, 0)
+        self.assertEqual(result["roots"][0]["name"], "tmux-worker")
+
+    def test_missing_file_is_unknown_not_empty(self):
+        (self.proc / "1/environ").unlink()
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertFalse(result["complete"])
+        self.assertTrue(result["errors"])
+        self.assertEqual(len(result["roots"]), 1)
+
+    @unittest.skipIf(os.getuid() == 0, "permission fixture requires unprivileged test UID")
+    def test_permission_denied_is_unknown(self):
+        target = self.proc / "902/environ"
+        target.chmod(0)
+        try:
+            code, result = self.run_helper()
+            self.assertEqual(code, 1)
+            self.assertFalse(result["complete"])
+            self.assertTrue(any(e["operation"] == "environ" and e["errno"] == 13 for e in result["errors"]))
+        finally:
+            target.chmod(0o600)
+
+    def test_error_list_is_bounded(self):
+        for pid in range(10000, 10140):
+            self.process(pid)
+            (self.proc / str(pid) / "environ").unlink()
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["errors"]), 128)
+        self.assertTrue(result["errors_truncated"])
+        self.assertGreater(result["errors_total"], 128)
+
+    def test_response_overflow_is_unknown(self):
+        for pid in range(11000, 11800):
+            env = self.env().replace(b"/fixture/city", b"\x01" * 4096)
+            self.process(pid, env=env)
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["roots"], [])
+        self.assertTrue(any(e["reason"] == "response_limit" for e in result["errors"]))
+
+    def test_environment_overflow_unknown(self):
+        (self.proc / "902/environ").write_bytes(b"a" * (16 * 1024 * 1024 + 1))
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertFalse(result["complete"])
+        self.assertTrue(any(e["reason"] == "limit_reached" for e in result["errors"]))
+
+    def test_duplicate_and_unterminated_gc_identity(self):
+        for data in [self.env() + b"GC_TEMPLATE=other\0", self.env()[:-1], b"BAD_ENTRY\0"]:
+            with self.subTest(data_length=len(data)):
+                (self.proc / "902/environ").write_bytes(data)
+                code, result = self.run_helper()
+                self.assertEqual(code, 1)
+                self.assertFalse(result["complete"])
+
+    def test_no_symlink_escape(self):
+        (self.proc / "902/environ").unlink()
+        (self.proc / "902/environ").symlink_to(self.binding)
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertFalse(result["complete"])
+
+    def test_missing_parent_unknown(self):
+        (self.proc / "902/stat").write_text(stat(902, parent=999))
+        code, result = self.run_helper()
+        self.assertEqual(code, 1)
+        self.assertTrue(any(e["reason"] == "parent_unavailable" for e in result["errors"]))
+
+    def test_bad_request_rejected(self):
+        cases = [
+            {"schema": "observe-host-processes/v1", "request_nonce": NONCE, "path": "/etc/shadow"},
+            {"schema": "observe-host-processes/v1", "request_nonce": NONCE, "pid": 1},
+            {"schema": "wrong", "request_nonce": NONCE},
+            {"schema": "observe-host-processes/v1", "request_nonce": "A" * 64},
+            b'{"schema":"observe-host-processes/v1","schema":"observe-host-processes/v1","request_nonce":"' + NONCE.encode() + b'"}',
+            b"x" * 1025,
+        ]
+        for request in cases:
+            with self.subTest(request=str(request)[:40]):
+                code, result = self.run_helper(request)
+                self.assertEqual(code, 2)
+                self.assertIsNone(result)
+
+    def test_additional_frame_and_ancillary_fd_rejected(self):
+        for kwargs in [{"extra": b"\0\0\0\0"}, {"rights": True}]:
+            code, result = self.run_helper(**kwargs)
+            self.assertEqual(code, 2)
+            self.assertIsNone(result)
+
+    def test_wrong_binding_rejected(self):
+        original = self.binding.read_text()
+        for old, new in [(f"controller_pid={self.pid}", "controller_pid=98765"),
+                         (f"controller_uid={os.getuid()}", "controller_uid=98765"),
+                         ("controller_start_ticks=555", "controller_start_ticks=556"),
+                         (BOOT, "ffffffff-ffff-ffff-ffff-ffffffffffff"),
+                         ("pid:[12345]", "pid:[99999]")]:
+            with self.subTest(changed=old):
+                self.binding.write_text(original.replace(old, new))
+                code, result = self.run_helper()
+                self.assertEqual(code, 2)
+                self.assertIsNone(result)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "runtime",
     srcs = [
+        "process_evidence.go",
         "beacon.go",
         "carrier.go",
         "dialog.go",
@@ -38,6 +39,7 @@ go_library(
 go_test(
     name = "runtime_test",
     srcs = [
+        "process_evidence_test.go",
         "beacon_test.go",
         "capacity_test.go",
         "carrier_test.go",

@@ -34,3 +34,11 @@ func TestPoolAdmissionObservationWireDeniesUnknown(t *testing.T) {
 		t.Fatalf("bad unknown wire: %s", buf.String())
 	}
 }
+
+func TestControllerSourceRequiresPerSession(t *testing.T) {
+	cmd := newPoolAdmissionProbeCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	cmd.SetArgs([]string{"--via-controller"})
+	if err := cmd.Execute(); err == nil || err.Error() != "controller source requires --per-session" {
+		t.Fatalf("aggregate accepted persistent controller mode: %v", err)
+	}
+}

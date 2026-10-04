@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "acp",
     srcs = [
+        "process_evidence.go",
         "acp.go",
         "activity_publisher.go",
         "conn.go",
@@ -24,6 +25,7 @@ go_library(
 go_test(
     name = "acp_test",
     srcs = [
+        "process_evidence_test.go",
         "acp_test.go",
         "activity_test.go",
         "capacity_test.go",

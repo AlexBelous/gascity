@@ -1,0 +1,19 @@
+# REVIEW PROPOSAL ONLY. No installation or capabilities authorized by this file.
+# Create /run/gascity-observer root:controller-client-group 0750 in approved
+# deployment; no helper/user-writable socket parent. Group is exact release data.
+[Unit]
+Description=Fixed bounded Gas City process evidence socket
+
+[Socket]
+ListenStream=/run/gascity-observer/observe.sock
+Accept=yes
+SocketUser=root
+SocketGroup=dev
+SocketMode=0660
+DirectoryMode=0750
+MaxConnections=4
+Backlog=4
+Service=gascity-observer@.service
+
+[Install]
+WantedBy=sockets.target

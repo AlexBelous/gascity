@@ -1,0 +1,41 @@
+# REVIEW PROPOSAL ONLY. Fixed static UID/group and exact binary/binding pins
+# must be proven before application. No controller capabilities are changed.
+[Unit]
+Description=One bounded Gas City process evidence connection
+
+[Service]
+Type=exec
+User=62027
+Group=62027
+ExecStart=/usr/local/libexec/gc-process-observer-helper
+StandardInput=null
+StandardOutput=null
+StandardError=null
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+PrivateUsers=no
+ProtectProc=default
+ProcSubset=all
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+UMask=0077
+LimitCORE=0
+LimitNOFILE=32
+MemoryMax=128M
+TasksMax=1
+RuntimeMaxSec=10s
+TimeoutStartSec=10s
+TimeoutStopSec=1s
+KillMode=control-group
+Restart=no

@@ -44,8 +44,7 @@ using the existing exact infrastructure predicate, after successful reads.
 
 A non-privileged controller on a mixed-UID host may therefore remain incomplete:
 inaccessible processes cannot be proven unrelated to the city. The currently
-observed VPS permission denials are an explicit deployment blocker. A future
-city/UID-scoped adapter needs a verified controller/provider ownership contract
+observed VPS permission denials are an explicit deployment blocker. A city/UID-scoped adapter would need a verified controller/provider ownership contract
 and tests rejecting every inaccessible possibly-in-scope process. This package
 introduces no UID assumption, privilege escalation, or permission waiver.
 
@@ -136,7 +135,7 @@ check ([proc_pid_environ(5)](https://man7.org/linux/man-pages/man5/proc_pid_envi
 `CAP_SYS_PTRACE` has powers beyond read-only observation, including tracing and
 process memory writes ([capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html)).
 It must not be granted to the whole controller or treated as a read-only switch.
-The proposed helper still needs actual privilege/namespace/LSM verification:
+The separate helper source described below still needs actual privilege/namespace/LSM verification:
 capability names alone do not establish complete coverage. Any unreadable or
 raced potentially relevant PID continues to make the result incomplete.
 
@@ -148,3 +147,94 @@ bounded broader checks, an approved and verified strict deployment scan scope,
 source/controller binary agreement, recovery and coordinated installation.
 Darwin remains unsupported for strict coverage. No production install, privilege
 change, worker start or #32 cutover is authorized by this source package.
+
+## Separate bounded Linux helper and positive provider PID join
+
+`tools/observation/proc-helper/` contains a single-thread static Linux x86_64
+helper, its strict framed protocol, synthetic fixtures, syscall denial probes
+and staging-only service/socket examples. The full contract is
+`engdocs/architecture/process-observer-helper.md`. Its fixed operation reads host proc
+identity twice; it cannot accept client paths, PID/UID filters, plugins or
+commands. The capability proposal is **CAP_SYS_PTRACE plus
+CAP_DAC_READ_SEARCH**, solely for the dedicated helper service. Neither is a
+read-only capability. A default-deny syscall filter excludes tracing, signals,
+process memory operations, process launch and FD passing after startup. Fixed
+read-only openat2 code supplies the path boundary; seccomp cannot inspect pointer
+pathnames/flags. Baseline deployment therefore explicitly trusts the reviewed
+fixed code for its wider read surface. No LSM confinement is claimed.
+
+`internal/runtime/procobserver` validates the separate
+`host-process-evidence/v1` contract against exact source/binary/policy/boot/PID
+namespace and connecting-caller pins. JSON keys/types are required; null,
+duplicate or unknown fields, stale/replayed/partial responses, extra frames,
+ancillary FDs and oversized replies refuse. It preserves the helper's earliest
+evidence time. No provider or ledger access occurs in the helper. The adapter
+has no permission-grant, process-start or fallback operation.
+
+`gc pool-admission-probe --per-session --via-controller` selects the fixed
+`observe-managed-sessions` operation on the existing controller Unix socket.
+The CLI cannot choose policy, construct a provider, call the helper or fall
+back to a local scan in this mode. It reads only the fixed root-owned policy
+to verify the socket peer through Linux SO_PEERCRED and actual PID/UID/start,
+boot and executable hash. Complete JSON provenance must match these pins;
+a same-user fake listener or claimed source hash is insufficient. The persistent controller/supervisor uses its
+actual current provider and fixed `/etc/gascity-observer/client.json`. A
+thread-safe late-ready slot returns UNKNOWN before standalone initialization.
+An absent or stale startup policy is retried without writes; after exact caller
+verification, the policy is latched for that process lifetime. A restart requires
+an approved root rebind of the new PID/start/boot/hash before verification can
+succeed. A UID wildcard, child CLI ticket or per-tick policy rewrite is absent.
+
+One process-wide slot covers all supervisor cities; bursts receive UNKNOWN
+without queuing. A 25-second context budget and disconnect cancellation reach
+helper socket reads. A provider that fails to return keeps the slot occupied,
+preventing repeated abandoned scans. Short state locks snapshot and recheck the
+provider/config generation. Reload or city shutdown invalidates completeness.
+The reply limit is 1 MiB; larger helper/domain output becomes typed UNKNOWN
+rather than increasing limits for other controller operations. Strict CLI reply
+validation checks source/city, required fields, original interval and caller
+provenance. Valid complete and partial daemon bytes pass unchanged; local CLI
+build metadata never replaces daemon provenance.
+
+`runtime.ProcessRootTracker` closes the second-scanner problem: tmux reads its
+live pane PID; ACP reads the live control socket's `pid` operation; auto merges
+positive matches and rejects omitted/changed evidence or conflicting owners.
+Both PID and SID must match uniquely. Same-SID old/orphan roots stay untracked.
+Provider run epoch/template/token metadata is then compared by the common
+observation domain, with provider/roots/ownership checked again after collection.
+External evidence never substitutes `tracked=true` for a live owning PID.
+The legacy scanners and orphan termination implementations are unchanged.
+
+The persistent caller interface is implemented and fixture-tested. Actual
+root-owned deployment binding, capabilities, immutable ownership and restart
+readbacks remain separate release gates. The default local probe retains
+`controller_binding:not_observed`; only a verified persistent observation can
+attest its own source and binary. Independent installed-source acceptance is
+still required.
+
+`engdocs/architecture/process-observer-helper.md` specifies the exact JSON fields, fixed limits and errors,
+required hard service deadline, privilege/readback proposal and recovery.
+Fixture tests run without capabilities and never scan the live host. The Go
+Unix codec → redacted roots → live-PID tracker → observation serialization is
+checked unchanged against consumer06ca in nine complete/negative scenarios.
+These checks are not live capability/namespace, installed-controller or release
+acceptance. No service files, permissions or candidate binaries are installed.
+After a coordinated new runtime-source release, acceptance starts fresh; the
+currently effective 48h/500 ticks must not silently shrink to the documented
+minimum24h/200 ticks or reuse old-contract ticks.
+
+### Socket activation credentials
+
+For the fixed systemd Accept=yes unit the client must verify root activation
+peer PID1/UID0, not pretend SO_PEERCRED identifies the worker. Linux preserves
+the listener creator credentials across inherited descriptors. Before sending
+its request the client enables SO_PASSCRED and authenticates every response
+byte using kernel SCM_CREDENTIALS: exact dedicated helper UID and one stable
+writer PID for the whole frame. Only that ancillary type is allowed; SCM_RIGHTS
+received descriptors are closed and rejected, as are missing/wrong credentials,
+unknown ancillary data or truncation. Helper write(fd3) automatically receives
+kernel credentials at the client, requiring no helper sendmsg/signal syscall.
+Root-owned fixed socket/service/executable/binding and actual service UID/cap
+readback remain required: activation peer proof is not a helper binary proof
+by itself. The controller socket uses ordinary SO_PEERCRED plus actual peer
+start/executable/boot verification; it is not an activation endpoint.

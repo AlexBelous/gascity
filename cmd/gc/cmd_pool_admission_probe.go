@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,14 +22,21 @@ import (
 // /proc scan.
 func newPoolAdmissionProbeCmd(stdout, _ io.Writer) *cobra.Command {
 	var perSession bool
+	var viaController bool
 	cmd := &cobra.Command{
 		Use:   "pool-admission-probe",
 		Short: "Read-only probe of the pool start live census",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) (retErr error) {
+			if viaController && !perSession {
+				return fmt.Errorf("controller source requires --per-session")
+			}
 			cityPath, err := resolveCity()
 			if err != nil {
 				return err
+			}
+			if viaController {
+				return relayControllerObservation(context.Background(), cityPath, commit, stdout)
 			}
 			result := map[string]any{"city_path": cityPath, "ok": false}
 			observed := observation.Observation{
@@ -107,6 +115,7 @@ func newPoolAdmissionProbeCmd(stdout, _ io.Writer) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&perSession, "per-session", false, "Emit managed-session-observation/v1; incomplete coverage exits nonzero")
+	cmd.Flags().BoolVar(&viaController, "via-controller", false, "Relay pinned external process evidence from the persistent controller (requires --per-session)")
 	return cmd
 }
 

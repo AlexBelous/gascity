@@ -14,6 +14,7 @@ go_library(
 go_test(
     name = "observation_test",
     srcs = [
+        "evidence_test.go",
         "observation_test.go",
         "testenv_import_test.go",
     ],
@@ -33,4 +34,10 @@ filegroup(
     name = "bazel_repo_srcs",
     srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),
     visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "consumer_fixture",
+    srcs = ["testdata/consumer-input.json"],
+    visibility = ["//:__subpackages__"],
 )

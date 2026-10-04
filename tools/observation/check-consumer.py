@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--consumer-sha256', required=True)
     parser.add_argument('--test-log', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--producer', choices=['native', 'helper', 'controller'], default='native')
     args = parser.parse_args()
     actual = hashlib.sha256(args.consumer.read_bytes()).hexdigest()
     if actual != args.consumer_sha256:
@@ -28,11 +29,15 @@ def main():
     source = Path(__file__).resolve().parents[2]
     context = json.loads((source / 'internal/runtime/observation/testdata/consumer-input.json').read_text())
     fixtures = []
+    prefix = {'helper': 'NATIVE_HELPER_CONSUMER_FIXTURE=', 'controller': 'NATIVE_CONTROLLER_CONSUMER_FIXTURE=', 'native': 'NATIVE_CONSUMER_FIXTURE='}[args.producer]
     for line in args.test_log.read_text().splitlines():
-        if 'NATIVE_CONSUMER_FIXTURE=' in line:
-            fixtures.append(json.loads(line.split('NATIVE_CONSUMER_FIXTURE=', 1)[1]))
+        if prefix in line:
+            fixtures.append(json.loads(line.split(prefix, 1)[1]))
     expected = {'complete', 'strict-unknown', 'scanner-partial', 'missing-process',
                 'alias-conflict', 'wrong-run', 'scannerless'}
+    if args.producer in ('helper', 'controller'):
+        expected = {'complete', 'strict-unknown', 'tracking-partial', 'missing-process',
+                    'alias-conflict', 'wrong-run', 'missing-tracker', 'stale', 'wrong-helper-pin'}
     if len(fixtures) != len(expected) or {f['name'] for f in fixtures} != expected:
         raise SystemExit('missing or duplicated native producer fixtures')
     results = []

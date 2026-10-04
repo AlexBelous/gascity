@@ -65,3 +65,8 @@ func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveR
 func (s *seamBackedProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 	return s.raw.TerminateRuntime(r)
 }
+
+// TrackProcessRoots preserves positive live-PID attribution across the seam.
+func (s *seamBackedProvider) TrackProcessRoots(roots []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
+	return s.raw.TrackProcessRoots(roots)
+}

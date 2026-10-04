@@ -3350,6 +3350,7 @@ gc pool-admission-probe [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--per-session` | bool |  | Emit managed-session-observation/v1; incomplete coverage exits nonzero |
+| `--via-controller` | bool |  | Relay pinned external process evidence from the persistent controller (requires --per-session) |
 
 ## gc prime
 

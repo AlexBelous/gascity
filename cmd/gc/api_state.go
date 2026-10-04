@@ -61,8 +61,9 @@ const cacheReconcileActor = "cache-reconcile"
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
-	mu  sync.RWMutex
-	cfg *config.City
+	mu                    sync.RWMutex
+	observationGeneration uint64
+	cfg                   *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
 	// (Editor.UpdateAgent → AgentOrigin), cached here so provenance reads
@@ -1003,6 +1004,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 		cs.rawCfg = rawCfg
 	}
 	cs.sp = sp
+	cs.observationGeneration++
 	cs.usageSink = usageSink
 	oldRigStores = cs.beadStores
 	cs.beadStores = stores
@@ -1155,6 +1157,7 @@ func (cs *controllerState) updateConfigAndProviderOnly(cfg *config.City, sp runt
 		cs.rawCfg = rawCfg
 	}
 	cs.sp = sp
+	cs.observationGeneration++
 	cs.usageSink = usageSink
 	cs.mu.Unlock()
 }

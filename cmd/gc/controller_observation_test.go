@@ -1,0 +1,540 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
+	"github.com/gastownhall/gascity/internal/runtime/procobserver"
+)
+
+func TestControllerObservationLateReadyAndSingleFlight(t *testing.T) {
+	svc := newControllerObservationService(context.Background(), "/city")
+	if got := svc.observe(context.Background()); got.ProcessComplete || len(got.UnknownReasons) == 0 {
+		t.Fatal("notready became complete")
+	}
+	cs := &controllerState{cityPath: "/city", cfg: &config.City{}, sp: runtime.NewFake()}
+	svc.install(cs)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	svc.loadPolicy = func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }
+	svc.checkCaller = func(procobserver.Policy) error { return nil }
+	svc.collect = func(ctx context.Context, _ procobserver.Policy, _ runtime.Provider) controllerObservationReply {
+		close(started)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return svc.unknown("fixture partial")
+	}
+	done := make(chan controllerObservationReply, 1)
+	go func() { done <- svc.observe(context.Background()) }()
+	<-started
+	if got := svc.observe(context.Background()); got.ProcessComplete || len(got.UnknownReasons) != 1 || got.UnknownReasons[0] != "observation busy" {
+		t.Fatalf("burst queued %+v", got)
+	}
+	close(release)
+	<-done
+}
+
+func TestControllerObservationProviderSwapAndCancellationDeny(t *testing.T) {
+	for _, mode := range []string{"swap", "cancel", "shutdown"} {
+		t.Run(mode, func(t *testing.T) {
+			root, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			svc := newControllerObservationService(root, "/city")
+			cs := &controllerState{cityPath: "/city", cfg: &config.City{}, sp: runtime.NewFake()}
+			svc.install(cs)
+			svc.loadPolicy = func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }
+			svc.checkCaller = func(procobserver.Policy) error { return nil }
+			ctx, requestCancel := context.WithCancel(context.Background())
+			defer requestCancel()
+			svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
+				switch mode {
+				case "swap":
+					cs.mu.Lock()
+					cs.observationGeneration++
+					cs.sp = runtime.NewFake()
+					cs.mu.Unlock()
+				case "cancel":
+					requestCancel()
+				case "shutdown":
+					cancel()
+				}
+				r := svc.unknown("")
+				r.ProviderComplete = true
+				r.ProcessComplete = true
+				r.UnknownReasons = []string{}
+				return r
+			}
+			if got := svc.observe(ctx); got.ProviderComplete || got.ProcessComplete {
+				t.Fatalf("changed/canceled source complete %+v", got)
+			}
+		})
+	}
+}
+
+func TestControllerObservationRelayPreservesDaemonBytesAndDeniesSource(t *testing.T) {
+	now := time.Now().UTC()
+	reply := controllerObservationReply{Observation: observation.Observation{Schema: observation.Schema, CityPath: "/city", ObservedAt: now, ProcessObservedAt: now, FinishedAt: now, ProviderComplete: true, ProcessComplete: true, Sessions: []observation.Session{}, Processes: []observation.Process{}, UnknownReasons: []string{}}, SourceRevision: strings.Repeat("a", 40), ControllerBinding: "verified_local_process", ControllerPID: os.Getpid(), ControllerBinarySHA256: observation.TokenDigest("binary"), ControllerStartIdentity: "456", ControllerBootID: "01234567-0123-0123-0123-0123456789ab", HelperBinarySHA256: observation.TokenDigest("helper"), HelperPolicyDigest: observation.TokenDigest("policy")}
+	if err := validateControllerObservationReply(reply, "/city", strings.Repeat("a", 40), now); err != nil {
+		t.Fatal(err)
+	}
+	reply.SourceRevision = "wrong"
+	if err := validateControllerObservationReply(reply, "/city", strings.Repeat("a", 40), now); err == nil {
+		t.Fatal("wrong daemon source accepted")
+	}
+}
+
+func controllerObservationFixture(city string) controllerObservationReply {
+	now := time.Now().UTC().Add(-time.Second)
+	return controllerObservationReply{Observation: observation.Observation{Schema: observation.Schema, CityPath: city, ObservedAt: now, ProcessObservedAt: now, FinishedAt: now, ProviderComplete: true, ProcessComplete: true, ProviderType: "fixture", Sessions: []observation.Session{}, Processes: []observation.Process{}, UnknownReasons: []string{}}, SourceRevision: strings.Repeat("a", 40), ControllerBinding: "verified_local_process", ControllerPID: os.Getpid(), ControllerBinarySHA256: strings.Repeat("b", 64), ControllerStartIdentity: "456", ControllerBootID: "01234567-0123-0123-0123-0123456789ab", HelperBinarySHA256: strings.Repeat("c", 64), HelperPolicyDigest: strings.Repeat("d", 64)}
+}
+
+func TestControllerObservationSocketRelay(t *testing.T) {
+	for _, mode := range []string{"exact", "partial", "wrong source", "wrong city", "missing scalar", "null scalar", "duplicate scalar", "extra frame", "oversized", "unsupported"} {
+		t.Run(mode, func(t *testing.T) {
+			city := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			lis, err := net.Listen("unix", controllerSocketPath(city))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lis.Close() //nolint:errcheck // isolated fixture cleanup
+			r := controllerObservationFixture(city)
+			switch mode {
+			case "partial":
+				r.ProcessComplete = false
+				r.UnknownReasons = []string{"fixture permission"}
+			case "wrong source":
+				r.SourceRevision = strings.Repeat("f", 40)
+			case "wrong city":
+				r.CityPath = "/other"
+			}
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "missing scalar":
+				raw = bytes.Replace(raw, []byte(`"provider_complete":true,`), nil, 1)
+			case "null scalar":
+				raw = bytes.Replace(raw, []byte(`"provider_complete":true`), []byte(`"provider_complete":null`), 1)
+			case "duplicate scalar":
+				raw = bytes.Replace(raw, []byte(`"provider_complete":true`), []byte(`"provider_complete":true,"provider_complete":true`), 1)
+			case "extra frame":
+				raw = append(raw, []byte("\n{}")...)
+			case "oversized":
+				raw = []byte(strings.Repeat(" ", controllerObservationLimit+1))
+			case "unsupported":
+				raw = []byte("unsupported\n")
+			}
+			raw = append(raw, '\n')
+			done := make(chan error, 1)
+			go func() {
+				conn, e := lis.Accept()
+				if e != nil {
+					done <- e
+					return
+				}
+				defer conn.Close() //nolint:errcheck // isolated fixture cleanup
+				line, e := bufio.NewReader(conn).ReadString('\n')
+				if e != nil || line != controllerObservationCommand+"\n" {
+					done <- fmt.Errorf("wrong fixed request %q: %w", line, e)
+					return
+				}
+				_, e = conn.Write(raw)
+				if mode == "oversized" {
+					e = nil
+				}
+				done <- e
+			}()
+			var out bytes.Buffer
+			err = fixtureControllerRelay(context.Background(), city, strings.Repeat("a", 40), &out)
+			if mode == "exact" {
+				if err != nil || !bytes.Equal(out.Bytes(), raw) {
+					t.Fatalf("provenance/bytes rewritten err=%v", err)
+				}
+			} else if err == nil {
+				t.Fatal("invalid/incomplete became complete")
+			}
+			if mode == "partial" && !bytes.Equal(out.Bytes(), raw) {
+				t.Fatal("partial daemon evidence rewritten")
+			}
+			if e := <-done; e != nil {
+				t.Fatal(e)
+			}
+		})
+	}
+}
+
+func TestControllerObservationTransportAbsentAndCancellation(t *testing.T) {
+	var out bytes.Buffer
+	if err := relayControllerObservation(context.Background(), t.TempDir(), strings.Repeat("a", 40), &out); err == nil {
+		t.Fatal("socket-down allowed")
+	}
+	var r controllerObservationReply
+	if err := procobserver.DecodeStrict(out.Bytes(), &r); err != nil || r.ProcessComplete || r.ProviderComplete {
+		t.Fatalf("socket-down not typed UNKNOWN: %v", err)
+	}
+	city := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	svc := newControllerObservationService(ctx, city)
+	defer cancel()
+	svc.install(&controllerState{sp: runtime.NewFake()})
+	svc.loadPolicy = func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }
+	svc.checkCaller = func(procobserver.Policy) error { return nil }
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	svc.collect = func(ctx context.Context, _ procobserver.Policy, _ runtime.Provider) controllerObservationReply {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		return svc.unknown("fixture canceled")
+	}
+	lis, err := startControllerSocket(city, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil, controllerSocketOptions{observe: svc.observe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck // isolated fixture cleanup
+	conn, err := net.Dial("unix", controllerSocketPath(city))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = io.WriteString(conn, controllerObservationCommand+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	_ = conn.Close()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect did not cancel helper collection")
+	}
+}
+
+func TestControllerObservationPolicyLatchesOnlyVerifiedBinding(t *testing.T) {
+	svc := newControllerObservationService(context.Background(), "/city")
+	svc.install(&controllerState{sp: runtime.NewFake()})
+	calls := 0
+	verified := false
+	svc.loadPolicy = func() (procobserver.Policy, error) { calls++; return procobserver.Policy{}, nil }
+	svc.checkCaller = func(procobserver.Policy) error {
+		if !verified {
+			return fmt.Errorf("stale PID")
+		}
+		return nil
+	}
+	svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
+		return svc.unknown("fixture partial")
+	}
+	if got := svc.observe(context.Background()); got.ProcessComplete || svc.policy != nil {
+		t.Fatal("stale binding latched")
+	}
+	// Await actual slot release before the next independent tick.
+	for len(controllerObservationFlight) > 0 {
+		time.Sleep(time.Millisecond)
+	}
+	verified = true
+	svc.observe(context.Background())
+	for len(controllerObservationFlight) > 0 {
+		time.Sleep(time.Millisecond)
+	}
+	svc.observe(context.Background())
+	if calls != 2 {
+		t.Fatalf("policy read per tick: %d", calls)
+	}
+}
+
+func TestControllerObservationRelaySubprocess(t *testing.T) {
+	city := os.Getenv("TEST_OBSERVER_FIXTURE_CITY")
+	if city == "" {
+		return
+	}
+	if !strings.Contains(city, "gc-observer-fixture-") {
+		t.Fatal("subprocess target is not an isolated fixture")
+	}
+	if err := fixtureControllerRelay(context.Background(), city, strings.Repeat("a", 40), os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestControllerObservationTwoCLIProcessesOnePersistentCaller(t *testing.T) {
+	city, err := os.MkdirTemp("/tmp", "gc-observer-fixture-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(city) //nolint:errcheck // isolated fixture cleanup
+	svc := newControllerObservationService(context.Background(), city)
+	svc.install(&controllerState{sp: runtime.NewFake()})
+	policyReads := 0
+	collections := 0
+	callerPIDs := []int{}
+	svc.loadPolicy = func() (procobserver.Policy, error) { policyReads++; return procobserver.Policy{}, nil }
+	svc.checkCaller = func(procobserver.Policy) error { return nil }
+	svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
+		collections++
+		callerPIDs = append(callerPIDs, os.Getpid())
+		r := controllerObservationFixture(city)
+		r.ControllerPID = os.Getpid()
+		return r
+	}
+	lis, err := startControllerSocket(city, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil, controllerSocketOptions{observe: svc.observe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck // isolated fixture cleanup
+	cliPIDs := []int{}
+	for i := 0; i < 2; i++ {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestControllerObservationRelaySubprocess$")
+		cmd.Env = append(os.Environ(), "TEST_OBSERVER_FIXTURE_CITY="+city, "TEST_OBSERVER_FIXTURE_PID="+strconv.Itoa(os.Getpid()))
+		output, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("relay subprocess: %v %s", err, output)
+		}
+		cliPIDs = append(cliPIDs, cmd.ProcessState.Pid())
+		line := bytes.SplitN(output, []byte("\n"), 2)[0]
+		var r controllerObservationReply
+		if procobserver.DecodeStrict(line, &r) != nil || r.ControllerPID != os.Getpid() || !r.ProcessComplete {
+			t.Fatalf("wrong persistent provenance %s", line)
+		}
+	}
+	if cliPIDs[0] == cliPIDs[1] || cliPIDs[0] == os.Getpid() || cliPIDs[1] == os.Getpid() || collections != 2 || policyReads != 1 || len(callerPIDs) != 2 || callerPIDs[0] != os.Getpid() || callerPIDs[1] != os.Getpid() {
+		t.Fatalf("caller lifecycle CLI=%v caller=%v policyloads=%d", cliPIDs, callerPIDs, policyReads)
+	}
+}
+
+func TestControllerObservationTimeoutRetainsSingleFlight(t *testing.T) {
+	svc := newControllerObservationService(context.Background(), "/city")
+	svc.install(&controllerState{sp: runtime.NewFake()})
+	svc.loadPolicy = func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }
+	svc.checkCaller = func(procobserver.Policy) error { return nil }
+	started := make(chan struct{})
+	release := make(chan struct{})
+	svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
+		close(started)
+		<-release
+		return svc.unknown("fixture released")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan controllerObservationReply, 1)
+	go func() { done <- svc.observe(ctx) }()
+	<-started
+	cancel()
+	if got := <-done; got.ProcessComplete || got.ProviderComplete {
+		t.Fatal("canceled result complete")
+	}
+	if got := svc.observe(context.Background()); len(got.UnknownReasons) != 1 || got.UnknownReasons[0] != "observation busy" {
+		t.Fatal("noncooperative read lost limiter")
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for len(controllerObservationFlight) > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(controllerObservationFlight) > 0 {
+		t.Fatal("limiter was not released")
+	}
+}
+
+// These portable fixtures exercise bounded transport/callback lifecycle. The
+// Linux kernel peer proof has separate platform-specific fixtures.
+func fixtureControllerRelay(ctx context.Context, city, source string, out io.Writer) error {
+	r := controllerObservationFixture(city)
+	r.ControllerPID = os.Getpid()
+	if parent := os.Getenv("TEST_OBSERVER_FIXTURE_PID"); parent != "" {
+		pid, err := strconv.Atoi(parent)
+		if err != nil || pid <= 1 {
+			return fmt.Errorf("invalid fixture daemon PID")
+		}
+		r.ControllerPID = pid
+	}
+	return relayControllerObservationAuthenticated(ctx, city, source, out, func() (procobserver.Policy, error) {
+		return procobserver.Policy{CallerBinding: procobserver.CallerBinding{PID: r.ControllerPID, StartTicks: r.ControllerStartIdentity, ControllerBinarySHA256: r.ControllerBinarySHA256, BootID: r.ControllerBootID}, HelperBinarySHA256: r.HelperBinarySHA256, PolicyDigest: r.HelperPolicyDigest}, nil
+	}, func(net.Conn, procobserver.CallerBinding) error { return nil }, time.Now)
+}
+
+func TestControllerObservationPrefetchedExtraAndOversizedDomain(t *testing.T) {
+	for _, mode := range []string{"prefetched extra", "oversized domain"} {
+		t.Run(mode, func(t *testing.T) {
+			city := t.TempDir()
+			calls := 0
+			callback := func(context.Context) controllerObservationReply {
+				calls++
+				r := controllerObservationFixture(city)
+				r.Processes = []observation.Process{{RuntimeName: strings.Repeat("x", controllerObservationLimit)}}
+				return r
+			}
+			lis, err := startControllerSocket(city, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil, controllerSocketOptions{observe: callback})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lis.Close() //nolint:errcheck // isolated fixture cleanup
+			conn, err := net.Dial("unix", controllerSocketPath(city))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close() //nolint:errcheck // isolated fixture cleanup
+			_ = conn.SetDeadline(time.Now().Add(time.Second))
+			request := controllerObservationCommand + "\n"
+			if mode == "prefetched extra" {
+				request += "EXTRA\n"
+			}
+			if _, err = io.WriteString(conn, request); err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(io.LimitReader(conn, controllerObservationLimit+1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var r controllerObservationReply
+			if procobserver.DecodeStrict(data, &r) != nil || r.ProviderComplete || r.ProcessComplete || len(r.UnknownReasons) == 0 || len(data) > controllerObservationLimit {
+				t.Fatalf("invalid bound/extra response %s", data)
+			}
+			if mode == "prefetched extra" && calls != 0 {
+				t.Fatal("buffered extra frame invoked provider")
+			}
+		})
+	}
+}
+
+func TestControllerObservationForgedJSONCannotReplacePeerProof(t *testing.T) {
+	city := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("unix", controllerSocketPath(city))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck // isolated fixture cleanup
+	attempted := make(chan bool, 1)
+	go func() {
+		conn, e := lis.Accept()
+		if e != nil {
+			attempted <- false
+			return
+		}
+		defer conn.Close() //nolint:errcheck // isolated fixture cleanup
+		_ = conn.SetDeadline(time.Now().Add(time.Second))
+		var buf [1]byte
+		n, _ := conn.Read(buf[:])
+		attempted <- n > 0
+	}()
+	var out bytes.Buffer
+	err = relayControllerObservationAuthenticated(context.Background(), city, strings.Repeat("a", 40), &out, func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }, func(net.Conn, procobserver.CallerBinding) error { return fmt.Errorf("kernel PID mismatch") }, time.Now)
+	if err == nil || <-attempted {
+		t.Fatal("unverified listener received observation request")
+	}
+	var r controllerObservationReply
+	if procobserver.DecodeStrict(out.Bytes(), &r) != nil || r.ProcessComplete || r.ControllerBinding == "verified_local_process" {
+		t.Fatal("forged peer became source")
+	}
+}
+
+// Couples exact serialized helper-codec/domain output to the actual bounded
+// controller relay. The fixture peer is injected; Linux peer proof is separate.
+func TestControllerObservationSerializedConsumerRelay(t *testing.T) {
+	path := os.Getenv("TEST_OBSERVER_SERIALIZED_HELPER_LOG")
+	if path == "" {
+		t.Skip("dedicated producer/relay/consumer receipt supplies the exact producer log")
+	}
+	input, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, line := range strings.Split(string(input), "\n") {
+		const marker = "NATIVE_HELPER_CONSUMER_FIXTURE="
+		index := strings.Index(line, marker)
+		if index < 0 {
+			continue
+		}
+		var fixture struct {
+			Name        string                  `json:"name"`
+			Observation observation.Observation `json:"observation"`
+		}
+		if err = json.Unmarshal([]byte(line[index+len(marker):]), &fixture); err != nil {
+			t.Fatal(err)
+		}
+		t.Run(fixture.Name, func(t *testing.T) {
+			count++
+			r := controllerObservationFixture("/city")
+			r.Observation = fixture.Observation
+			r.ControllerPID = os.Getpid()
+			if !r.ProcessComplete || !r.ProviderComplete {
+				r.ControllerBinding = "not_observed"
+			}
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = append(raw, '\n')
+			city := t.TempDir()
+			if err = os.MkdirAll(filepath.Join(city, ".gc"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// The fixture socket location is independent of the source city whose
+			// immutable identity is checked in the reply. No actual city is opened.
+			lis, err := net.Listen("unix", controllerSocketPath(city))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lis.Close() //nolint:errcheck
+			done := make(chan error, 1)
+			go func() {
+				conn, e := lis.Accept()
+				if e != nil {
+					done <- e
+					return
+				}
+				defer conn.Close() //nolint:errcheck
+				_, e = bufio.NewReader(conn).ReadString('\n')
+				if e == nil {
+					_, e = conn.Write(raw)
+				}
+				done <- e
+			}()
+			// Dial the temporary socket while retaining the producer city in the
+			// canonical relay validation through a temporary path-only seam.
+			var out bytes.Buffer
+			policy := procobserver.Policy{CallerBinding: procobserver.CallerBinding{PID: r.ControllerPID, StartTicks: r.ControllerStartIdentity, ControllerBinarySHA256: r.ControllerBinarySHA256, BootID: r.ControllerBootID}, HelperBinarySHA256: r.HelperBinarySHA256, PolicyDigest: r.HelperPolicyDigest}
+			err = relayControllerObservationAt(context.Background(), "/city", controllerSocketPath(city), r.SourceRevision, &out, func() (procobserver.Policy, error) { return policy, nil }, func(net.Conn, procobserver.CallerBinding) error { return nil }, func() time.Time { return time.Date(2026, 10, 4, 8, 0, 0, 0, time.UTC) })
+			if e := <-done; e != nil {
+				t.Fatal(e)
+			}
+			complete := fixture.Name == "complete"
+			validInterval := fixture.Name != "stale" && fixture.Name != "wrong-helper-pin"
+			if (err == nil) != complete || (validInterval && !bytes.Equal(out.Bytes(), raw)) {
+				t.Fatalf("relay changed producer bytes/provenance: err=%v complete=%v", err, complete)
+			}
+			encoded, e := json.Marshal(struct {
+				Name        string          `json:"name"`
+				Observation json.RawMessage `json:"observation"`
+			}{fixture.Name, json.RawMessage(out.Bytes())})
+			if e != nil {
+				t.Fatal(e)
+			}
+			t.Logf("NATIVE_CONTROLLER_CONSUMER_FIXTURE=%s", encoded)
+		})
+	}
+	if count != 9 {
+		t.Fatalf("expected9 producer cases, got%d", count)
+	}
+}

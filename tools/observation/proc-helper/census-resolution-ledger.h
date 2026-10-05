@@ -71,10 +71,27 @@ static inline bool census_same_proof_source(const struct proof_item *a,const str
 }
 /* The serializer must use this typed carrier, never proof_item verbatim. */
 static inline bool census_typed_proofs_valid(const struct census_resolution_ledger *r) {
-  if(r->certificates_n>64 || r->proofs_n!=2*r->certificates_n) return false;
+  if(r->certificates_n>64 || r->proofs_n>128 || r->resolutions_n>128) return false;
+  bool protected_used[128]={0};
+  for(unsigned i=0;i<r->proofs_n;i++) {
+    const struct census_typed_proof *p=&r->proofs[i];const struct proof_item *v=&p->source;
+    if(v->pid<=1 || v->pid>INT32_MAX || v->scan_index<1 || v->scan_index>10 ||
+        v->offset_ms>=10000 || v->replacement_start || !v->method || strcmp(v->method,"pidfd_no_pid")) return false;
+    if(v->kind==CENSUS_ENUMERATED_ABSENT) {
+      if(v->start || p->protected_identity || p->certificate_id) return false;
+    } else if(v->kind==CENSUS_INCARNATION_RETIRED) {
+      if(!v->start || (p->protected_identity?(!p->certificate_id || p->certificate_id>r->certificates_n):p->certificate_id!=0)) return false;
+    } else return false;
+    for(unsigned k=0;k<i;k++) {
+      const struct proof_item *old=&r->proofs[k].source;
+      if(old->pid==v->pid && old->start==v->start &&
+          (old->scan_index==v->scan_index || v->kind==CENSUS_INCARNATION_RETIRED)) return false;
+    }
+  }
   for(unsigned i=0;i<r->certificates_n;i++) {
     const struct census_typed_certificate *c=&r->certificates[i];
-    if(c->id!=i+1 || c->absence_proof!=2*i+1 || c->retirement_proof!=2*i+2) return false;
+    if(c->id!=i+1 || !c->absence_proof || !c->retirement_proof ||
+        c->absence_proof>=c->retirement_proof || c->retirement_proof>r->proofs_n || protected_used[c->retirement_proof-1]) return false;
     const struct census_typed_proof *a=&r->proofs[c->absence_proof-1],*known=&r->proofs[c->retirement_proof-1];
     if(a->protected_identity || a->certificate_id || !known->protected_identity || known->certificate_id!=c->id ||
         !census_same_proof_source(&a->source,&c->witness.absence) ||
@@ -85,7 +102,9 @@ static inline bool census_typed_proofs_valid(const struct census_resolution_ledg
         known->source.replacement_start || strcmp(known->source.method,"pidfd_no_pid") ||
         a->source.pid!=known->source.pid || a->source.scan_index!=known->source.scan_index ||
         a->source.offset_ms!=known->source.offset_ms) return false;
+    protected_used[c->retirement_proof-1]=true;
   }
+  for(unsigned i=0;i<r->proofs_n;i++) if(r->proofs[i].protected_identity!=protected_used[i]) return false;
   return true;
 }
 static inline bool census_absence_raw_eligible(const struct census_global_fault *e) {

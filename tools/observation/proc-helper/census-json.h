@@ -156,7 +156,25 @@ static inline void census_json_errors(struct census_json *o,const struct census_
   census_json_text(o,"[");
   for(unsigned i=0;i<s->errors_n;i++) {
     const struct census_global_fault *e=&s->errors[i];if(i) census_json_text(o,",");
-    census_json_text(o,"{\"reason\":");census_json_string(o,e->reason);
+    const char *reason=e->reason;char diagnostic_reason[64];
+    /* Approved NEGATIVE-only FD3 text. Internal ledger/raw fields never change.
+     * Invalid/missing categorical data falls back to the complete original
+     * reason, never a dropped error or a new eligible operation. */
+    if(!ev.complete && !strcmp(e->reason,"process_unavailable") && e->raw.operation &&
+        !strcmp(e->raw.operation,"classification") && e->raw.error==EINVAL &&
+        e->scan_index && e->scan_index<=s->history->n) {
+      const struct census_history_row *row=census_history_find(&s->history->scans[e->scan_index-1],e->raw.pid);
+      if(row && row->failure==CENSUS_ROW_CLASSIFICATION_FAILED && row->identity.start==e->raw.start) {
+        const struct census_reject_diagnostic *d=&row->diagnostic;
+        if(d->available && d->category>=1 && d->category<=4 && d->owner_present<=1 &&
+            d->nonempty<=15 && d->newline<=1) {
+          int n=snprintf(diagnostic_reason,sizeof diagnostic_reason,"process_unavailable:c%u:o%u:n%02x:x%u",
+            d->category,d->owner_present,d->nonempty,d->newline);
+          if(n>0 && (size_t)n<sizeof diagnostic_reason) reason=diagnostic_reason;
+        }
+      }
+    }
+    census_json_text(o,"{\"reason\":");census_json_string(o,reason);
     census_json_text(o,",\"operation\":");census_json_string(o,e->raw.operation);
     census_json_printf(o,",\"pid\":%u,\"errno\":%d,\"scan_index\":%u,\"resolved_by\":0,\"start_ticks\":",e->raw.pid,e->raw.error,e->scan_index);
     if(e->raw.start) census_json_printf(o,"\"%" PRIu64 "\"",e->raw.start);else census_json_text(o,"null");

@@ -20,12 +20,19 @@ enum census_row_class {CENSUS_CLASS_INVALID,CENSUS_CLASS_MANAGED,
   CENSUS_CLASS_NONMANAGED,CENSUS_CLASS_KERNEL};
 enum census_row_failure {CENSUS_ROW_OK,CENSUS_ROW_CAPTURE_FAILED,
   CENSUS_ROW_CLASSIFICATION_FAILED};
+/* Negative diagnostics only. c: 0 unset, 1 missing capture prerequisites,
+ * 2 inconsistent user/kernel capture, 3 nonmanaged city context, 4 session tuple.
+ * o is ANY owner-key PRESENT (existing parsed !no_gc_environment); n records
+ * NONEMPTY values, NOT per-key presence: SID=1, template=2, epoch=4, token=8.
+ * x records CR/LF in retained city. No strings, names or token hashes copied. */
+struct census_reject_diagnostic {unsigned category,owner_present,nonempty,newline;bool available;};
 struct census_history_row {
   uint32_t pid;
   enum census_row_class classification;
   enum census_row_failure failure;
   struct census_capture_fault raw_fault;
   struct census_owned_identity identity;
+  struct census_reject_diagnostic diagnostic;
 };
 struct census_history_scan {
   struct census_round_scan receipt;
@@ -41,19 +48,36 @@ struct census_history {
 typedef bool (*census_identity_source)(void *,uint32_t,struct census_budget *,
                                       struct census_owned_identity *,struct census_capture_fault *);
 
-static inline enum census_row_class census_classify_owned(const struct census_owned_identity *p) {
+static inline enum census_row_class census_classify_diagnosed(const struct census_owned_identity *p,
+    struct census_reject_diagnostic *diagnostic) {
+  struct census_reject_diagnostic d={0};
+  if(p->sid && p->city && p->template && p->name && p->environment_revalidated) {
+    d.available=true;d.owner_present=!p->no_gc_environment;
+    d.nonempty=(*p->sid?1u:0u)|(*p->template?2u:0u)|(p->epoch?4u:0u)|(*p->token?8u:0u);
+    d.newline=strchr(p->city,'\r')!=NULL || strchr(p->city,'\n')!=NULL;
+  }
+  enum census_row_class result=CENSUS_CLASS_INVALID;
   if(!p->pid || !p->sid || !p->city || !p->template || !p->name ||
-      !p->stat_revalidated || !p->pidfd_bound || !p->uids_revalidated) return CENSUS_CLASS_INVALID;
+      !p->stat_revalidated || !p->pidfd_bound || !p->uids_revalidated) {d.category=1;goto done;}
   bool empty_session=!*p->sid && !*p->template && !p->epoch && !*p->token;
   bool empty=empty_session && !*p->city;
   if(p->kernel_flags==0x00200000 && empty && !p->environment_revalidated &&
-      !p->no_gc_environment && !p->declared_root) return CENSUS_CLASS_KERNEL;
-  if(p->kernel_flags || !p->start || !p->pgid || !p->environment_revalidated) return CENSUS_CLASS_INVALID;
-  if(empty_session && p->no_gc_environment && !p->declared_root &&
-      strlen(p->city)<=4096 && !strchr(p->city,'\r') && !strchr(p->city,'\n')) return CENSUS_CLASS_NONMANAGED;
+      !p->no_gc_environment && !p->declared_root) {result=CENSUS_CLASS_KERNEL;goto done;}
+  if(p->kernel_flags || !p->start || !p->pgid || !p->environment_revalidated) {d.category=2;goto done;}
+  if(empty_session && p->no_gc_environment && !p->declared_root) {
+    if(strlen(p->city)<=4096 && !strchr(p->city,'\r') && !strchr(p->city,'\n')) result=CENSUS_CLASS_NONMANAGED;
+    else d.category=3;
+    goto done;
+  }
   if(*p->sid && *p->city && *p->template && p->epoch &&
-      !p->no_gc_environment && census_journal_digest(p->token)) return CENSUS_CLASS_MANAGED;
-  return CENSUS_CLASS_INVALID;
+      !p->no_gc_environment && census_journal_digest(p->token)) result=CENSUS_CLASS_MANAGED;
+  else d.category=4;
+done:
+  if(diagnostic) *diagnostic=d;
+  return result;
+}
+static inline enum census_row_class census_classify_owned(const struct census_owned_identity *p) {
+  return census_classify_diagnosed(p,NULL);
 }
 static inline void census_history_field(sha256_ctx *h,const char *s) {
   uint32_t n=(uint32_t)strlen(s);
@@ -121,7 +145,7 @@ static inline bool census_history_append_record(struct census_history *h,struct 
     } else if(!source(context,pids[i],b,&row->identity,&row->raw_fault)) {
       row->failure=CENSUS_ROW_CAPTURE_FAILED;
     } else {
-      row->classification=census_classify_owned(&row->identity);
+      row->classification=census_classify_diagnosed(&row->identity,&row->diagnostic);
       if(row->identity.pid!=pids[i] || row->classification==CENSUS_CLASS_INVALID)
         row->failure=CENSUS_ROW_CLASSIFICATION_FAILED;
     }

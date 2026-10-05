@@ -38,6 +38,7 @@ static inline bool census_same_classified(const struct census_history_row *a,
   }
   return census_same_owned(&a->identity,&b->identity);
 }
+#include "census-closing-reconcile.h"
 static inline bool census_finish_births(struct census_global_source *s,
     struct census_resolution_ledger *r,const struct census_round_journal *j) {
   if(j->selected_seal!=s->history->n || !j->selected_first || !j->selected_second) return false;
@@ -111,9 +112,7 @@ static inline enum census_round_result census_choose_proven_continuation(
         !census_continuation_capture(s,r,j,round,CENSUS_CLOSING) ||
         !census_continuation_capture(s,r,j,round,CENSUS_SEAL)) return CENSUS_ROUNDS_UNKNOWN;
     const struct census_round_scan *a=&j->scans[first],*b=&j->scans[first+1],*seal=&j->scans[first+2];
-    if(seal->late_birth || !seal->seal_revalidated || a->classified!=b->classified ||
-        b->classified!=seal->classified || strcmp(a->live_digest,b->live_digest) ||
-        strcmp(b->live_digest,seal->live_digest)) continue;
+    if(!census_current_closings_equal(s,r)) continue;
     j->selected_first=a->scan_id;j->selected_second=b->scan_id;j->selected_seal=seal->scan_id;
     if(!census_finish_births(s,r,j) || !census_final_resolutions_valid(s,r,j)) return CENSUS_ROUNDS_UNKNOWN;
     return CENSUS_ROUNDS_SELECTED_PENDING_PROOF;

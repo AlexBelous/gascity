@@ -13,7 +13,8 @@
   "openat2=beneath,no_symlinks,no_magiclinks;" \
   "seccomp=default_errno_x86_64_v3_pidfd_flags0;roots=exact_tmux_v1;" \
   "kernel=pf_kthread_stat_v1;kernel_comm=excluded_from_coverage_v1;" \
-  "non_target_env=nul_no_gc_v1;census=bounded-process-census/v3;rounds=3;" \
+  "non_target_env=validated_city_context_no_session_keys_v1;" \
+  "session_keys=sid,template,epoch,token_presence_v1;census=bounded-process-census/v3;rounds=3;" \
   "certificates=provisional_descendant_chain_v3"
 static struct census_bootstrap census_v3;
 int main(int argc,char **argv) {

@@ -44,11 +44,13 @@ typedef bool (*census_identity_source)(void *,uint32_t,struct census_budget *,
 static inline enum census_row_class census_classify_owned(const struct census_owned_identity *p) {
   if(!p->pid || !p->sid || !p->city || !p->template || !p->name ||
       !p->stat_revalidated || !p->pidfd_bound || !p->uids_revalidated) return CENSUS_CLASS_INVALID;
-  bool empty=!*p->sid && !*p->city && !*p->template && !p->epoch && !*p->token;
+  bool empty_session=!*p->sid && !*p->template && !p->epoch && !*p->token;
+  bool empty=empty_session && !*p->city;
   if(p->kernel_flags==0x00200000 && empty && !p->environment_revalidated &&
       !p->no_gc_environment && !p->declared_root) return CENSUS_CLASS_KERNEL;
   if(p->kernel_flags || !p->start || !p->pgid || !p->environment_revalidated) return CENSUS_CLASS_INVALID;
-  if(empty && p->no_gc_environment && !p->declared_root) return CENSUS_CLASS_NONMANAGED;
+  if(empty_session && p->no_gc_environment && !p->declared_root &&
+      strlen(p->city)<=4096 && !strchr(p->city,'\r') && !strchr(p->city,'\n')) return CENSUS_CLASS_NONMANAGED;
   if(*p->sid && *p->city && *p->template && p->epoch &&
       !p->no_gc_environment && census_journal_digest(p->token)) return CENSUS_CLASS_MANAGED;
   return CENSUS_CLASS_INVALID;

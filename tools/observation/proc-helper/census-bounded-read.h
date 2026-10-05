@@ -102,8 +102,8 @@ static inline bool census_read_bounded_environment(struct census_budget *budget,
     if(len>=3 && !memcmp(b.data+at,"GC_",3)) has_gc=true;
     at+=len+1;
   }
-  /* GC configuration alone does not establish process ownership. Any exact
-   * tuple/fallback key, including an empty one, keeps partial ownership invalid. */
+  /* City/fallback values are retained context, not session ownership. Any exact
+   * SID/template/epoch/token key, including empty, keeps partial ownership invalid. */
   out->no_gc_environment=true;out->environment_revalidated=true;
   if(!has_gc) goto empty;
   seen=census_alloc(budget,4096*sizeof *seen);if(!seen) {errno=ENOMEM;ok=false;goto done;}
@@ -128,7 +128,7 @@ static inline bool census_read_bounded_environment(struct census_budget *budget,
       if(eq[1]) sha256_sum(eq+1,strlen(eq+1),out->token);
     }
     if(dst) {
-      out->no_gc_environment=false;
+      if(dst==&out->sid || dst==&out->template) out->no_gc_environment=false;
       if(!utf8((unsigned char *)eq+1,strlen(eq+1))) {ok=false;goto done;}
       if(strlen(eq+1)>4096) {errno=EFBIG;ok=false;goto done;}
       if(!(*dst=census_string_copy(budget,eq+1))) {errno=ENOMEM;ok=false;goto done;}

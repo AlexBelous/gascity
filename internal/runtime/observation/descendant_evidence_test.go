@@ -8,7 +8,7 @@ import (
 )
 
 func TestDescendantAnchorsRequireBothFreshProviderJoins(t *testing.T) {
-	for _, mode := range []string{"verified", "anchor PID wrong", "anchor start wrong", "anchor token wrong", "anchor epoch wrong", "anchor city wrong", "anchor template wrong", "anchor SID wrong", "second frame contract stripped", "second frame root lost", "provider owner lost"} {
+	for _, mode := range []string{"verified", "anchor PID wrong", "anchor start wrong", "anchor token wrong", "anchor epoch wrong", "anchor city wrong", "anchor template wrong", "anchor SID wrong", "second frame contract stripped", "second frame root lost", "provider owner lost", "city context without provider ownership"} {
 		t.Run(mode, func(t *testing.T) {
 			p, roots := fixture(t)
 			ep := &evidenceProvider{observedProvider: p}
@@ -43,12 +43,22 @@ func TestDescendantAnchorsRequireBothFreshProviderJoins(t *testing.T) {
 					}
 				case "provider owner lost":
 					ep.roots[0].IsTracked = false
+				case "city context without provider ownership":
+					// A proc root under a context-only parent still needs the
+					// provider's session owner in both fresh joins.
+					if err := ep.SetMeta(ep.names[0], "GC_SESSION_ID", ""); err != nil {
+						t.Fatal(err)
+					}
 				}
 				e.RetirementAnchors = []proctable.ObservedRoot{anchor}
 				return e
 			}
 			got := ObserveProcessEvidence("/city", ep, read, func() time.Time { return now })
-			if got.ProcessComplete != (mode == "verified") {
+			if mode == "city context without provider ownership" {
+				if got.ProviderComplete {
+					t.Fatal("context/proc roots manufactured provider ownership")
+				}
+			} else if got.ProcessComplete != (mode == "verified") {
 				t.Fatalf("mode=%s complete=%v reasons=%v", mode, got.ProcessComplete, got.UnknownReasons)
 			}
 			if (got.CertificateDisposition == "provider_verified") != (mode == "verified") {

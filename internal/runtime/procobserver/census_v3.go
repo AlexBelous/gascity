@@ -287,13 +287,15 @@ func validCensusIdentity(v CensusIdentity, controller int) bool {
 		(positiveNumber(v.StartTicks) || v.Classification == "kernel" && v.StartTicks == "0") && v.Name != "" && len(v.Name) <= 256 && v.StatRevalidated && v.PIDFDBound && v.UIDsRevalidated) {
 		return false
 	}
-	emptyTuple := v.SessionID == "" && v.City == "" && v.Template == "" && v.Epoch == 0 && v.InstanceTokenSHA256 == ""
+	emptySession := v.SessionID == "" && v.Template == "" && v.Epoch == 0 && v.InstanceTokenSHA256 == ""
+	emptyTuple := emptySession && v.City == ""
 	switch v.Classification {
 	case "managed":
 		return v.PGID > 0 && v.KernelFlags == 0 && !v.NoGCEnvironment && v.EnvironmentRevalidated && safeIdentity(v.SessionID) && safeIdentity(v.City) && filepath.IsAbs(v.City) &&
 			filepath.Clean(v.City) == v.City && safeIdentity(v.Template) && v.Epoch > 0 && isHex(v.InstanceTokenSHA256, 64) && !infrastructureName(v.Name)
 	case "nonmanaged":
-		return v.PGID > 0 && v.KernelFlags == 0 && v.NoGCEnvironment && v.EnvironmentRevalidated && emptyTuple && !v.DeclaredRoot
+		return v.PGID > 0 && v.KernelFlags == 0 && v.NoGCEnvironment && v.EnvironmentRevalidated && emptySession &&
+			(v.City == "" || safeIdentity(v.City)) && !v.DeclaredRoot
 	case "kernel":
 		return v.KernelFlags == 0x00200000 && !v.NoGCEnvironment && !v.EnvironmentRevalidated && emptyTuple && !v.DeclaredRoot
 	default:

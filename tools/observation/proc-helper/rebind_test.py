@@ -82,6 +82,47 @@ class RebindTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     binder.render(release, dict(identity, kernel_release=value), 'c'*64)
 
+    def test_exact_v3_selector_is_rendered(self):
+        release, identity = self.fixture()
+        release['evidence_schema'] = 'host-process-evidence/v3'
+        binding, policy = binder.render(release, identity, 'c'*64)
+        self.assertEqual(json.loads(policy)['evidence_schema'], 'host-process-evidence/v3')
+        self.assertEqual(json.loads(policy)['caller_binding']['pid'], identity['pid'])
+        self.assertIn(b'controller_source_revision=' + b'a'*40 + b'\n', binding)
+
+    def test_v3_selector_cannot_bypass_release_proof(self):
+        release, identity = self.fixture()
+        release['evidence_schema'] = 'host-process-evidence/v3'
+        for key, value in [('uid', 42), ('executable', '/wrong'), ('binary_sha256', 'f'*64),
+                           ('namespace', 'pid:[456]'), ('start_ticks', '0')]:
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    binder.render(release, dict(identity, **{key: value}), 'c'*64)
+        with self.assertRaises(ValueError):
+            binder.render(release, identity, 'e'*64)
+
+    def test_unknown_or_nonstring_selector_refused(self):
+        release, identity = self.fixture()
+        for value in ['host-process-evidence/v2', 'host-process-evidence/v4', '', None, True, 3]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    binder.render(dict(release, evidence_schema=value), identity, 'c'*64)
+
+    def test_v3_restart_rebind_preserves_exact_selector(self):
+        release, identity = self.fixture()
+        release['evidence_schema'] = 'host-process-evidence/v3'
+        _, old_policy = binder.render(release, identity, 'c'*64)
+        _, new_policy = binder.render(release, dict(identity, pid=43, start_ticks='18'), 'c'*64)
+        old, new = json.loads(old_policy), json.loads(new_policy)
+        self.assertEqual(old['evidence_schema'], new['evidence_schema'])
+        self.assertNotEqual(old['caller_binding'], new['caller_binding'])
+        self.assertEqual(new['caller_binding']['pid'], 43)
+
+    def test_legacy_manifest_does_not_grant_v3_selector(self):
+        release, identity = self.fixture()
+        _, policy = binder.render(release, identity, 'c'*64)
+        self.assertNotIn('evidence_schema', json.loads(policy))
+
 
 if __name__ == '__main__':
     unittest.main()

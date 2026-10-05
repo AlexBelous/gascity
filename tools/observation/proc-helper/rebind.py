@@ -43,6 +43,11 @@ def render(release, identity, helper_sha):
                 'controller_uid', 'controller_user', 'controller_gid', 'helper_uid',
                 'helper_gid', 'helper_binary_sha256', 'policy_digest', 'pid_namespace_identity',
                 'kernel_release', 'kernel_proof_profile'}
+    selector = release.get('evidence_schema')
+    if 'evidence_schema' in release:
+        if type(selector) is not str or selector != 'host-process-evidence/v3':
+            raise ValueError('exact V3 evidence selector required')
+        expected = expected | {'evidence_schema'}
     if set(release) != expected:
         raise ValueError('release manifest keys invalid')
     if (type(release['kernel_release']) is not str or
@@ -89,6 +94,8 @@ def render(release, identity, helper_sha):
               'helper_source_revision': release['source_revision'], 'helper_binary_sha256': helper_sha,
               'policy_digest': release['policy_digest'], 'boot_id': identity['boot_id'],
               'pid_namespace_identity': identity['namespace'], 'caller_binding': caller}
+    if selector is not None:
+        policy['evidence_schema'] = selector
     return ''.join(f'{k}={v}\n' for k, v in binding.items()).encode(), (json.dumps(policy, sort_keys=True) + '\n').encode()
 
 

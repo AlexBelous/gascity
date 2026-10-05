@@ -66,7 +66,8 @@ type controllerProcessDiagnostics struct {
 }
 
 type controllerSocketOptions struct {
-	observe func(context.Context) controllerObservationReply
+	observe   func(context.Context) controllerObservationReply
+	observeV3 func(context.Context) controllerObservationReplyV3
 }
 
 type controllerObservationService struct {

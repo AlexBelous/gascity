@@ -203,7 +203,7 @@ func handleControllerConn(
 		line := string(lineBytes)
 		switch {
 		case line == controllerObservationCommand:
-			handleControllerObservation(conn, reader, cityPath, options)
+			handleControllerObservationV3(conn, reader, cityPath, options)
 		case line == "stop":
 			cancelFn()
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
@@ -1316,8 +1316,8 @@ func runController(
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	observer := newControllerObservationService(ctx, cityPath)
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, controllerSocketOptions{observe: observer.observe})
+	observer := newControllerObservationServiceV3(ctx, cityPath)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, controllerSocketOptions{observeV3: observer.observe})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

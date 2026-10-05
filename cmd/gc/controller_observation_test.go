@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -582,7 +583,7 @@ func TestControllerObservationTransportAbsentAndCancellation(t *testing.T) {
 		close(canceled)
 		return svc.unknown("fixture canceled")
 	}
-	lis, err := startControllerSocket(city, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil, controllerSocketOptions{observe: svc.observe})
+	lis, err := startLegacyObservationTestSocket(city, controllerSocketOptions{observe: svc.observe})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -669,7 +670,7 @@ func TestControllerObservationTwoCLIProcessesOnePersistentCaller(t *testing.T) {
 		r.ControllerPID = os.Getpid()
 		return r
 	}
-	lis, err := startControllerSocket(city, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil, controllerSocketOptions{observe: svc.observe})
+	lis, err := startLegacyObservationTestSocket(city, controllerSocketOptions{observe: svc.observe})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,6 +681,10 @@ func TestControllerObservationTwoCLIProcessesOnePersistentCaller(t *testing.T) {
 		cmd.Env = append(os.Environ(), "TEST_OBSERVER_FIXTURE_CITY="+city, "TEST_OBSERVER_FIXTURE_PID="+strconv.Itoa(os.Getpid()))
 		output, err := cmd.Output()
 		if err != nil {
+			exit := &exec.ExitError{}
+			if errors.As(err, &exit) {
+				t.Fatalf("relay subprocess: %v stdout=%s stderr=%s", err, output, exit.Stderr)
+			}
 			t.Fatalf("relay subprocess: %v %s", err, output)
 		}
 		cliPIDs = append(cliPIDs, cmd.ProcessState.Pid())
@@ -755,7 +760,7 @@ func TestControllerObservationPrefetchedExtraAndOversizedDomain(t *testing.T) {
 				r.Processes = []observation.Process{{RuntimeName: strings.Repeat("x", controllerObservationLimit)}}
 				return r
 			}
-			lis, err := startControllerSocket(city, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil, controllerSocketOptions{observe: callback})
+			lis, err := startLegacyObservationTestSocket(city, controllerSocketOptions{observe: callback})
 			if err != nil {
 				t.Fatal(err)
 			}

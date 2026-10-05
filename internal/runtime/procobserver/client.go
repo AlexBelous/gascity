@@ -513,14 +513,19 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 					return fmt.Errorf("required wire key missing")
 				}
 			}
-		case reflect.Slice:
+		case reflect.Slice, reflect.Array:
 			if token != json.Delim('[') {
 				return fmt.Errorf("wire array type invalid")
 			}
+			count := 0
 			for d.More() {
 				if err = walk(t.Elem(), depth+1); err != nil {
 					return err
 				}
+				count++
+			}
+			if t.Kind() == reflect.Array && count != t.Len() {
+				return fmt.Errorf("wire fixed array length invalid")
 			}
 			if _, err = d.Token(); err != nil {
 				return err

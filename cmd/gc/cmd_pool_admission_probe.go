@@ -36,7 +36,7 @@ func newPoolAdmissionProbeCmd(stdout, _ io.Writer) *cobra.Command {
 				return err
 			}
 			if viaController {
-				return relayControllerObservation(context.Background(), cityPath, commit, stdout)
+				return relayControllerObservationV3(context.Background(), cityPath, commit, stdout)
 			}
 			result := map[string]any{"city_path": cityPath, "ok": false}
 			observed := observation.Observation{

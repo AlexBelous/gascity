@@ -30,7 +30,7 @@ go_test(
         "capacity_test.go",
         "meta_privacy_test.go",
         "pipe_error_test.go",
-        "process_evidence_test.go",
+        "process_evidence_test.go",  # keep: integration process-evidence owner
         "proctable_linux_test.go",
         "protocol_test.go",
         "seams_test.go",

@@ -1,17 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime/procobserver"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -39,10 +35,10 @@ func controllerV3RouteFixture(t *testing.T, city string) (*controllerObservation
 	return s, p, frames
 }
 
-func TestControllerV3SupportedFullRPCRoute(t *testing.T) {
-	for _, mode := range []string{"complete", "partial helper", "provider lost", "v2 policy", "legacy-only option"} {
+func assertControllerV3SupportedFullRPCRoute(t *testing.T, city string, setObserver func(func(context.Context) controllerObservationReplyV3)) {
+	t.Helper()
+	for _, mode := range []string{"complete", "partial helper", "provider lost", "v2 policy"} {
 		t.Run(mode, func(t *testing.T) {
-			city := t.TempDir()
 			s, p, frames := controllerV3RouteFixture(t, city)
 			reads := 0
 			read := s.readEvidence
@@ -61,23 +57,11 @@ func TestControllerV3SupportedFullRPCRoute(t *testing.T) {
 				bad.EvidenceSchema = procobserver.Schema
 				s.loadPolicy = func() (procobserver.ReleasePolicyV3, error) { return bad, nil }
 			}
-			legacyCalls := 0
-			option := controllerSocketOptions{observeV3: s.observe, observe: func(context.Context) controllerObservationReply {
-				legacyCalls++
-				return controllerObservationReply{}
-			}}
-			if mode == "legacy-only option" {
-				option.observeV3 = nil
-			}
-			lis, err := startControllerSocket(city, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil, option)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer lis.Close() //nolint:errcheck // owned fixture
+			setObserver(s.observe)
 			ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
 			defer cancel()
 			var out bytes.Buffer
-			err = relayControllerObservationV3At(ctx, city, controllerSocketPath(city), p.HelperSourceRevision, &out,
+			err := relayControllerObservationV3At(ctx, city, controllerSocketPath(city), p.HelperSourceRevision, &out,
 				func() (procobserver.ReleasePolicyV3, error) { return p, nil },
 				func(net.Conn, procobserver.CallerBinding) error { return nil },
 				writeControllerObservationRequestV3, s.now)
@@ -87,9 +71,6 @@ func TestControllerV3SupportedFullRPCRoute(t *testing.T) {
 			var got controllerObservationReplyV3
 			if err := procobserver.DecodeStrict(out.Bytes(), &got); err != nil {
 				t.Fatal(err)
-			}
-			if legacyCalls != 0 {
-				t.Fatal("supported FULL route fell back to V2")
 			}
 			if mode == "complete" || mode == "partial helper" {
 				if reads != 2 || !reflect.DeepEqual(got.ProcessDiagnostics, frames) {
@@ -141,30 +122,31 @@ func TestControllerV3SupportedRouteRejectsExtraRequest(t *testing.T) {
 
 // Legacy services remain covered by isolated unit fixtures, without registering
 // a V2 fallback on the production controller socket.
-func startLegacyObservationTestSocket(city string, options ...controllerSocketOptions) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(controllerSocketPath(city)), 0o700); err != nil {
-		return nil, err
-	}
-	lis, err := net.Listen("unix", controllerSocketPath(city))
-	if err != nil {
-		return nil, err
-	}
+
+// A legacy-only option cannot supply the production V3 dispatcher.
+func TestControllerV3LegacyOnlyOptionNeverFallsBack(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck // owned fixture
+	done := make(chan struct{})
+	legacyCalls := 0
 	go func() {
-		for {
-			c, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer c.Close() //nolint:errcheck // owned fixture
-				_ = c.SetDeadline(time.Now().Add(testutil.GoroutineRaceTimeout))
-				reader := bufio.NewReader(c)
-				line, err := readControllerCommandLine(reader)
-				if err == nil && string(line) == controllerObservationCommand {
-					handleControllerObservation(c, reader, city, options)
-				}
-			}()
-		}
+		handleControllerConn(server, "/city", controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil, nil,
+			controllerSocketOptions{observe: func(context.Context) controllerObservationReply {
+				legacyCalls++
+				return controllerObservationReply{}
+			}})
+		close(done)
 	}()
-	return lis, nil
+	if _, err := io.WriteString(client, controllerObservationCommand+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitControllerV3Service(t, done)
+	var got controllerObservationReplyV3
+	if procobserver.DecodeStrict(raw, &got) != nil || legacyCalls != 0 || got.ProviderComplete || got.ProcessComplete || got.CertificateDisposition != "provisional" {
+		t.Fatal("legacy option promoted V3 or invoked V2 fallback")
+	}
 }

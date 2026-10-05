@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/mod/module"
 )
 
 // TestPinnedBeadsModuleDirRefusesAnUnresolvedCache is the fence under the drift
@@ -95,4 +97,56 @@ func (r *recordingModuleDirReporter) Fatalf(format string, args ...any) {
 
 func (r *recordingModuleDirReporter) Skipf(format string, args ...any) {
 	r.skips = append(r.skips, fmt.Sprintf(format, args...))
+}
+
+// The drift check must resolve the replacement's source even when an ambient
+// upstream cache exists; an uppercase fork path uses Go's escaped cache name.
+func TestPinnedBeadsSourceAndCacheHonorReplacement(t *testing.T) {
+	const fork = "github.com/AlexBelous/beads"
+	for _, tc := range []struct {
+		name, directive, path, version string
+		invalid                        bool
+	}{
+		{name: "original", path: PinnedBeadsModulePath, version: "v1.3.0"},
+		{name: "fork", directive: "replace github.com/steveyegge/beads => github.com/AlexBelous/beads v1.1.1-0.20260928222722-da08f27390f1", path: fork, version: "v1.1.1-0.20260928222722-da08f27390f1"},
+		{name: "version specific", directive: "replace (\n github.com/steveyegge/beads => github.com/AlexBelous/beads v1.2.0\n github.com/steveyegge/beads v1.3.0 => github.com/AlexBelous/beads v1.2.1\n)", path: fork, version: "v1.2.1"},
+		{name: "other version", directive: "replace github.com/steveyegge/beads v1.2.0 => github.com/AlexBelous/beads v1.2.1", path: PinnedBeadsModulePath, version: "v1.3.0"},
+		{name: "local rejected", directive: "replace github.com/steveyegge/beads => ../beads", invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, err := pinnedBeadsSource([]byte("module gascity.test/pins\ngo 1.26.6\nrequire github.com/steveyegge/beads v1.3.0\n" + tc.directive + "\n"))
+			if tc.invalid {
+				if err == nil {
+					t.Fatal("unversioned source accepted")
+				}
+				return
+			}
+			if err != nil || source != (module.Version{Path: tc.path, Version: tc.version}) {
+				t.Fatalf("source=%#v err=%v", source, err)
+			}
+			cache := t.TempDir()
+			// Only the original module is cached: a replacement must still fail closed.
+			upstream := filepath.Join(cache, "github.com/steveyegge/beads@v1.3.0")
+			if err := os.MkdirAll(upstream, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if source.Path != PinnedBeadsModulePath {
+				if _, err := pinnedModuleDir(cache, source); err == nil {
+					t.Fatal("ambient upstream cache substituted for replacement")
+				}
+			}
+			escaped, err := module.EscapePath(source.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := filepath.Join(cache, escaped+"@"+source.Version)
+			if err := os.MkdirAll(want, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			got, err := pinnedModuleDir(cache, source)
+			if err != nil || got != want {
+				t.Fatalf("cache=%q want=%q err=%v", got, want, err)
+			}
+		})
+	}
 }

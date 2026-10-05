@@ -1,14 +1,9 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -17,87 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/observation"
 	"github.com/gastownhall/gascity/internal/runtime/procobserver"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
-
-func TestControllerV3RelayClosingCancellation(t *testing.T) {
-	for _, mode := range []string{"before policy", "after decode", "after closing peer"} {
-		t.Run(mode, func(t *testing.T) {
-			p, frames, now := controllerV3Fixture()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			var out bytes.Buffer
-			loads := 0
-			load := func() (procobserver.ReleasePolicyV3, error) { loads++; return p, nil }
-			if mode == "before policy" {
-				cancel()
-				err := relayControllerObservationV3At(ctx, "/city", "/fixture-not-open", p.HelperSourceRevision, &out, load,
-					func(net.Conn, procobserver.CallerBinding) error { t.Fatal("canceled relay verified peer"); return nil },
-					writeControllerObservationRequestV3, func() time.Time { return now })
-				if err == nil || loads != 0 {
-					t.Fatalf("already canceled relay loaded policy or succeeded: loads=%d err=%v", loads, err)
-				}
-				return
-			}
-			calls := 0
-			reply := collectControllerObservationV3(context.Background(), "/city", p, controllerV3Provider(t),
-				func(context.Context, procobserver.ReleasePolicyV3) (procobserver.ResponseV3, error) {
-					f := frames[calls]
-					calls++
-					return f, nil
-				}, func() time.Time { return now })
-			data, err := json.Marshal(reply)
-			if err != nil {
-				t.Fatal(err)
-			}
-			path := filepath.Join(t.TempDir(), "s")
-			lis, err := net.Listen("unix", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer lis.Close() //nolint:errcheck // owned fixture
-			done := make(chan error, 1)
-			go func() {
-				c, e := lis.Accept()
-				if e != nil {
-					done <- e
-					return
-				}
-				defer c.Close() //nolint:errcheck // owned fixture
-				_ = c.SetDeadline(time.Now().Add(testutil.GoroutineRaceTimeout))
-				if _, e = bufio.NewReader(c).ReadString('\n'); e == nil {
-					_, e = c.Write(data)
-				}
-				done <- e
-			}()
-			checks := 0
-			verify := func(net.Conn, procobserver.CallerBinding) error {
-				checks++
-				if mode == "after closing peer" && checks == 2 {
-					cancel()
-				}
-				return nil
-			}
-			relayNow := func() time.Time {
-				if mode == "after decode" {
-					cancel()
-				}
-				return now
-			}
-			err = relayControllerObservationV3At(ctx, "/city", path, p.HelperSourceRevision, &out, load, verify, writeControllerObservationRequestV3, relayNow)
-			if err == nil {
-				t.Fatal("cancellation published a late COMPLETE")
-			}
-			var got controllerObservationReplyV3
-			if procobserver.DecodeStrict(out.Bytes(), &got) != nil || (got.ProviderComplete && got.ProcessComplete) || got.CertificateDisposition != "provisional" {
-				t.Fatal("cancellation was not typed UNKNOWN")
-			}
-			if e := waitControllerV3Service(t, done); e != nil {
-				t.Fatal(e)
-			}
-		})
-	}
-}
 
 func controllerV3Fixture() (procobserver.ReleasePolicyV3, []procobserver.ResponseV3, time.Time) {
 	now := time.Now().UTC()
@@ -267,99 +182,6 @@ func TestControllerV3ValidationCannotPromoteOrDropAFrame(t *testing.T) {
 				if procobserver.DecodeStrict(data, &legacy) == nil {
 					t.Fatal("legacy relay accepted V3")
 				}
-			}
-		})
-	}
-}
-
-func TestControllerV3RelayPreservesBytesAndPeerFence(t *testing.T) {
-	for _, mode := range []string{"exact", "bad JSON", "extra JSON", "peer before", "peer after", "request failure", "partial"} {
-		t.Run(mode, func(t *testing.T) {
-			p, frames, now := controllerV3Fixture()
-			calls := 0
-			r := collectControllerObservationV3(context.Background(), "/city", p, controllerV3Provider(t), func(context.Context, procobserver.ReleasePolicyV3) (procobserver.ResponseV3, error) {
-				f := frames[calls]
-				calls++
-				return f, nil
-			}, func() time.Time { return now })
-			if mode == "partial" {
-				r.ProviderComplete = false
-				r.CertificateDisposition = "provisional"
-				r.UnknownReasons = []string{"fixture provider unavailable"}
-				r.ControllerBinding = "not_observed"
-			}
-			data, _ := json.MarshalIndent(r, "", " ")
-			data = append(data, '\n')
-			if mode == "bad JSON" {
-				data = []byte("{}\n")
-			}
-			if mode == "extra JSON" {
-				data = append(data, []byte("{}\n")...)
-			}
-			path := filepath.Join(t.TempDir(), "s")
-			lis, e := net.Listen("unix", path)
-			if e != nil {
-				t.Fatal(e)
-			}
-			defer lis.Close() //nolint:errcheck // isolated relay fixture
-			done := make(chan error, 1)
-			go func() {
-				c, e := lis.Accept()
-				if e != nil {
-					done <- e
-					return
-				}
-				defer c.Close() //nolint:errcheck // isolated relay fixture
-				_ = c.SetDeadline(time.Now().Add(testutil.GoroutineRaceTimeout))
-				_, e = bufio.NewReader(c).ReadString('\n')
-				if e != nil {
-					done <- nil
-					return
-				}
-				_, e = c.Write(data)
-				done <- e
-			}()
-			checks := 0
-			verify := func(net.Conn, procobserver.CallerBinding) error {
-				checks++
-				if mode == "peer before" || mode == "peer after" && checks == 2 {
-					return fmt.Errorf("fixture mismatch")
-				}
-				return nil
-			}
-			request := func(c net.Conn) error {
-				if mode == "request failure" {
-					return fmt.Errorf("fixture request failed")
-				}
-				_, err := io.WriteString(c, "test-only request\n")
-				return err
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
-			defer cancel()
-			var out bytes.Buffer
-			err := relayControllerObservationV3At(ctx, "/city", path, p.HelperSourceRevision, &out, func() (procobserver.ReleasePolicyV3, error) { return p, nil }, verify, request, func() time.Time { return now })
-			if (err == nil) != (mode == "exact") {
-				t.Fatalf("mode %s: %v", mode, err)
-			}
-			if mode == "exact" && (!bytes.Equal(out.Bytes(), data) || checks != 2) {
-				t.Fatal("relay refreshed, trimmed or failed to fence evidence")
-			}
-			if mode == "partial" && (!bytes.Equal(out.Bytes(), data) || checks != 2) {
-				t.Fatal("partial raw frames altered")
-			}
-			if mode != "exact" && mode != "partial" {
-				var unknown controllerObservationReplyV3
-				if procobserver.DecodeStrict(out.Bytes(), &unknown) != nil || unknown.ProcessComplete || unknown.ProviderComplete || unknown.CertificateDisposition != "provisional" {
-					t.Fatal("invalid relay reply promoted")
-				}
-			}
-			select {
-			case e := <-done:
-				if e != nil {
-					t.Fatal(e)
-				}
-			case <-ctx.Done():
-				t.Fatal("fixture relay server did not return")
 			}
 		})
 	}

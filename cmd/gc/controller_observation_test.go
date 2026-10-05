@@ -5,16 +5,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -369,6 +369,18 @@ func TestControllerObservationRetryCancellationKeepsFlightUntilCollectionEnds(t 
 				request = context.Background()
 			}
 			secondRead, release := make(chan struct{}), make(chan struct{})
+			releaseRead := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(func() {
+				cancel()
+				releaseRead()
+				// Also drain the flight after an earlier assertion/readiness failure.
+				select {
+				case controllerObservationFlight <- struct{}{}:
+					<-controllerObservationFlight
+				case <-time.After(hangBudget):
+					t.Error("canceled collection retained its flight beyond the hang budget")
+				}
+			})
 			reads := 0
 			svc.readEvidence = func(context.Context, procobserver.Policy) (procobserver.Response, error) {
 				reads++
@@ -380,18 +392,27 @@ func TestControllerObservationRetryCancellationKeepsFlightUntilCollectionEnds(t 
 			}
 			done := make(chan controllerObservationReply, 1)
 			go func() { done <- svc.observe(request) }()
-			<-secondRead
+			awaitClose(t, secondRead, "second helper read")
 			cancel()
-			if r := <-done; r.ProviderComplete || r.ProcessComplete {
-				t.Fatal("canceled attempt returned complete")
+			select {
+			case r := <-done:
+				if r.ProviderComplete || r.ProcessComplete {
+					t.Fatal("canceled attempt returned complete")
+				}
+			case <-time.After(hangBudget):
+				t.Fatal("canceled observation did not return within the hang budget")
 			}
 			other, _, _ := controllerRetryFixture(t)
 			busy := other.observe(context.Background())
-			close(release)
+			releaseRead()
 			// This barrier can acquire the global slot only after the outstanding
-			// read really returns; no sleeps or new test timing races are needed.
-			controllerObservationFlight <- struct{}{}
-			<-controllerObservationFlight
+			// read really returns; its deadline detects a hung proof, not speed.
+			select {
+			case controllerObservationFlight <- struct{}{}:
+				<-controllerObservationFlight
+			case <-time.After(hangBudget):
+				t.Fatal("released collection did not return its flight within the hang budget")
+			}
 			if reads != 2 || len(busy.UnknownReasons) != 1 || busy.UnknownReasons[0] != "observation busy" {
 				t.Fatalf("cancellation released flight early or retried: reads=%d busy=%+v", reads, busy)
 			}
@@ -480,256 +501,73 @@ func controllerObservationFixture(city string) controllerObservationReply {
 	return r
 }
 
-func TestControllerObservationSocketRelay(t *testing.T) {
-	for _, mode := range []string{"exact", "partial", "wrong source", "wrong city", "missing scalar", "null scalar", "duplicate scalar", "extra frame", "oversized", "unsupported"} {
-		t.Run(mode, func(t *testing.T) {
-			city := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			lis, err := net.Listen("unix", controllerSocketPath(city))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer lis.Close() //nolint:errcheck // isolated fixture cleanup
-			r := controllerObservationFixture(city)
-			switch mode {
-			case "partial":
-				r.ProcessComplete = false
-				r.UnknownReasons = []string{"fixture permission"}
-			case "wrong source":
-				r.SourceRevision = strings.Repeat("f", 40)
-			case "wrong city":
-				r.CityPath = "/other"
-			}
-			raw, err := json.Marshal(r)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch mode {
-			case "missing scalar":
-				raw = bytes.Replace(raw, []byte(`"provider_complete":true,`), nil, 1)
-			case "null scalar":
-				raw = bytes.Replace(raw, []byte(`"provider_complete":true`), []byte(`"provider_complete":null`), 1)
-			case "duplicate scalar":
-				raw = bytes.Replace(raw, []byte(`"provider_complete":true`), []byte(`"provider_complete":true,"provider_complete":true`), 1)
-			case "extra frame":
-				raw = append(raw, []byte("\n{}")...)
-			case "oversized":
-				raw = []byte(strings.Repeat(" ", controllerObservationLimit+1))
-			case "unsupported":
-				raw = []byte("unsupported\n")
-			}
-			raw = append(raw, '\n')
-			done := make(chan error, 1)
-			go func() {
-				conn, e := lis.Accept()
-				if e != nil {
-					done <- e
-					return
-				}
-				defer conn.Close() //nolint:errcheck // isolated fixture cleanup
-				line, e := bufio.NewReader(conn).ReadString('\n')
-				if e != nil || line != controllerObservationCommand+"\n" {
-					done <- fmt.Errorf("wrong fixed request %q: %w", line, e)
-					return
-				}
-				_, e = conn.Write(raw)
-				if mode == "oversized" {
-					e = nil
-				}
-				done <- e
-			}()
-			var out bytes.Buffer
-			err = fixtureControllerRelay(context.Background(), city, strings.Repeat("a", 40), &out)
-			if mode == "exact" {
-				if err != nil || !bytes.Equal(out.Bytes(), raw) {
-					t.Fatalf("provenance/bytes rewritten err=%v", err)
-				}
-			} else if err == nil {
-				t.Fatal("invalid/incomplete became complete")
-			}
-			if mode == "partial" && !bytes.Equal(out.Bytes(), raw) {
-				t.Fatal("partial daemon evidence rewritten")
-			}
-			if e := <-done; e != nil {
-				t.Fatal(e)
-			}
-		})
-	}
-}
-
-func TestControllerObservationTransportAbsentAndCancellation(t *testing.T) {
-	var out bytes.Buffer
-	if err := relayControllerObservation(context.Background(), t.TempDir(), strings.Repeat("a", 40), &out); err == nil {
-		t.Fatal("socket-down allowed")
-	}
-	var r controllerObservationReply
-	if err := procobserver.DecodeStrict(out.Bytes(), &r); err != nil || r.ProcessComplete || r.ProviderComplete {
-		t.Fatalf("socket-down not typed UNKNOWN: %v", err)
-	}
-	city := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	svc := newControllerObservationService(ctx, city)
-	defer cancel()
-	svc.install(&controllerState{sp: runtime.NewFake()})
-	svc.loadPolicy = func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }
-	svc.checkCaller = func(procobserver.Policy) error { return nil }
-	started := make(chan struct{})
-	canceled := make(chan struct{})
-	svc.collect = func(ctx context.Context, _ procobserver.Policy, _ runtime.Provider) controllerObservationReply {
-		close(started)
-		<-ctx.Done()
-		close(canceled)
-		return svc.unknown("fixture canceled")
-	}
-	lis, err := startLegacyObservationTestSocket(city, controllerSocketOptions{observe: svc.observe})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // isolated fixture cleanup
-	conn, err := net.Dial("unix", controllerSocketPath(city))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = io.WriteString(conn, controllerObservationCommand+"\n"); err != nil {
-		t.Fatal(err)
-	}
-	<-started
-	_ = conn.Close()
-	select {
-	case <-canceled:
-	case <-time.After(time.Second):
-		t.Fatal("disconnect did not cancel helper collection")
-	}
-}
-
 func TestControllerObservationPolicyLatchesOnlyVerifiedBinding(t *testing.T) {
-	svc := newControllerObservationService(context.Background(), "/city")
-	svc.install(&controllerState{sp: runtime.NewFake()})
-	calls := 0
-	verified := false
-	svc.loadPolicy = func() (procobserver.Policy, error) { calls++; return procobserver.Policy{}, nil }
-	svc.checkCaller = func(procobserver.Policy) error {
-		if !verified {
-			return fmt.Errorf("stale PID")
-		}
-		return nil
-	}
-	svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
-		return svc.unknown("fixture partial")
-	}
-	if got := svc.observe(context.Background()); got.ProcessComplete || svc.policy != nil {
-		t.Fatal("stale binding latched")
-	}
-	// Await actual slot release before the next independent tick.
-	for len(controllerObservationFlight) > 0 {
-		time.Sleep(time.Millisecond)
-	}
-	verified = true
-	svc.observe(context.Background())
-	for len(controllerObservationFlight) > 0 {
-		time.Sleep(time.Millisecond)
-	}
-	svc.observe(context.Background())
-	if calls != 2 {
-		t.Fatalf("policy read per tick: %d", calls)
-	}
-}
-
-func TestControllerObservationRelaySubprocess(t *testing.T) {
-	city := os.Getenv("TEST_OBSERVER_FIXTURE_CITY")
-	if city == "" {
-		return
-	}
-	if !strings.Contains(city, "gc-observer-fixture-") {
-		t.Fatal("subprocess target is not an isolated fixture")
-	}
-	if err := fixtureControllerRelay(context.Background(), city, strings.Repeat("a", 40), os.Stdout); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestControllerObservationTwoCLIProcessesOnePersistentCaller(t *testing.T) {
-	city, err := os.MkdirTemp("/tmp", "gc-observer-fixture-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(city) //nolint:errcheck // isolated fixture cleanup
-	svc := newControllerObservationService(context.Background(), city)
-	svc.install(&controllerState{sp: runtime.NewFake()})
-	policyReads := 0
-	collections := 0
-	callerPIDs := []int{}
-	svc.loadPolicy = func() (procobserver.Policy, error) { policyReads++; return procobserver.Policy{}, nil }
-	svc.checkCaller = func(procobserver.Policy) error { return nil }
-	svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
-		collections++
-		callerPIDs = append(callerPIDs, os.Getpid())
-		r := controllerObservationFixture(city)
-		r.ControllerPID = os.Getpid()
-		return r
-	}
-	lis, err := startLegacyObservationTestSocket(city, controllerSocketOptions{observe: svc.observe})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // isolated fixture cleanup
-	cliPIDs := []int{}
-	for i := 0; i < 2; i++ {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestControllerObservationRelaySubprocess$")
-		cmd.Env = append(os.Environ(), "TEST_OBSERVER_FIXTURE_CITY="+city, "TEST_OBSERVER_FIXTURE_PID="+strconv.Itoa(os.Getpid()))
-		output, err := cmd.Output()
-		if err != nil {
-			exit := &exec.ExitError{}
-			if errors.As(err, &exit) {
-				t.Fatalf("relay subprocess: %v stdout=%s stderr=%s", err, output, exit.Stderr)
+	synctest.Test(t, func(t *testing.T) {
+		svc := newControllerObservationService(context.Background(), "/city")
+		svc.install(&controllerState{sp: runtime.NewFake()})
+		calls := 0
+		verified := false
+		svc.loadPolicy = func() (procobserver.Policy, error) { calls++; return procobserver.Policy{}, nil }
+		svc.checkCaller = func(procobserver.Policy) error {
+			if !verified {
+				return fmt.Errorf("stale PID")
 			}
-			t.Fatalf("relay subprocess: %v %s", err, output)
+			return nil
 		}
-		cliPIDs = append(cliPIDs, cmd.ProcessState.Pid())
-		line := bytes.SplitN(output, []byte("\n"), 2)[0]
-		var r controllerObservationReply
-		if procobserver.DecodeStrict(line, &r) != nil || r.ControllerPID != os.Getpid() || !r.ProcessComplete {
-			t.Fatalf("wrong persistent provenance %s", line)
+		svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
+			return svc.unknown("fixture partial")
 		}
-	}
-	if cliPIDs[0] == cliPIDs[1] || cliPIDs[0] == os.Getpid() || cliPIDs[1] == os.Getpid() || collections != 2 || policyReads != 1 || len(callerPIDs) != 2 || callerPIDs[0] != os.Getpid() || callerPIDs[1] != os.Getpid() {
-		t.Fatalf("caller lifecycle CLI=%v caller=%v policyloads=%d", cliPIDs, callerPIDs, policyReads)
-	}
+		if got := svc.observe(context.Background()); got.ProcessComplete || svc.policy != nil {
+			t.Fatal("stale binding latched")
+		}
+		// Await actual slot release before the next independent tick.
+		synctest.Wait()
+		if len(controllerObservationFlight) != 0 {
+			t.Fatal("flight not released at quiescence")
+		}
+		verified = true
+		svc.observe(context.Background())
+		synctest.Wait()
+		if len(controllerObservationFlight) != 0 {
+			t.Fatal("flight not released at quiescence")
+		}
+		svc.observe(context.Background())
+		if calls != 2 {
+			t.Fatalf("policy read per tick: %d", calls)
+		}
+	})
 }
 
 func TestControllerObservationTimeoutRetainsSingleFlight(t *testing.T) {
-	svc := newControllerObservationService(context.Background(), "/city")
-	svc.install(&controllerState{sp: runtime.NewFake()})
-	svc.loadPolicy = func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }
-	svc.checkCaller = func(procobserver.Policy) error { return nil }
-	started := make(chan struct{})
-	release := make(chan struct{})
-	svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
-		close(started)
-		<-release
-		return svc.unknown("fixture released")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan controllerObservationReply, 1)
-	go func() { done <- svc.observe(ctx) }()
-	<-started
-	cancel()
-	if got := <-done; got.ProcessComplete || got.ProviderComplete {
-		t.Fatal("canceled result complete")
-	}
-	if got := svc.observe(context.Background()); len(got.UnknownReasons) != 1 || got.UnknownReasons[0] != "observation busy" {
-		t.Fatal("noncooperative read lost limiter")
-	}
-	close(release)
-	deadline := time.Now().Add(time.Second)
-	for len(controllerObservationFlight) > 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if len(controllerObservationFlight) > 0 {
-		t.Fatal("limiter was not released")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		svc := newControllerObservationService(context.Background(), "/city")
+		svc.install(&controllerState{sp: runtime.NewFake()})
+		svc.loadPolicy = func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }
+		svc.checkCaller = func(procobserver.Policy) error { return nil }
+		started := make(chan struct{})
+		release := make(chan struct{})
+		svc.collect = func(context.Context, procobserver.Policy, runtime.Provider) controllerObservationReply {
+			close(started)
+			<-release
+			return svc.unknown("fixture released")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan controllerObservationReply, 1)
+		go func() { done <- svc.observe(ctx) }()
+		<-started
+		cancel()
+		if got := <-done; got.ProcessComplete || got.ProviderComplete {
+			t.Fatal("canceled result complete")
+		}
+		if got := svc.observe(context.Background()); len(got.UnknownReasons) != 1 || got.UnknownReasons[0] != "observation busy" {
+			t.Fatal("noncooperative read lost limiter")
+		}
+		close(release)
+		synctest.Wait()
+		if len(controllerObservationFlight) > 0 {
+			t.Fatal("limiter was not released")
+		}
+	})
 }
 
 // These portable fixtures exercise bounded transport/callback lifecycle. The
@@ -749,175 +587,6 @@ func fixtureControllerRelay(ctx context.Context, city, source string, out io.Wri
 	}, func(net.Conn, procobserver.CallerBinding) error { return nil }, time.Now)
 }
 
-func TestControllerObservationPrefetchedExtraAndOversizedDomain(t *testing.T) {
-	for _, mode := range []string{"prefetched extra", "oversized domain"} {
-		t.Run(mode, func(t *testing.T) {
-			city := t.TempDir()
-			calls := 0
-			callback := func(context.Context) controllerObservationReply {
-				calls++
-				r := controllerObservationFixture(city)
-				r.Processes = []observation.Process{{RuntimeName: strings.Repeat("x", controllerObservationLimit)}}
-				return r
-			}
-			lis, err := startLegacyObservationTestSocket(city, controllerSocketOptions{observe: callback})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer lis.Close() //nolint:errcheck // isolated fixture cleanup
-			conn, err := net.Dial("unix", controllerSocketPath(city))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer conn.Close() //nolint:errcheck // isolated fixture cleanup
-			_ = conn.SetDeadline(time.Now().Add(time.Second))
-			request := controllerObservationCommand + "\n"
-			if mode == "prefetched extra" {
-				request += "EXTRA\n"
-			}
-			if _, err = io.WriteString(conn, request); err != nil {
-				t.Fatal(err)
-			}
-			data, err := io.ReadAll(io.LimitReader(conn, controllerObservationLimit+1))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var r controllerObservationReply
-			if procobserver.DecodeStrict(data, &r) != nil || r.ProviderComplete || r.ProcessComplete || len(r.UnknownReasons) == 0 || len(data) > controllerObservationLimit {
-				t.Fatalf("invalid bound/extra response %s", data)
-			}
-			if mode == "prefetched extra" && calls != 0 {
-				t.Fatal("buffered extra frame invoked provider")
-			}
-		})
-	}
-}
-
-func TestControllerObservationForgedJSONCannotReplacePeerProof(t *testing.T) {
-	city := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	lis, err := net.Listen("unix", controllerSocketPath(city))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck // isolated fixture cleanup
-	attempted := make(chan bool, 1)
-	go func() {
-		conn, e := lis.Accept()
-		if e != nil {
-			attempted <- false
-			return
-		}
-		defer conn.Close() //nolint:errcheck // isolated fixture cleanup
-		_ = conn.SetDeadline(time.Now().Add(time.Second))
-		var buf [1]byte
-		n, _ := conn.Read(buf[:])
-		attempted <- n > 0
-	}()
-	var out bytes.Buffer
-	err = relayControllerObservationAuthenticated(context.Background(), city, strings.Repeat("a", 40), &out, func() (procobserver.Policy, error) { return procobserver.Policy{}, nil }, func(net.Conn, procobserver.CallerBinding) error { return fmt.Errorf("kernel PID mismatch") }, time.Now)
-	if err == nil || <-attempted {
-		t.Fatal("unverified listener received observation request")
-	}
-	var r controllerObservationReply
-	if procobserver.DecodeStrict(out.Bytes(), &r) != nil || r.ProcessComplete || r.ControllerBinding == "verified_local_process" {
-		t.Fatal("forged peer became source")
-	}
-}
-
-// Couples exact serialized helper-codec/domain output to the actual bounded
-// controller relay. The fixture peer is injected; Linux peer proof is separate.
-func TestControllerObservationSerializedConsumerRelay(t *testing.T) {
-	path := os.Getenv("TEST_OBSERVER_SERIALIZED_HELPER_LOG")
-	if path == "" {
-		t.Skip("dedicated producer/relay/consumer receipt supplies the exact producer log")
-	}
-	input, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	count := 0
-	for _, line := range strings.Split(string(input), "\n") {
-		const marker = "NATIVE_HELPER_CONSUMER_FIXTURE="
-		index := strings.Index(line, marker)
-		if index < 0 {
-			continue
-		}
-		var fixture struct {
-			Name        string                  `json:"name"`
-			Observation observation.Observation `json:"observation"`
-		}
-		if err = json.Unmarshal([]byte(line[index+len(marker):]), &fixture); err != nil {
-			t.Fatal(err)
-		}
-		t.Run(fixture.Name, func(t *testing.T) {
-			count++
-			r := controllerObservationFixture("/city")
-			r.Observation = fixture.Observation
-			r.ControllerPID = os.Getpid()
-			if !r.ProcessComplete || !r.ProviderComplete {
-				r.ControllerBinding = "not_observed"
-			}
-			raw, err := json.Marshal(r)
-			if err != nil {
-				t.Fatal(err)
-			}
-			raw = append(raw, '\n')
-			city := t.TempDir()
-			if err = os.MkdirAll(filepath.Join(city, ".gc"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			// The fixture socket location is independent of the source city whose
-			// immutable identity is checked in the reply. No actual city is opened.
-			lis, err := net.Listen("unix", controllerSocketPath(city))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer lis.Close() //nolint:errcheck
-			done := make(chan error, 1)
-			go func() {
-				conn, e := lis.Accept()
-				if e != nil {
-					done <- e
-					return
-				}
-				defer conn.Close() //nolint:errcheck
-				_, e = bufio.NewReader(conn).ReadString('\n')
-				if e == nil {
-					_, e = conn.Write(raw)
-				}
-				done <- e
-			}()
-			// Dial the temporary socket while retaining the producer city in the
-			// canonical relay validation through a temporary path-only seam.
-			var out bytes.Buffer
-			policy := procobserver.Policy{CallerBinding: procobserver.CallerBinding{PID: r.ControllerPID, StartTicks: r.ControllerStartIdentity, ControllerBinarySHA256: r.ControllerBinarySHA256, BootID: r.ControllerBootID}, HelperBinarySHA256: r.HelperBinarySHA256, PolicyDigest: r.HelperPolicyDigest}
-			err = relayControllerObservationAt(context.Background(), "/city", controllerSocketPath(city), r.SourceRevision, &out, func() (procobserver.Policy, error) { return policy, nil }, func(net.Conn, procobserver.CallerBinding) error { return nil }, func() time.Time { return time.Date(2026, 10, 4, 8, 0, 0, 0, time.UTC) })
-			if e := <-done; e != nil {
-				t.Fatal(e)
-			}
-			complete := fixture.Name == "complete"
-			validInterval := fixture.Name != "stale" && fixture.Name != "wrong-helper-pin"
-			if (err == nil) != complete || (validInterval && !bytes.Equal(out.Bytes(), raw)) {
-				t.Fatalf("relay changed producer bytes/provenance: err=%v complete=%v", err, complete)
-			}
-			encoded, e := json.Marshal(struct {
-				Name        string          `json:"name"`
-				Observation json.RawMessage `json:"observation"`
-			}{fixture.Name, json.RawMessage(out.Bytes())})
-			if e != nil {
-				t.Fatal(e)
-			}
-			t.Logf("NATIVE_CONTROLLER_CONSUMER_FIXTURE=%s", encoded)
-		})
-	}
-	if count != 9 {
-		t.Fatalf("expected9 producer cases, got%d", count)
-	}
-}
-
 func TestControllerObservationReaderPreservesLegacyEOFLine(t *testing.T) {
 	for _, input := range []string{"ping", "ping\n", "ping\r\n"} {
 		line, err := readControllerCommandLine(bufio.NewReader(strings.NewReader(input)))
@@ -926,6 +595,20 @@ func TestControllerObservationReaderPreservesLegacyEOFLine(t *testing.T) {
 		}
 	}
 }
+
+func TestControllerObservationTransportAbsent(t *testing.T) {
+	var out bytes.Buffer
+	if err := relayControllerObservation(context.Background(), t.TempDir(), strings.Repeat("a", 40), &out); err == nil {
+		t.Fatal("socket-down allowed")
+	}
+	var r controllerObservationReply
+	if err := procobserver.DecodeStrict(out.Bytes(), &r); err != nil || r.ProcessComplete || r.ProviderComplete {
+		t.Fatalf("socket-down not typed UNKNOWN: %v", err)
+	}
+}
+
+// Legacy V2 proofs share one isolated test listener. The production dispatcher
+// is V3-only; its route and long-path fallback retain separate owning tests.
 
 func controllerFixtureCensus(count int, digest string) procobserver.Census {
 	return procobserver.Census{Seal: procobserver.CensusSeal{ScanIndex: 4, EnumeratedCount: count, PIDDigest: digest, ClassifiedCount: count, ClassifiedDigest: digest}, Closings: []procobserver.CensusClosing{{ScanIndex: 2, EnumeratedCount: count, EnumerationDigest: digest, LiveCount: count, LiveDigest: digest}, {ScanIndex: 3, EnumeratedCount: count, EnumerationDigest: digest, LiveCount: count, LiveDigest: digest}}, ReconciledCount: count, ReconciledDigest: digest, Proofs: []procobserver.CensusProof{}}

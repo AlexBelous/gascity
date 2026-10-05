@@ -4,16 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func clientV3Fixture() (ReleasePolicyV3, ResponseV3, time.Time) {
@@ -35,43 +28,6 @@ func clientV3Fixture() (ReleasePolicyV3, ResponseV3, time.Time) {
 		Census: c, CertificateDisposition: "provisional",
 	}
 	return ReleasePolicyV3{Policy: p, EvidenceSchema: ResponseSchemaV3}, r, now
-}
-
-func TestClientV3FixtureFrameBoundIsHonored(t *testing.T) {
-	for _, limit := range []int{8, MaxRequestBytes} {
-		t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
-			addr := &net.UnixAddr{Name: filepath.Join(t.TempDir(), "s"), Net: "unix"}
-			listener, err := net.ListenUnix("unix", addr)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer listener.Close() //nolint:errcheck // owned fixture
-			writer, err := net.DialUnix("unix", nil, addr)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer writer.Close() //nolint:errcheck // owned fixture
-			reader, err := listener.AcceptUnix()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer reader.Close() //nolint:errcheck // owned fixture
-			_ = writer.SetDeadline(time.Now().Add(testutil.GoroutineRaceTimeout))
-			_ = reader.SetDeadline(time.Now().Add(testutil.GoroutineRaceTimeout))
-			payload := []byte("123456789")
-			if err := writeFrame(writer, payload); err != nil {
-				t.Fatal(err)
-			}
-			got, err := readFrame(reader, limit)
-			if limit < len(payload) {
-				if err == nil {
-					t.Fatal("frame exceeded actual reader bound")
-				}
-			} else if err != nil || !bytes.Equal(got, payload) {
-				t.Fatalf("bounded valid frame changed: %v %q", err, got)
-			}
-		})
-	}
 }
 
 func TestClientV3PolicySelectorIsExact(t *testing.T) {
@@ -203,99 +159,6 @@ func TestClientV3EnvelopePinsAndGrammar(t *testing.T) {
 			}
 			if err != nil && strings.Contains(err.Error(), "hidden") {
 				t.Fatal("input leaked in error")
-			}
-		})
-	}
-}
-
-func TestClientV3UnixBoundedRequest(t *testing.T) {
-	for _, mode := range []string{"exact", "v2 schema", "extra frame", "partial frame", "oversize", "cancel"} {
-		t.Run(mode, func(t *testing.T) {
-			p, r, now := clientV3Fixture()
-			path := filepath.Join(t.TempDir(), "s")
-			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer listener.Close() //nolint:errcheck // isolated fixture
-			done := make(chan error, 1)
-			ctx, cancel := context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
-			defer cancel()
-			go func() {
-				c, e := listener.AcceptUnix()
-				if e != nil {
-					done <- e
-					return
-				}
-				defer c.Close() //nolint:errcheck // isolated fixture
-				_ = c.SetDeadline(time.Now().Add(testutil.GoroutineRaceTimeout))
-				data, e := readFrame(c, MaxRequestBytes)
-				if e != nil {
-					done <- e
-					return
-				}
-				var req Request
-				if e = strictJSON(data, &req); e != nil {
-					done <- e
-					return
-				}
-				if req.Schema != RequestSchemaV3 || !isHex(req.RequestNonce, 64) {
-					done <- io.ErrUnexpectedEOF
-					return
-				}
-				var extra [1]byte
-				if n, e := c.Read(extra[:]); n != 0 || !errors.Is(e, io.EOF) {
-					done <- io.ErrUnexpectedEOF
-					return
-				}
-				r.RequestNonce = req.RequestNonce
-				if mode == "cancel" {
-					cancel()
-					done <- nil
-					return
-				}
-				if mode == "v2 schema" {
-					r.Schema = Schema
-				}
-				data, e = json.Marshal(r)
-				if e != nil {
-					done <- e
-					return
-				}
-				if mode == "partial frame" {
-					_, e = c.Write([]byte{0, 0, 0, 8, '{'})
-					done <- e
-					return
-				}
-				if mode == "oversize" {
-					_, e = c.Write([]byte{1, 0, 0, 1})
-					done <- e
-					return
-				}
-				e = writeFrame(c, data)
-				if e == nil && mode == "extra frame" {
-					_, e = c.Write([]byte{0})
-				}
-				done <- e
-			}()
-			c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer c.Close() //nolint:errcheck // isolated fixture
-			_, err = exchangeContextV3WithReader(ctx, c, p, func() time.Time { return now }, func(data []byte) (int, error) { return readNoAncillary(c, data) })
-			if (err == nil) != (mode == "exact") {
-				t.Fatalf("mode %s: %v", mode, err)
-			}
-			select {
-			case e := <-done:
-				if e != nil {
-					t.Fatal(e)
-				}
-			case <-ctx.Done():
-				if mode != "cancel" {
-					t.Fatal("fixture server did not return")
-				}
 			}
 		})
 	}

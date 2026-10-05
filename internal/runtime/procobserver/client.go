@@ -18,7 +18,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -213,10 +212,6 @@ func ReadContext(ctx context.Context, p Policy) (Response, error) {
 	return exchangeContextWithReader(ctx, c, p, time.Now, read)
 }
 
-func exchangeContext(ctx context.Context, c *net.UnixConn, p Policy, now func() time.Time) (Response, error) {
-	return exchangeContextWithReader(ctx, c, p, now, func(data []byte) (int, error) { return readNoAncillary(c, data) })
-}
-
 func exchangeContextWithReader(ctx context.Context, c *net.UnixConn, p Policy, now func() time.Time, read func([]byte) (int, error)) (Response, error) {
 	stopClose := context.AfterFunc(ctx, func() { _ = c.Close() })
 	defer stopClose()
@@ -228,10 +223,6 @@ func exchangeContextWithReader(ctx context.Context, c *net.UnixConn, p Policy, n
 		return Response{}, fmt.Errorf("observer deadline unavailable")
 	}
 	return exchangeWithReader(c, p, now, read)
-}
-
-func exchange(c *net.UnixConn, p Policy, now func() time.Time) (Response, error) {
-	return exchangeWithReader(c, p, now, func(data []byte) (int, error) { return readNoAncillary(c, data) })
 }
 
 func exchangeWithReader(c *net.UnixConn, p Policy, now func() time.Time, read func([]byte) (int, error)) (Response, error) {
@@ -374,30 +365,6 @@ func writeFrame(c *net.UnixConn, data []byte) error {
 		}
 	}
 	return nil
-}
-
-func readNoAncillary(c *net.UnixConn, data []byte) (int, error) {
-	oob := make([]byte, 32)
-	n, on, flags, _, err := c.ReadMsgUnix(data, oob)
-	if on != 0 {
-		messages, _ := syscall.ParseSocketControlMessage(oob[:on])
-		for _, message := range messages {
-			fds, err := syscall.ParseUnixRights(&message)
-			if err == nil {
-				for _, fd := range fds {
-					_ = syscall.Close(fd)
-				}
-			}
-		}
-	}
-	if on != 0 || flags&(syscall.MSG_CTRUNC|syscall.MSG_TRUNC) != 0 {
-		return 0, fmt.Errorf("observer ancillary data rejected")
-	}
-	return n, err
-}
-
-func readFrame(c *net.UnixConn, byteLimit int) ([]byte, error) {
-	return readFrameWithReader(func(data []byte) (int, error) { return readNoAncillary(c, data) }, byteLimit)
 }
 
 func readFrameWithReader(read func([]byte) (int, error), byteLimit int) ([]byte, error) {

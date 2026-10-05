@@ -308,15 +308,29 @@ fetch_ready_queue() {
     # dispatcher. Read that assigned queue directly so empty polls do not spend
     # their budget in gc hook/native-store preflight. Keep the full hook path
     # available for tests that explicitly need generic routed work.
+    # Builtin-only stage diagnostics: no command output, stderr, or extra
+    # processes. A composite return of 1 can also mean an empty queue.
+    local probe_started=$SECONDS
+    local probe_rc=0
     if ready=$(timeout 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
+        printf 'queue-probe stage=bd_ready rc=0 elapsed_s=%s\n' "$((SECONDS - probe_started))" >> "$TRACE_FILE" || :
         if printf '%s\n' "$ready" | json_payload | jq -e 'if type == "array" then length > 0 else . != null end' >/dev/null 2>&1; then
             printf '%s\n' "$ready"
             return 0
         fi
+    else
+        probe_rc=$?
+        printf 'queue-probe stage=bd_ready rc=%s elapsed_s=%s\n' "$probe_rc" "$((SECONDS - probe_started))" >> "$TRACE_FILE" || :
     fi
     if should_use_hook_fallback; then
-        timeout "$HOOK_TIMEOUT" gc hook 2>/dev/null
-        return $?
+        probe_started=$SECONDS
+        if timeout "$HOOK_TIMEOUT" gc hook 2>/dev/null; then
+            probe_rc=0
+        else
+            probe_rc=$?
+        fi
+        printf 'queue-probe stage=hook rc=%s elapsed_s=%s\n' "$probe_rc" "$((SECONDS - probe_started))" >> "$TRACE_FILE" || :
+        return "$probe_rc"
     fi
     return 1
 }

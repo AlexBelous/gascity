@@ -110,7 +110,7 @@ static inline bool census_typed_proofs_valid(const struct census_resolution_ledg
 static inline bool census_absence_raw_eligible(const struct census_global_fault *e) {
   if(strcmp(e->reason,"process_unavailable") || !e->raw.operation || e->raw.pid<=1 ||
       e->raw.pid==ev.binding.pid) return false;
-  return (!strcmp(e->raw.operation,"pidfd_open") && e->raw.error==ESRCH) ||
+  return (!strcmp(e->raw.operation,"pidfd_open") && (e->raw.error==ESRCH || (e->raw.error==EINVAL && !e->raw.start))) ||
     (!strcmp(e->raw.operation,"stat") && e->raw.error==ENOENT) ||
     (!strcmp(e->raw.operation,"environ") && e->raw.error==ESRCH) ||
     (!strcmp(e->raw.operation,"status") && e->raw.error==ESRCH && e->raw.start) ||

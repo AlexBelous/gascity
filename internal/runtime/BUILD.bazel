@@ -24,6 +24,7 @@ go_library(
         "redact.go",
         "runtime.go",
         "seam_adapter.go",
+        "session_authority.go",
         "session_events.go",
         "session_events_merge.go",
         "setupcommand.go",

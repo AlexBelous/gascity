@@ -47,7 +47,7 @@ static inline bool census_standalone_history_valid(const struct census_global_so
         const struct census_global_fault *e=&s->errors[link->error_index-1];
         if(link->kind!=CENSUS_RESOLUTION_ABSENCE || link->classified_scan || link->selected_seal ||
             e->raw.pid!=v->pid || e->raw.start || strcmp(e->raw.operation,"pidfd_open") ||
-            e->raw.error!=ESRCH || e->scan_index>(unsigned)v->scan_index) return false;
+            (e->raw.error!=ESRCH && e->raw.error!=EINVAL) || e->scan_index>(unsigned)v->scan_index) return false;
         links++;
       }
       if(links!=1) return false;
@@ -74,7 +74,7 @@ static inline bool census_resolve_standalone(struct census_global_source *s,
       !ev.trusted_kernel || fixture || !ev.ns[0] || strcmp(ev.ns,ev.binding.ns) || r->resolutions_n>=128) return false;
   const struct census_global_fault *e=&s->errors[error_index-1];
   if(!census_absence_raw_eligible(e) || e->raw.start || strcmp(e->raw.operation,"pidfd_open") ||
-      e->raw.error!=ESRCH || !e->scan_index || e->scan_index>s->history->n) return false;
+      (e->raw.error!=ESRCH && e->raw.error!=EINVAL) || !e->scan_index || e->scan_index>s->history->n) return false;
   for(unsigned i=0;i<r->resolutions_n;i++) if(r->resolutions[i].error_index==error_index) return false;
   const struct census_owned_identity *known=NULL;
   if(!census_standalone_prior(s->history,e->raw.pid,e->scan_index-1,&known) ||

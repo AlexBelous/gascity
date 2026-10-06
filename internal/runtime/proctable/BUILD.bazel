@@ -3,6 +3,13 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "proctable",
     srcs = [
+        "caller_error.go",
+        "caller_identity.go",
+        "caller_identity_darwin.go",
+        "caller_identity_linux.go",
+        "caller_identity_stub.go",
+        "caller_linux_decode.go",
+        "caller_raw.go",
         "descendants.go",
         "descendants_darwin.go",
         "descendants_linux.go",
@@ -39,6 +46,7 @@ go_library(
     ] + select({
         "@rules_go//go/platform:android": [
             "//internal/pidutil",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:darwin": [
             "//internal/pidutil",
@@ -50,6 +58,7 @@ go_library(
         ],
         "@rules_go//go/platform:linux": [
             "//internal/pidutil",
+            "@org_golang_x_sys//unix",
         ],
         "//conditions:default": [],
     }),
@@ -58,6 +67,11 @@ go_library(
 go_test(
     name = "proctable_test",
     srcs = [
+        "caller_identity_darwin_test.go",
+        "caller_identity_linux_owned_test.go",
+        "caller_identity_test.go",
+        "caller_linux_decode_test.go",
+        "caller_raw_test.go",
         "descendants_test.go",
         "environ_darwin_test.go",
         "environ_linux_test.go",

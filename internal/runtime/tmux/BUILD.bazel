@@ -5,6 +5,8 @@ go_library(
     srcs = [
         "adapter.go",
         "agent_slice.go",
+        "child_authority.go",
+        "child_authority_decode.go",
         "cutover.go",
         "interaction.go",
         "process_evidence.go",
@@ -58,6 +60,7 @@ go_test(
         "adapter_unit_test.go",
         "agent_slice_test.go",
         "attach_probe_test.go",
+        "child_authority_decode_test.go",
         "codex_submit_test.go",
         "copymode_cancel_test.go",
         "dialog_feedback_survey_test.go",

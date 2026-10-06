@@ -62,6 +62,27 @@ func TestFederatedAssignedReadyBatchesAndPreservesIdentityPrecedence(t *testing.
 	}
 }
 
+// A generated query can also be run directly by its actor, outside the hook's
+// isolated selection shell. In that context only the original owner SID is set.
+func TestFederatedAssignedReadyDirectActorSIDFallback(t *testing.T) {
+	out, log := runFederatedAssignedReadyBatch(t, map[string]string{
+		"GC_SESSION_ID": "sess-1", "GC_SESSION_NAME": "worker-name", "GC_ALIAS": "worker-alias",
+		"GC_TEMPLATE": "worker", "GC_RUNTIME_EPOCH": "fixture-epoch", "GC_INSTANCE_TOKEN": "fixture-token",
+	})
+	for _, want := range []string{"--assignee-any=sess-1", "--assignee-any=worker-name", "--assignee-any=worker-alias"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("direct actor query missing %q: %q", want, log)
+		}
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("direct actor output is not JSON: %v: %q", err, out)
+	}
+	if len(rows) != 1 || rows[0]["id"] != "session-third" {
+		t.Fatalf("direct actor rows = %v, want SID priority over name and alias", rows)
+	}
+}
+
 func TestFederatedAssignedReadyOmitsEmptyOptionalIdentities(t *testing.T) {
 	_, log := runFederatedAssignedReadyBatch(t, map[string]string{"GC_ALIAS": "worker-alias"})
 	if strings.Count(log, "--assignee-any=") != 1 || !strings.Contains(log, "--assignee-any=worker-alias") {

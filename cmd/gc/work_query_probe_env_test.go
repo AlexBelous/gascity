@@ -49,6 +49,21 @@ func TestWorkQueryProbeRejectsLegacyCustomOwnerVariable(t *testing.T) {
 	}
 }
 
+func TestWorkQueryProbeAcceptsGeneratedSIDFallbackWithoutOwnerEnv(t *testing.T) {
+	command := `sh -c 'printf "%s" "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}"'`
+	out, err := shellWorkQueryWithEnv(command, "", []string{
+		"PATH=/usr/bin:/bin", "GC_SESSION_ID=fixture-sid", "GC_TEMPLATE=worker",
+		"GC_RUNTIME_EPOCH=fixture-epoch", "GC_INSTANCE_TOKEN=fixture-token",
+		"BEADS_HOLDER_TOKEN=fixture-holder",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "fixture-sid" {
+		t.Fatalf("nested generated fallback = %q, want routed SID", out)
+	}
+}
+
 func TestWorkQueryProbeRejectsAmbiguousOrInvalidSID(t *testing.T) {
 	for _, env := range [][]string{
 		{"GC_SESSION_ID=one", "GC_SESSION_ID=two"},

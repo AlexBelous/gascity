@@ -982,7 +982,11 @@ var hookWorkQueryTimeout = 150 * time.Second
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	// A work query is a selection probe, not the agent incarnation. A custom
 	// query using the old owner variable must opt into the routing-only key.
-	if strings.Contains(command, "GC_SESSION_ID") {
+	// The generated query uses this guarded fallback when run directly by an
+	// actor. The probe shell removes GC_SESSION_ID, so only its routing alias
+	// can resolve there. Keep rejecting custom queries that read the owner key.
+	legacyCommand := strings.ReplaceAll(command, "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}", "")
+	if strings.Contains(legacyCommand, "GC_SESSION_ID") {
 		return "", fmt.Errorf("work_query references GC_SESSION_ID; use GC_WORK_QUERY_SESSION_ID for routing")
 	}
 	probeEnv, err := workQueryProbeEnv(workQueryEnvForDir(env, dir))

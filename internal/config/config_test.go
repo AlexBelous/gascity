@@ -1873,7 +1873,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 			t.Errorf("EffectiveWorkQuery() missing run_target migration filter fragment %q: %q", want, got)
 		}
 	}
-	if !strings.Contains(got, `"$GC_WORK_QUERY_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
+	if !strings.Contains(got, `"${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
 	}
 }
@@ -2041,7 +2041,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveAssignedInProgressQuery()
 	for _, want := range []string{
-		`"$GC_WORK_QUERY_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`,
+		`"${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"`,
 		`bd list --status in_progress --assignee="$id" --json --limit=1`,
 		`ephemeral=true AND status=in_progress`,
 	} {

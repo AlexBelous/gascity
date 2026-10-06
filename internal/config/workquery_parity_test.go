@@ -427,7 +427,7 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 				if strings.Contains(federated, "gc_assigned_in_progress_all_json") && strings.Contains(federated, "gc_assigned_ready_all_json") && gotReads >= n {
 					t.Errorf("%s/%s: combined work query did not reduce federated reads: single=%d federated=%d", shape.name, v.name, n, gotReads)
 				}
-				for _, want := range []string{`for gc_identity in "$GC_WORK_QUERY_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`, `--assignee-any=$gc_identity`, `--json --limit=0`} {
+				for _, want := range []string{`for gc_identity in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"`, `--assignee-any=$gc_identity`, `--json --limit=0`} {
 					if !strings.Contains(federated, want) {
 						t.Errorf("%s/%s: batched federated query missing %q", shape.name, v.name, want)
 					}

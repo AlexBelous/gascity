@@ -4478,11 +4478,13 @@ func TestGcBeadsBdProxiedExternalTranslatesExactRCFlags(t *testing.T) {
 	scriptPath := filepath.Join(repoRootForLint(t), "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	cmd := exec.Command(scriptPath, "init", cityDir, "gc", "hq")
 	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
 		"GC_CITY_PATH="+cityDir,
 		"GC_BIN="+gcPath,
 		"BD_BIN="+bdPath,
 		"GC_BEADS_PROXY_EXTERNAL_HOST=db.example",
 		"GC_BEADS_PROXY_EXTERNAL_PORT=4406",
+		"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 		"GC_DOLT=",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -4998,6 +5000,31 @@ func waitForProviderTestPIDExit(t *testing.T, pid int, label string) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("provider child pid %d survived %s cancellation", pid, label)
+}
+
+// waitForProviderOwnedPIDStopped waits until pid is gone or a zombie, the same
+// definition of "stopped" bd applies before `bd dolt stop` returns. A process
+// bd did not parent (the proxied Dolt backend is reparented to init) exposes no
+// exit notification to the test, so this polls pidAlive on a ticker and fails
+// with the last observed /proc state when the deadline passes.
+func waitForProviderOwnedPIDStopped(t *testing.T, pid int, within time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), within)
+	defer cancel()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for pidAlive(pid) {
+		select {
+		case <-ctx.Done():
+			stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+			state := strings.TrimSpace(string(stat))
+			if err != nil {
+				state = err.Error()
+			}
+			t.Fatalf("provider-owned process %d remained alive %s after stop; last state: %s", pid, within, state)
+		case <-ticker.C:
+		}
+	}
 }
 
 func TestStartBeadsLifecycleDoesNotMutateProcessDoltEnv(t *testing.T) {
@@ -12793,6 +12820,7 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 				"BD_BIN="+bdPath,
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 				"GC_BEADS_TARGET="+tt.target,
 			)
 			if out, err := cmd.CombinedOutput(); err != nil {
@@ -12852,6 +12880,7 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 				"GC_BEADS_PROVIDER_OWNED=1",
 				"GC_BEADS_TRANSPORT="+tt.transport,
 				"GC_BEADS_TARGET="+tt.target,
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
 				"GC_BEADS_PROXY_EXTERNAL_HOST=upstream.example.invalid",
 				"GC_BEADS_PROXY_EXTERNAL_PORT=3306",
 				"GC_DOLT_HOST=upstream.example.invalid",
@@ -12933,7 +12962,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 		}
 		return filepath.Clean(root), true, nil
 	}
-	publishedPIDs := func(ctx context.Context, dir, transport string) ([]int, error) {
+	publishedPIDs := func(ctx context.Context, dir, home, transport string) ([]int, error) {
 		if transport == "direct" {
 			if _, err := os.Stat(filepath.Join(dir, ".beads", "metadata.json")); errors.Is(err, os.ErrNotExist) {
 				return nil, nil
@@ -12942,7 +12971,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			}
 			cmd := exec.CommandContext(ctx, bdPath, "dolt", "status", "--json")
 			cmd.Dir = dir
-			cmd.Env = sanitizedBaseEnv("BEADS_DIR=" + filepath.Join(dir, ".beads"))
+			cmd.Env = sanitizedBaseEnv("HOME="+home, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return nil, fmt.Errorf("read direct bd lifecycle status: %w\n%s", err, out)
@@ -13015,7 +13044,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 	}
 	runLifecycleCommand := func(ctx context.Context, dir, home, transport, op string) error {
 		cmd := exec.CommandContext(ctx, script, op)
-		cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+		cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0")
 		_, err := cmd.CombinedOutput()
 		return err
 	}
@@ -13024,6 +13053,9 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "city")
 			home := filepath.Join(t.TempDir(), "home")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(home, 0o755); err != nil {
 				t.Fatal(err)
 			}
 			for _, args := range [][]string{{"init", "-q"}, {"config", "user.name", "Test"}, {"config", "user.email", "test@example.invalid"}} {
@@ -13035,7 +13067,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			run := func(ctx context.Context, args ...string) []byte {
 				t.Helper()
 				cmd := exec.CommandContext(ctx, script, args...)
-				cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local")
+				cmd.Env = sanitizedBaseEnv("HOME="+home, "GC_CITY_PATH="+dir, "BEADS_DIR="+filepath.Join(dir, ".beads"), "BD_BIN="+bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT="+transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0")
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("gc-beads-bd %v: %v\n%s", args, err, out)
 				} else {
@@ -13051,7 +13083,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				// Stop is safe before a successful init and is required even if the
 				// operation that launched a child failed before we captured its ID.
 				_ = runLifecycleCommand(ctx, dir, home, transport, "stop")
-				remaining, err := publishedPIDs(ctx, dir, transport)
+				remaining, err := publishedPIDs(ctx, dir, home, transport)
 				if err != nil {
 					t.Errorf("inspect provider-owned lifecycle processes after stop: %v", err)
 				}
@@ -13086,7 +13118,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				}
 			}
 			var inspectErr error
-			pids, inspectErr = publishedPIDs(ctx, dir, transport)
+			pids, inspectErr = publishedPIDs(ctx, dir, home, transport)
 			if inspectErr != nil {
 				t.Fatal(inspectErr)
 			}
@@ -13094,10 +13126,14 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				t.Fatal("provider-owned lifecycle did not publish a process identity")
 			}
 			run(ctx, "stop")
+			// bd confirms a stop once each recorded process is gone OR a zombie
+			// (procid treats state Z as exited). The Dolt backend is the killed
+			// proxy's child, so it is reparented to init and reaped moments
+			// later; kill(pid, 0) still succeeds on it until then (#6506). Assert
+			// with the zombie-aware probe and a bounded wait: a process that
+			// really outlives stop is still alive when the deadline passes.
 			for _, pid := range pids {
-				if processStillAlive(pid) {
-					t.Fatalf("provider-owned process %d remained alive after stop", pid)
-				}
+				waitForProviderOwnedPIDStopped(t, pid, 5*time.Second)
 			}
 			// The PID records above prove bd's own children are gone. Sweep the
 			// process table too: a proxy or Dolt child that lost its record

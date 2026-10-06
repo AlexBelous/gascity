@@ -12,6 +12,8 @@ go_test(
     name = "hybrid_test",
     srcs = [
         "hybrid_test.go",
+        "router_test.go",
+        "session_events_test.go",
         "testenv_import_test.go",
     ],
     embed = [":hybrid"],
@@ -19,4 +21,16 @@ go_test(
         "//internal/runtime",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

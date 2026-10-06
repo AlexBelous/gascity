@@ -212,8 +212,8 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 	})
 
 	t.Run("topology", func(t *testing.T) {
-		assertProxiedScope(t, cityRoot, "migrated city")
-		assertProxiedScope(t, rigDir, "migrated rig")
+		assertProxiedScope(t, newEnv, cityRoot, "migrated city")
+		assertProxiedScope(t, newEnv, rigDir, "migrated rig")
 
 		// The rig shares the city's proxy root, so its metadata has to name it
 		// — and relatively, because beads drops an absolute dolt_data_dir on
@@ -270,7 +270,8 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 		assertCheckOK(t, city, "dolt-config", "a migrated legacy city")
 		// Migration moves the city off gc's managed server and onto bd's proxy,
 		// which is also the moment its backup coverage goes to zero: the rig
-		// shares the city's proxy root, and v1.3.0 refuses backup on that path.
+		// shares the city's proxy root, and nothing has registered a bd backup
+		// destination for it yet.
 		// The advisory has to follow the topology, not the way the city was
 		// created.
 		assertProxiedBackupAdvisory(t, city, "a migrated legacy city", true, "city", "testrig")
@@ -298,8 +299,8 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 		}
 		// One shared proxy root, one proxy, one Dolt child — the old topology's
 		// process count, preserved.
-		assertProxiedScope(t, cityRoot, "started city")
-		assertProxiedScope(t, rigDir, "started rig")
+		assertProxiedScope(t, newEnv, cityRoot, "started city")
+		assertProxiedScope(t, newEnv, rigDir, "started rig")
 	})
 
 	t.Run("stop-and-restart", func(t *testing.T) {
@@ -318,7 +319,7 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 			t.Fatalf("gc stop is not re-runnable: %v\n%s", err, out)
 		}
 		city.StartWithSupervisor()
-		assertProxiedScope(t, cityRoot, "restarted city")
+		assertProxiedScope(t, newEnv, cityRoot, "restarted city")
 		assertSeededScope(t, city, "", cityIDs)
 	})
 

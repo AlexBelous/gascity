@@ -889,7 +889,7 @@ func hookSessionAgentForQuery() string {
 // reader already leads with it — sessionBeadAssigneeIdentities,
 // currentSessionAssigneeIdentities and ComputeAwakeSet all list bead.ID first,
 // directSessionBeadIDCandidates resolves it with a direct Get, and the default
-// work query's own documented order is "$GC_SESSION_ID (bead ID) >
+// work query's own documented order is "$GC_WORK_QUERY_SESSION_ID (bead ID) >
 // $GC_SESSION_NAME > $GC_ALIAS" (config.EffectiveWorkQuery). The writer was the
 // only side reading that list backwards; this changes which of several identities
 // it picks, never what a reader has to understand.
@@ -980,6 +980,15 @@ var hookWorkQueryTimeout = 150 * time.Second
 // short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	// A work query is a selection probe, not the agent incarnation. A custom
+	// query using the old owner variable must opt into the routing-only key.
+	if strings.Contains(command, "GC_SESSION_ID") {
+		return "", fmt.Errorf("work_query references GC_SESSION_ID; use GC_WORK_QUERY_SESSION_ID for routing")
+	}
+	probeEnv, err := workQueryProbeEnv(workQueryEnvForDir(env, dir))
+	if err != nil {
+		return "", err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -988,7 +997,7 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = workQueryEnvForDir(env, dir)
+	cmd.Env = probeEnv
 	disableProductMetricsForChild(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -1030,6 +1039,37 @@ func workQueryEnvForDir(env []string, dir string) []string {
 	}
 	out := removeEnvKey(append([]string(nil), env...), "PWD")
 	return append(out, "PWD="+dir)
+}
+
+// workQueryProbeEnv keeps the non-secret routing SID while withholding every
+// process-ownership credential from the shell and its descendants. The alias
+// is rebuilt from this invocation's SID; an inherited alias has no authority.
+func workQueryProbeEnv(env []string) ([]string, error) {
+	out := make([]string, 0, len(env)+1)
+	var sid string
+	seenSID := false
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" || strings.ContainsRune(entry, 0) {
+			return nil, fmt.Errorf("work_query environment invalid")
+		}
+		if key == "GC_SESSION_ID" {
+			if seenSID || (value != "" && !validBDChildIdentityText(value)) {
+				return nil, fmt.Errorf("work_query session routing identity invalid")
+			}
+			sid, seenSID = value, true
+			continue
+		}
+		switch key {
+		case "GC_TEMPLATE", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN", "BEADS_HOLDER_TOKEN", "GC_WORK_QUERY_SESSION_ID":
+			continue
+		}
+		out = append(out, entry)
+	}
+	if sid != "" {
+		out = append(out, "GC_WORK_QUERY_SESSION_ID="+sid)
+	}
+	return out, nil
 }
 
 // hookVisibility scopes which already-returned work_query candidates doHook

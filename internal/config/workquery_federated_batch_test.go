@@ -43,7 +43,7 @@ printf '%s' '[{"id":"alias-first","status":"open","assignee":"worker-alias","pri
 
 func TestFederatedAssignedReadyBatchesAndPreservesIdentityPrecedence(t *testing.T) {
 	out, log := runFederatedAssignedReadyBatch(t, map[string]string{
-		"GC_SESSION_ID": "sess-1", "GC_SESSION_NAME": "worker-name", "GC_ALIAS": "worker-alias",
+		"GC_WORK_QUERY_SESSION_ID": "sess-1", "GC_SESSION_NAME": "worker-name", "GC_ALIAS": "worker-alias",
 	})
 	if lines := strings.FieldsFunc(strings.TrimSpace(log), func(r rune) bool { return r == '\n' }); len(lines) != 1 {
 		t.Fatalf("gc ready calls = %d, want 1; log=%q", len(lines), log)

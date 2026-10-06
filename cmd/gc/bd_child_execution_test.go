@@ -102,7 +102,7 @@ func TestBDExecutionHumanAndMacCompatibility(t *testing.T) {
 				return marker
 			})
 			actual := &bdExecutionFixtureResult{}
-			exactType := errors.As(err, &actual)
+			exactType := reflect.TypeOf(err) == reflect.TypeOf(marker) && errors.As(err, &actual)
 			if !exactType || actual != marker || spawns != 1 || acquires != 0 {
 				t.Fatal("human/Mac semantics changed or unnecessary authority reads")
 			}

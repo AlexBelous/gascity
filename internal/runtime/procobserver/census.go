@@ -148,7 +148,7 @@ func ValidateCensus(c Census, errors []EvidenceError, total int, truncated bool,
 		if e.ResolvedBy < 1 || e.ResolvedBy > len(c.Proofs) || e.Reason != "process_unavailable" || e.ScanIndex < 1 || e.ScanIndex > 4 {
 			return bad()
 		}
-		if !(e.Operation == "stat" && e.Errno == 2 || e.Operation == "environ" && e.Errno == 3 || e.Operation == "comm" && (e.Errno == 2 || e.Errno == 3)) {
+		if (e.Operation != "stat" || e.Errno != 2) && (e.Operation != "environ" || e.Errno != 3) && (e.Operation != "comm" || (e.Errno != 2 && e.Errno != 3)) {
 			return bad()
 		}
 		p := c.Proofs[e.ResolvedBy-1]

@@ -5260,6 +5260,7 @@ name = "myrig"
 }
 
 func TestOpenControlStoreDisablesAutoExportWithoutSandboxingWrites(t *testing.T) {
+	installExactBDRunnerMock(t)
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
@@ -5386,6 +5387,7 @@ func TestOpenControlStoreAtForCityPreservesFileAndExecProviderStores(t *testing.
 }
 
 func TestOpenControlStoreAtForCityUsesControlRunnerForStaleBdScope(t *testing.T) {
+	installExactBDRunnerMock(t)
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()

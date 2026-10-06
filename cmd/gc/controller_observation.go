@@ -240,33 +240,6 @@ func (s *controllerObservationService) observe(request context.Context) controll
 	}
 }
 
-func handleControllerObservation(conn net.Conn, reader *bufio.Reader, city string, options []controllerSocketOptions) {
-	ctx, cancel := context.WithTimeout(context.Background(), controllerObservationBudget)
-	defer cancel()
-	_ = conn.SetDeadline(time.Now().Add(controllerObservationBudget + time.Second))
-	// The relay keeps its write side open while awaiting the single reply.
-	// Disconnect or extra request data cancels outstanding helper IO.
-	if reader.Buffered() != 0 {
-		r := newControllerObservationService(ctx, city).unknown("extra controller observation request data")
-		writeJSONLine(conn, r)
-		return
-	}
-	go func() { _, _ = reader.ReadByte(); cancel() }()
-	var reply controllerObservationReply
-	if len(options) == 1 && options[0].observe != nil {
-		reply = options[0].observe(ctx)
-	} else {
-		reply = newControllerObservationService(ctx, city).unknown("controller observation unsupported")
-	}
-	data, err := json.Marshal(reply)
-	if err != nil || len(data)+1 > controllerObservationLimit {
-		reply = newControllerObservationService(ctx, city).unknown("controller observation exceeds reply bound")
-		data, _ = json.Marshal(reply)
-	}
-	data = append(data, '\n')
-	_, _ = conn.Write(data)
-}
-
 func controllerObservationHex(s string, n int) bool {
 	if len(s) != n {
 		return false

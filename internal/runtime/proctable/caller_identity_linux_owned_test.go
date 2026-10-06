@@ -32,14 +32,14 @@ func TestCallerLinuxOwnedArtificialChild(t *testing.T) {
 			if err != nil {
 				t.Fatal("owned pipe unavailable")
 			}
-			defer inputRead.Close()
-			defer inputWrite.Close()
+			defer func() { _ = inputRead.Close() }()
+			defer func() { _ = inputWrite.Close() }()
 			outputRead, outputWrite, err := os.Pipe()
 			if err != nil {
 				t.Fatal("owned pipe unavailable")
 			}
-			defer outputRead.Close()
-			defer outputWrite.Close()
+			defer func() { _ = outputRead.Close() }()
+			defer func() { _ = outputWrite.Close() }()
 			env := []string{"GC_SESSION_ID=fixture-only-id", "GC_TEMPLATE=fixture-only-template", "GC_RUNTIME_EPOCH=2", "GC_INSTANCE_TOKEN=fixture-only-token", "BEADS_HOLDER_TOKEN=fixture-only-token", "GC_CITY_PATH=/fixture-only-city"}
 			if duplicate {
 				env = append(env, "GC_SESSION_ID=fixture-only-id")

@@ -25,7 +25,7 @@ func readCallerPID(ctx context.Context, pid int) (CallerIncarnation, error) {
 	if err != nil {
 		return fail("proc-open", err)
 	}
-	defer unix.Close(proc)
+	defer func() { _ = unix.Close(proc) }()
 	var fs unix.Statfs_t
 	if err = unix.Fstatfs(proc, &fs); err != nil {
 		return fail("proc-type", err)
@@ -38,7 +38,7 @@ func readCallerPID(ctx context.Context, pid int) (CallerIncarnation, error) {
 	if err != nil {
 		return fail("self-pidfd", err)
 	}
-	defer unix.Close(selfFD)
+	defer func() { _ = unix.Close(selfFD) }()
 	alive := func(fd int) bool {
 		poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 		n, err := unix.Poll(poll, 0)
@@ -54,10 +54,10 @@ func readCallerPID(ctx context.Context, pid int) (CallerIncarnation, error) {
 		}
 		file := os.NewFile(uintptr(fd), "[private procfs input]")
 		if file == nil {
-			unix.Close(fd)
+			_ = unix.Close(fd)
 			return nil, callerFailure(stage, nil)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		data, err := io.ReadAll(io.LimitReader(file, callerMaxBytes+1))
 		if err != nil || len(data) > callerMaxBytes || ctx.Err() != nil {
 			for i := range data {
@@ -110,12 +110,12 @@ func readCallerPID(ctx context.Context, pid int) (CallerIncarnation, error) {
 	if err != nil {
 		return fail("target-dir", err)
 	}
-	defer unix.Close(dir)
+	defer func() { _ = unix.Close(dir) }()
 	fd, err := unix.PidfdOpen(pid, 0)
 	if err != nil {
 		return fail("target-pidfd", err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	targetProof := func() error {
 		if !alive(fd) {
 			return callerFailure("target-loss", nil)

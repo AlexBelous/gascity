@@ -239,11 +239,11 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 		switch r.Kind {
 		case "kernel_absence":
 			if r.ClassifiedScan != 0 || r.SelectedSeal != 0 || r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) ||
-				e.Reason != "process_unavailable" || !(e.Operation == "stat" && e.Errno == 2 || e.Operation == "environ" && e.Errno == 3 || e.Operation == "comm" && (e.Errno == 2 || e.Errno == 3) || e.Operation == "pidfd_open" && e.Errno == 3 || e.Operation == "status" && e.Errno == 3 && e.StartTicks != nil) {
+				e.Reason != "process_unavailable" || !(e.Operation == "stat" && e.Errno == 2 || e.Operation == "environ" && e.Errno == 3 || e.Operation == "comm" && (e.Errno == 2 || e.Errno == 3) || e.Operation == "pidfd_open" && (e.Errno == 3 || e.Errno == 22 && e.StartTicks == nil) || e.Operation == "status" && e.Errno == 3 && e.StartTicks != nil) {
 				return bad()
 			}
 			p := c.Proofs[r.ProofIndex-1]
-			if p.PID != e.PID || !sameStart(p.StartTicks, e.StartTicks) || p.ScanIndex < e.ScanIndex || p.Kind == "enumerated_pid_absent" && e.Operation != "stat" && !(e.Operation == "pidfd_open" && e.Errno == 3) {
+			if p.PID != e.PID || !sameStart(p.StartTicks, e.StartTicks) || p.ScanIndex < e.ScanIndex || p.Kind == "enumerated_pid_absent" && e.Operation != "stat" && !(e.Operation == "pidfd_open" && (e.Errno == 3 || e.Errno == 22 && e.StartTicks == nil)) {
 				return bad()
 			}
 		case "fresh_classification":

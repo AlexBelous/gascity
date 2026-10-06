@@ -467,7 +467,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 }
 
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
-	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
+	return bdCommandRunnerWithManagedRetryErrOperation(cityPath, bdChildInfrastructure, func(dir string) (map[string]string, error) {
 		env, err := bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		applyControllerBdEnv(env)
@@ -476,7 +476,7 @@ func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 }
 
 func controlBdCommandRunnerForRig(cityPath string, cfg *config.City, rigDir string) beads.CommandRunner {
-	return bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+	return bdCommandRunnerWithManagedRetryErrOperation(cityPath, bdChildInfrastructure, func(_ string) (map[string]string, error) {
 		env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 		applyControllerBdEnv(env)
 		return env, err
@@ -1643,6 +1643,14 @@ func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map
 }
 
 func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) (map[string]string, error)) beads.CommandRunner {
+	return bdCommandRunnerWithManagedRetryErrOperation(cityPath, bdChildUnknown, envFn)
+}
+
+func bdCommandRunnerWithManagedRetryErrOperation(cityPath string, op bdChildOperation, envFn func(dir string) (map[string]string, error)) beads.CommandRunner {
+	buildRunner := beadsCommandRunnerForHostedCity
+	if op == bdChildInfrastructure {
+		buildRunner = beadsInfrastructureRunnerForHostedCity
+	}
 	return func(dir, name string, args ...string) ([]byte, error) {
 		env, envErr := envFn(dir)
 		if envErr != nil {
@@ -1654,7 +1662,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		// Legacy managed path: best effort. See pinBdGCEnvironmentBestEffort.
 		pinBdGCEnvironmentBestEffort(env)
 		ensureProjectedDoltEnvExplicit(env)
-		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
+		runner, runnerErr := buildRunner(cityPath, env)
 		if runnerErr != nil {
 			return nil, runnerErr
 		}
@@ -1680,7 +1688,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		}
 		pinBdGCEnvironmentBestEffort(retryEnv)
 		ensureProjectedDoltEnvExplicit(retryEnv)
-		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)
+		retryRunner, runnerErr := buildRunner(cityPath, retryEnv)
 		if runnerErr != nil {
 			return nil, runnerErr
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -699,12 +700,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if req, ok := parseBdShowWatchArgs(bdArgs); ok && bdScopeRefusesShowWatch(cityPath, target, cmd.Env) {
 		return serveBdShowWatch(req, &bdWatchRunner{
 			bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
-			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
+			cityPath: cityPath, scopeRoot: target.ScopeRoot, cfg: cfg, stderr: stderr,
 		}, stdout, stderr)
 	}
 
 	traceStart := time.Now()
-	runErr := cmd.Run()
+	runErr := runBDCommandWithChildAuthority(context.Background(), cityPath, cfg, cmd)
 	traceExit := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError

@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // bdShowWatchInterval is the poll interval bd's own `show --watch` uses
@@ -229,6 +230,7 @@ type bdWatchRunFunc func(ctx context.Context, args []string, stdout, stderr io.W
 // bdSilentFallbackExitCode) and the "bd dolt start" advice (answered once with
 // the gc-managed remedy).
 type bdWatchRunner struct {
+	cfg       *config.City
 	bdPath    string
 	dir       string
 	env       []string
@@ -247,7 +249,7 @@ func (r *bdWatchRunner) run(ctx context.Context, args []string, stdout, stderr i
 	scan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, scan)
 	start := time.Now()
-	err := cmd.Run()
+	err := runBDCommandWithChildAuthority(ctx, r.cityPath, r.cfg, cmd)
 	exit := 0
 	if err != nil {
 		exit = -1

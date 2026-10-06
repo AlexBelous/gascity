@@ -19,8 +19,7 @@ static inline bool census_closing_absence_link(const struct census_global_source
       if(v->kind!=CENSUS_RESOLUTION_ABSENCE || !v->proof_index ||
           v->proof_index>r->proofs_n || v->classified_scan || v->selected_seal) return false;
       const struct proof_item *p=&r->proofs[v->proof_index-1].source;
-      if(p->pid!=fault->raw.pid || p->start!=fault->raw.start ||
-          p->scan_index<(int)fault->scan_index || p->scan_index>(int)s->history->n) return false;
+      if(!census_absence_proof_matches(fault,p) || p->scan_index>(int)s->history->n) return false;
       matches++;
     }
   }
@@ -95,8 +94,7 @@ static inline bool census_current_closings_equal(const struct census_global_sour
       if(v->kind!=CENSUS_RESOLUTION_ABSENCE || !census_absence_raw_eligible(&s->errors[e]) ||
           !v->proof_index || v->proof_index>r->proofs_n || v->classified_scan || v->selected_seal) return false;
       const struct proof_item *p=&r->proofs[v->proof_index-1].source;
-      if(p->pid!=s->errors[e].raw.pid || p->start!=s->errors[e].raw.start ||
-          p->scan_index<(int)s->errors[e].scan_index || p->scan_index>(int)n) return false;
+      if(!census_absence_proof_matches(&s->errors[e],p) || p->scan_index>(int)n) return false;
       matches++;
     }
     if(matches!=1) return false;

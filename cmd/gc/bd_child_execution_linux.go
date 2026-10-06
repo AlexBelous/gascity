@@ -83,36 +83,19 @@ func acquireBDLinuxChildAuthority(ctx context.Context, cityPath string, cfg *con
 			if err != nil || ctx.Err() != nil {
 				return nil, errBDChildAuthority
 			}
-			strict, ok := sp.(runtime.SessionAuthoritySnapshotProvider)
+			strict, ok := sp.(interface {
+				ReadSessionAuthorityTarget(context.Context, string, string) (runtime.SessionAuthorityHandle, error)
+			})
 			if !ok {
 				return nil, errBDChildAuthority
 			}
-			handles, err := strict.ReadSessionAuthoritySnapshot(ctx)
-			if err != nil || ctx.Err() != nil || len(handles) == 0 || len(handles) > 4096 {
+			selected, err := strict.ReadSessionAuthorityTarget(ctx, r.handle, r.tuple.sid)
+			if err != nil || ctx.Err() != nil {
 				return nil, errBDChildAuthority
 			}
-			seenSID := map[string]bool{}
-			seenPID := map[int]bool{}
-			seenName := map[string]bool{}
-			matches := 0
-			var selected runtime.SessionAuthorityHandle
-			for _, h := range handles {
-				t, c, e := parseBDChildRawEnv(h.Environment)
-				if e != nil || h.PID <= 1 || !validBDChildIdentityText(h.Name) || seenSID[t.sid] || seenPID[h.PID] || seenName[h.Name] {
-					return nil, errBDChildAuthority
-				}
-				seenSID[t.sid] = true
-				seenPID[h.PID] = true
-				seenName[h.Name] = true
-				if t.sid == r.tuple.sid {
-					if t != r.tuple || c != cityPath || h.Name != r.handle {
-						return nil, errBDChildAuthority
-					}
-					selected = h
-					matches++
-				}
-			}
-			if matches != 1 {
+			t, c, e := parseBDChildRawEnv(selected.Environment)
+			if e != nil || selected.PID <= 1 || !validBDChildIdentityText(selected.Name) ||
+				t != r.tuple || c != cityPath || selected.Name != r.handle {
 				return nil, errBDChildAuthority
 			}
 			// Independent provider PID precedes OS capture; ambient SID does not pick

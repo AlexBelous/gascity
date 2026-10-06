@@ -41,6 +41,7 @@ go_test(
         "census_v3_producer_vector_test.go",
         "census_v3_status_test.go",
         "census_v3_test.go",
+        "census_v3_zombie_test.go",
         "client_linux_test.go",
         "client_test.go",
         "client_transport_integration_test.go",

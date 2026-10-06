@@ -4,6 +4,40 @@
 #define GC_CENSUS_STANDALONE_ABSENCE_H
 #include "census-resolution-ledger.h"
 
+/* A zombie remains numerically visible in /proc, but cannot be a live row.
+ * Read Z from one pinned proc directory before and after pidfd_open/poll.
+ * Reap/reuse invalidates the old directory rather than rebinding its stat. */
+static inline bool census_zombie_stat(struct census_budget *b,int dir,uint32_t pid,uint64_t *start) {
+  struct census_buffer raw={0};
+  if(!census_buffer_read(b,dir,"stat",65536,&raw)) return false;
+  char *end=strrchr((char *)raw.data,')');
+  bool zombie=end && (size_t)(end-(char *)raw.data)+3<raw.n &&
+    end[1]==' ' && end[2]=='Z' && end[3]==' ';
+  struct census_owned_identity parsed={0};
+  bool ok=zombie && census_parse_bounded_stat(&raw,pid,&parsed) && parsed.start;
+  if(ok) *start=parsed.start;
+  census_buffer_clear(b,&raw);
+  return ok;
+}
+static inline bool census_terminal_zombie(uint32_t pid,struct census_budget *b,uint64_t *start) {
+  int pin=-1,dir=-1;bool ok=false;short events=0;
+  uint64_t before=0,after=0,final=0;
+  if(expired() || !census_fd_initialize(b)) return false;
+  char path[32];snprintf(path,sizeof path,"%u",pid);
+  dir=fixed_open(ev.procfd,path,O_DIRECTORY);
+  if(dir<0 || !census_fd_take(b,dir) || !census_zombie_stat(b,dir,pid,&before)) goto done;
+  pin=process_pidfd(pid);
+  if(pin<0 || !census_fd_take(b,pin) || !census_zombie_stat(b,dir,pid,&after) ||
+      before!=after || process_poll(pin,&events)<0 || !(events&POLLIN) ||
+      (events&(POLLERR|POLLNVAL)) || !census_zombie_stat(b,dir,pid,&final) ||
+      after!=final || expired() || b->fd_failed) goto done;
+  *start=final;ok=true;
+done:
+  if(pin>=0) census_fd_close(b,pin);
+  if(dir>=0) census_fd_close(b,dir);
+  return ok && !b->fd_failed;
+}
+
 static inline bool census_standalone_prior(const struct census_history *h,uint32_t pid,
     unsigned before,const struct census_owned_identity **known) {
   *known=NULL;
@@ -31,7 +65,21 @@ static inline bool census_standalone_history_valid(const struct census_global_so
         v->offset_ms<s->history->scans[v->scan_index-1].receipt.offset_ms ||
         !census_standalone_prior(s->history,v->pid,(unsigned)v->scan_index-1,&known)) return false;
     unsigned matching=0;
-    if(v->kind==CENSUS_ENUMERATED_ABSENT) {
+    if(v->kind==CENSUS_TERMINAL_ZOMBIE) {
+      if(known || !v->start || strcmp(v->method,"pidfd_zombie_stat")) return false;
+      unsigned links=0;
+      for(unsigned k=0;k<r->resolutions_n;k++) {
+        const struct census_typed_resolution *link=&r->resolutions[k];
+        if(link->proof_index!=i+1) continue;
+        if(!link->error_index || link->error_index>s->errors_n) return false;
+        const struct census_global_fault *e=&s->errors[link->error_index-1];
+        if(link->kind!=CENSUS_RESOLUTION_ABSENCE || link->classified_scan || link->selected_seal ||
+            e->raw.pid!=v->pid || e->raw.start || strcmp(e->raw.operation,"pidfd_poll") ||
+            e->raw.error!=ESTALE || e->scan_index>(unsigned)v->scan_index) return false;
+        links++;
+      }
+      if(links!=1) return false;
+    } else if(v->kind==CENSUS_ENUMERATED_ABSENT) {
       for(unsigned k=0;k<r->proofs_n;k++) {
         const struct census_typed_proof *q=&r->proofs[k];
         if(q->source.kind==CENSUS_INCARNATION_RETIRED && q->source.pid==v->pid &&
@@ -73,12 +121,30 @@ static inline bool census_resolve_standalone(struct census_global_source *s,
       s->errors_n!=s->errors_total || expired() || s->budget->fd_failed ||
       !ev.trusted_kernel || fixture || !ev.ns[0] || strcmp(ev.ns,ev.binding.ns) || r->resolutions_n>=128) return false;
   const struct census_global_fault *e=&s->errors[error_index-1];
-  if(!census_absence_raw_eligible(e) || e->raw.start || strcmp(e->raw.operation,"pidfd_open") ||
-      (e->raw.error!=ESRCH && e->raw.error!=EINVAL) || !e->scan_index || e->scan_index>s->history->n) return false;
+  bool zombie_fault=e->raw.operation && !strcmp(e->raw.operation,"pidfd_poll") &&
+    e->raw.error==ESTALE && !e->raw.start;
+  if(!census_absence_raw_eligible(e) || !e->scan_index || e->scan_index>s->history->n ||
+      (!zombie_fault && (e->raw.start || strcmp(e->raw.operation,"pidfd_open") ||
+        (e->raw.error!=ESRCH && e->raw.error!=EINVAL)))) return false;
   for(unsigned i=0;i<r->resolutions_n;i++) if(r->resolutions[i].error_index==error_index) return false;
   const struct census_owned_identity *known=NULL;
   if(!census_standalone_prior(s->history,e->raw.pid,e->scan_index-1,&known) ||
       r->proofs_n>128-(known?2u:1u)) return false;
+  if(zombie_fault) {
+    uint64_t zombie_start=0;
+    if(known || !census_terminal_zombie(e->raw.pid,s->budget,&zombie_start)) return false;
+    uint64_t start=(uint64_t)ev.monotonic_start.tv_sec*1000u+(uint64_t)ev.monotonic_start.tv_nsec/1000000u;
+    uint64_t now=mono_ms();if(now<start || now-start>=10000) return false;
+    struct proof_item proof={.kind=CENSUS_TERMINAL_ZOMBIE,.method="pidfd_zombie_stat",
+      .pid=e->raw.pid,.start=zombie_start,.scan_index=(int)s->history->n,.offset_ms=now-start};
+    unsigned index=r->proofs_n+1;
+    r->proofs[r->proofs_n++]=(struct census_typed_proof){.source=proof};
+    r->resolutions[r->resolutions_n++]=(struct census_typed_resolution){.error_index=error_index,
+      .proof_index=index,.kind=CENSUS_RESOLUTION_ABSENCE};
+    bool valid=census_typed_proofs_valid(r) && census_standalone_history_valid(s,r);
+    if(!valid) r->denied=true;
+    return valid;
+  }
   /* ORIGerrno only selects this guarded path; this separate syscall is proof. */
   int fd=(int)syscall(SYS_pidfd_open,e->raw.pid,0),error=errno;
   if(fd>=0) {census_fd_take(s->budget,fd);census_fd_close(s->budget,fd);return false;}

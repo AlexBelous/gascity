@@ -164,6 +164,18 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 			if p.StartTicks != nil || p.Method != "pidfd_no_pid" || p.ReplacementStart != "" || p.ProtectedIdentity || p.DescendantCertificateID != 0 {
 				return bad()
 			}
+		case "terminal_zombie":
+			if p.StartTicks == nil || !positiveNumber(start) || p.Method != "pidfd_zombie_stat" ||
+				p.ReplacementStart != "" || p.ProtectedIdentity || p.DescendantCertificateID != 0 {
+				return bad()
+			}
+			// No prior positive identity may be retired through a numeric zombie
+			// witness; managed descendants still require their protected chain.
+			for scan := 1; scan < p.ScanIndex; scan++ {
+				if _, ok := byScan[scan][p.PID]; ok {
+					return bad()
+				}
+			}
 		case "incarnation_retired":
 			if p.StartTicks == nil || !positiveNumber(start) {
 				return bad()
@@ -239,11 +251,19 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 		switch r.Kind {
 		case "kernel_absence":
 			if r.ClassifiedScan != 0 || r.SelectedSeal != 0 || r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) ||
-				e.Reason != "process_unavailable" || !(e.Operation == "stat" && e.Errno == 2 || e.Operation == "environ" && e.Errno == 3 || e.Operation == "comm" && (e.Errno == 2 || e.Errno == 3) || e.Operation == "pidfd_open" && (e.Errno == 3 || e.Errno == 22 && e.StartTicks == nil) || e.Operation == "status" && e.Errno == 3 && e.StartTicks != nil) {
+				e.Reason != "process_unavailable" || ((e.Operation != "stat" || e.Errno != 2) &&
+				(e.Operation != "environ" || e.Errno != 3) &&
+				(e.Operation != "comm" || (e.Errno != 2 && e.Errno != 3)) &&
+				(e.Operation != "pidfd_open" || (e.Errno != 3 && (e.Errno != 22 || e.StartTicks != nil))) &&
+				(e.Operation != "status" || e.Errno != 3 || e.StartTicks == nil) &&
+				(e.Operation != "pidfd_poll" || e.Errno != 116 || e.StartTicks != nil)) {
 				return bad()
 			}
 			p := c.Proofs[r.ProofIndex-1]
-			if p.PID != e.PID || !sameStart(p.StartTicks, e.StartTicks) || p.ScanIndex < e.ScanIndex || p.Kind == "enumerated_pid_absent" && e.Operation != "stat" && !(e.Operation == "pidfd_open" && (e.Errno == 3 || e.Errno == 22 && e.StartTicks == nil)) {
+			if p.PID != e.PID || p.ScanIndex < e.ScanIndex ||
+				(p.Kind == "terminal_zombie") != (e.Operation == "pidfd_poll") ||
+				(p.Kind != "terminal_zombie" && !sameStart(p.StartTicks, e.StartTicks)) ||
+				p.Kind == "enumerated_pid_absent" && e.Operation != "stat" && (e.Operation != "pidfd_open" || (e.Errno != 3 && (e.Errno != 22 || e.StartTicks != nil))) {
 				return bad()
 			}
 		case "fresh_classification":
@@ -272,7 +292,7 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 			}
 		case "fresh_census":
 			if r.ProofIndex != 0 || r.ClassifiedScan != 0 || r.SelectedSeal != n || e.PID != 0 || e.Errno != 0 || e.StartTicks != nil ||
-				!((e.Reason == "coverage_changed" && e.Operation == "enumerate") || (e.Reason == "closing_census_changed" && e.Operation == "census")) {
+				((e.Reason != "coverage_changed" || e.Operation != "enumerate") && (e.Reason != "closing_census_changed" || e.Operation != "census")) {
 				return bad()
 			}
 		default:
@@ -283,8 +303,8 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 }
 
 func validCensusIdentity(v CensusIdentity, controller int) bool {
-	if !(v.PID > 1 && v.PID <= 2147483647 && v.PID != controller && v.PPID >= 0 && v.PPID <= 2147483647 && v.PGID >= 0 && v.PGID <= 2147483647 &&
-		(positiveNumber(v.StartTicks) || v.Classification == "kernel" && v.StartTicks == "0") && v.Name != "" && len(v.Name) <= 256 && v.StatRevalidated && v.PIDFDBound && v.UIDsRevalidated) {
+	if v.PID <= 1 || v.PID > 2147483647 || v.PID == controller || v.PPID < 0 || v.PPID > 2147483647 || v.PGID < 0 || v.PGID > 2147483647 ||
+		(!positiveNumber(v.StartTicks) && (v.Classification != "kernel" || v.StartTicks != "0")) || v.Name == "" || len(v.Name) > 256 || !v.StatRevalidated || !v.PIDFDBound || !v.UIDsRevalidated {
 		return false
 	}
 	emptySession := v.SessionID == "" && v.Template == "" && v.Epoch == 0 && v.InstanceTokenSHA256 == ""

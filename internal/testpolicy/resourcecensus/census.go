@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   719,
-			BaselineFiles:   213,
+			BaselineCalls:   721,
+			BaselineFiles:   215,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -166,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   488,
-			BaselineFiles:   144,
+			BaselineCalls:   489,
+			BaselineFiles:   145,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -321,6 +321,17 @@ var bootstrapPolicy = Ledger{
 		},
 	},
 	Medium: []MediumOwner{
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestBDCommandMacExistingBranch",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "Native37 Mac child exit compatibility is a checked Medium subprocess boundary",
+			ResourceOwner:   "only the real shell child lexically inside TestBDCommandMacExistingBranch leaves Small debt; it proves preserved exec.ExitError and exit 17 through the existing Mac command path, not a fake exit status",
+			MigrationTarget: "P0.4b/native37-Mac-exit-compat",
+			Expires:         "2026-10-31",
+		},
 		{
 			PackageDir:      "internal/api",
 			PackageName:     "api",

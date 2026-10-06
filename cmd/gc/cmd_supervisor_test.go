@@ -5334,6 +5334,9 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		// regression that waits forceTimeout twice observes this close and
 		// incorrectly reports success. The shared-deadline implementation
 		// expires before the close and reports the forced-shutdown timeout.
+		// The margin between the shared deadline and this close is about
+		// forceTimeout/2 (50ms); if this ever flakes, raise shutdownTimeout
+		// rather than reintroducing a wall-clock bound.
 		time.Sleep(forceTimeout + forceTimeout/2)
 		close(done)
 	}()

@@ -76,11 +76,14 @@ static inline bool census_typed_proofs_valid(const struct census_resolution_ledg
   for(unsigned i=0;i<r->proofs_n;i++) {
     const struct census_typed_proof *p=&r->proofs[i];const struct proof_item *v=&p->source;
     if(v->pid<=1 || v->pid>INT32_MAX || v->scan_index<1 || v->scan_index>10 ||
-        v->offset_ms>=10000 || v->replacement_start || !v->method || strcmp(v->method,"pidfd_no_pid")) return false;
+        v->offset_ms>=10000 || v->replacement_start || !v->method) return false;
     if(v->kind==CENSUS_ENUMERATED_ABSENT) {
-      if(v->start || p->protected_identity || p->certificate_id) return false;
+      if(v->start || p->protected_identity || p->certificate_id || strcmp(v->method,"pidfd_no_pid")) return false;
+    } else if(v->kind==CENSUS_TERMINAL_ZOMBIE) {
+      if(!v->start || p->protected_identity || p->certificate_id || strcmp(v->method,"pidfd_zombie_stat")) return false;
     } else if(v->kind==CENSUS_INCARNATION_RETIRED) {
-      if(!v->start || (p->protected_identity?(!p->certificate_id || p->certificate_id>r->certificates_n):p->certificate_id!=0)) return false;
+      if(!v->start || strcmp(v->method,"pidfd_no_pid") ||
+          (p->protected_identity?(!p->certificate_id || p->certificate_id>r->certificates_n):p->certificate_id!=0)) return false;
     } else return false;
     for(unsigned k=0;k<i;k++) {
       const struct proof_item *old=&r->proofs[k].source;
@@ -111,10 +114,20 @@ static inline bool census_absence_raw_eligible(const struct census_global_fault 
   if(strcmp(e->reason,"process_unavailable") || !e->raw.operation || e->raw.pid<=1 ||
       e->raw.pid==ev.binding.pid) return false;
   return (!strcmp(e->raw.operation,"pidfd_open") && (e->raw.error==ESRCH || (e->raw.error==EINVAL && !e->raw.start))) ||
+    (!strcmp(e->raw.operation,"pidfd_poll") && e->raw.error==ESTALE && !e->raw.start) ||
     (!strcmp(e->raw.operation,"stat") && e->raw.error==ENOENT) ||
     (!strcmp(e->raw.operation,"environ") && e->raw.error==ESRCH) ||
     (!strcmp(e->raw.operation,"status") && e->raw.error==ESRCH && e->raw.start) ||
     (!strcmp(e->raw.operation,"comm") && (e->raw.error==ENOENT || e->raw.error==ESRCH));
+}
+static inline bool census_absence_proof_matches(const struct census_global_fault *e,
+    const struct proof_item *p) {
+  if(p->pid!=e->raw.pid || p->scan_index<(int)e->scan_index) return false;
+  if(p->kind==CENSUS_TERMINAL_ZOMBIE)
+    return e->raw.operation && !strcmp(e->raw.operation,"pidfd_poll") &&
+      e->raw.error==ESTALE && !e->raw.start && p->start &&
+      p->method && !strcmp(p->method,"pidfd_zombie_stat");
+  return p->start==e->raw.start;
 }
 /* Derive the full chain ONLY from one immutable prior scan; no supplied chain,
  * root selector, errno or callback proof is accepted by this assembler. */
@@ -196,8 +209,7 @@ static inline bool census_resolution_prefix_valid(const struct census_global_sou
       if(resolution->kind!=CENSUS_RESOLUTION_ABSENCE || !census_absence_raw_eligible(e) ||
           !resolution->proof_index || resolution->proof_index>r->proofs_n) return false;
       const struct census_typed_proof *proof=&r->proofs[resolution->proof_index-1];
-      if(proof->source.pid!=e->raw.pid || proof->source.start!=e->raw.start ||
-          proof->source.scan_index<(int)e->scan_index) return false;
+      if(!census_absence_proof_matches(e,&proof->source)) return false;
       matched++;
     }
     if(matched!=1) return false;

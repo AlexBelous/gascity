@@ -203,7 +203,8 @@ static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_b
   fault->operation="fd_budget";
   if(!census_fd_take(budget,dir)) {errno=EMFILE;goto done;}
   fault->operation="pidfd_poll";
-  if(process_poll(pin,&events)!=0 || events) goto done;
+  if(process_poll(pin,&events)!=0) goto done;
+  if(events) {errno=ESTALE;goto done;}
   if(!census_bounded_fields(budget,dir,pid,&a,fault) ||
      !census_bounded_fields(budget,dir,pid,&b,fault)) goto done;
   fault->operation="identity_comparison";fault->start=a.start;
@@ -212,7 +213,8 @@ static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_b
   if(!census_read_bounded_stat(budget,dir,pid,&last)) goto done;
   if(last.start!=a.start || last.ppid!=a.ppid || last.pgid!=a.pgid || last.kernel_flags!=a.kernel_flags) {errno=ESTALE;goto done;}
   fault->operation="pidfd_poll";
-  events=0;if(process_poll(pin,&events)!=0 || events) goto done;
+  events=0;if(process_poll(pin,&events)!=0) goto done;
+  if(events) {errno=ESTALE;goto done;}
   fault->operation="deadline";
   if(expired()) {errno=ETIMEDOUT;goto done;}
   fault->operation="fd_budget";

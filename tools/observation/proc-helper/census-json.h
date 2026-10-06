@@ -85,7 +85,7 @@ static inline void census_json_census(struct census_json *o,const struct census_
   for(unsigned i=0;i<r->proofs_n;i++) {
     const struct census_typed_proof *v=&r->proofs[i];const struct proof_item *p=&v->source;
     if(i) census_json_text(o,",");
-    census_json_printf(o,"{\"kind\":\"%s\",\"method\":\"%s\",\"pid\":%u,\"start_ticks\":",p->kind==CENSUS_ENUMERATED_ABSENT?"enumerated_pid_absent":"incarnation_retired",p->method,p->pid);
+    census_json_printf(o,"{\"kind\":\"%s\",\"method\":\"%s\",\"pid\":%u,\"start_ticks\":",census_proof_kind_name(p->kind),p->method,p->pid);
     if(p->start) census_json_printf(o,"\"%" PRIu64 "\"",p->start);else census_json_text(o,"null");
     census_json_printf(o,",\"replacement_start\":\"\",\"scan_index\":%d,\"offset_ms\":%" PRIu64 ",\"protected_identity\":%s,\"descendant_certificate_id\":%u}",p->scan_index,p->offset_ms,v->protected_identity?"true":"false",v->certificate_id);
   }
@@ -132,7 +132,7 @@ static inline void census_json_unknown_census(struct census_json *o,const struct
   for(unsigned i=0;i<r->proofs_n;i++) {
     const struct census_typed_proof *v=&r->proofs[i];const struct proof_item *p=&v->source;
     if(i) census_json_text(o,",");
-    census_json_printf(o,"{\"kind\":\"%s\",\"method\":\"%s\",\"pid\":%u,\"start_ticks\":",p->kind==CENSUS_ENUMERATED_ABSENT?"enumerated_pid_absent":"incarnation_retired",p->method,p->pid);
+    census_json_printf(o,"{\"kind\":\"%s\",\"method\":\"%s\",\"pid\":%u,\"start_ticks\":",census_proof_kind_name(p->kind),p->method,p->pid);
     if(p->start) census_json_printf(o,"\"%" PRIu64 "\"",p->start);else census_json_text(o,"null");
     census_json_printf(o,",\"replacement_start\":\"\",\"scan_index\":%d,\"offset_ms\":%" PRIu64 ",\"protected_identity\":%s,\"descendant_certificate_id\":%u}",p->scan_index,p->offset_ms,v->protected_identity?"true":"false",v->certificate_id);
   }

@@ -18,8 +18,17 @@ struct census_probe {
 enum census_absence_kind {
   CENSUS_UNPROVEN = 0,
   CENSUS_ENUMERATED_ABSENT,
-  CENSUS_INCARNATION_RETIRED
+  CENSUS_INCARNATION_RETIRED,
+  CENSUS_TERMINAL_ZOMBIE
 };
+static inline const char *census_proof_kind_name(enum census_absence_kind kind) {
+  switch (kind) {
+  case CENSUS_ENUMERATED_ABSENT: return "enumerated_pid_absent";
+  case CENSUS_INCARNATION_RETIRED: return "incarnation_retired";
+  case CENSUS_TERMINAL_ZOMBIE: return "terminal_zombie";
+  default: return NULL;
+  }
+}
 static enum census_absence_kind census_absence(const struct census_probe *p) {
   if (!p->pid || p->pid > INT32_MAX || p->flags || !p->trusted_kernel ||
       !p->same_namespace || p->protected_identity)

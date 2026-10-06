@@ -70,8 +70,7 @@ static inline bool census_final_resolutions_valid(const struct census_global_sou
         if(!census_absence_raw_eligible(&s->errors[e]) || !v->proof_index || v->proof_index>r->proofs_n ||
             v->classified_scan || v->selected_seal) return false;
         const struct census_typed_proof *p=&r->proofs[v->proof_index-1];
-        if(p->source.pid!=s->errors[e].raw.pid || p->source.start!=s->errors[e].raw.start ||
-            p->source.scan_index<(int)s->errors[e].scan_index) return false;
+        if(!census_absence_proof_matches(&s->errors[e],&p->source)) return false;
       } else {
         if(v->kind!=CENSUS_RESOLUTION_FRESH || !census_positive_birth(s,&s->errors[e]) ||
             v->proof_index || v->classified_scan!=j->selected_first || v->selected_seal!=j->selected_seal ||

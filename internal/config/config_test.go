@@ -1873,7 +1873,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 			t.Errorf("EffectiveWorkQuery() missing run_target migration filter fragment %q: %q", want, got)
 		}
 	}
-	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
+	if !strings.Contains(got, `"${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
 		t.Errorf("EffectiveWorkQuery() missing multi-identifier resolution: %q", got)
 	}
 }
@@ -2041,7 +2041,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveAssignedInProgressQuery()
 	for _, want := range []string{
-		`"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`,
+		`"${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"`,
 		`bd list --status in_progress --assignee="$id" --json --limit=1`,
 		`ephemeral=true AND status=in_progress`,
 	} {
@@ -2054,7 +2054,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	}
 
 	out := runShellWithFakeBd(t, got, map[string]string{
-		"GC_SESSION_ID": "worker-bead",
+		"GC_WORK_QUERY_SESSION_ID": "worker-bead",
 	}, `#!/bin/sh
 set -eu
 case "$*" in
@@ -2519,8 +2519,8 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 func TestEffectiveWorkQueryAssignedTierSurfacesEpicWisp(t *testing.T) {
 	a := Agent{Name: "witness", Dir: "hello-world"}
 	out := runEffectiveWorkQueryForBeads(t, a, BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, map[string]string{
-		"GC_SESSION_ID":     "witness-sess",
-		"GC_SESSION_ORIGIN": "ephemeral",
+		"GC_WORK_QUERY_SESSION_ID": "witness-sess",
+		"GC_SESSION_ORIGIN":        "ephemeral",
 	}, `#!/bin/sh
 set -eu
 case "$1" in

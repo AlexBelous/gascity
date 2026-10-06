@@ -1519,6 +1519,7 @@ go_test(
         "work_assignment_test.go",
         "work_assignment_write_test.go",
         "work_query_failure_test.go",
+        "work_query_probe_env_test.go",
         "work_query_probe_test.go",
         "work_record_gate_owner_test.go",
         "work_record_gate_test.go",

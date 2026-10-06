@@ -81,7 +81,7 @@ func TestFederatedWorkQueryPropagatesADeadLeg(t *testing.T) {
 func TestFederatedAssignedReadyTierPropagatesADeadLeg(t *testing.T) {
 	a := &Agent{Name: "worker"}
 	res := runGeneratedQuery(t, a.EffectiveAssignedReadyQueryFor(federatedTopology()), map[string]string{
-		"GC_SESSION_ID": "worker-sess",
+		"GC_WORK_QUERY_SESSION_ID": "worker-sess",
 	}, fakeGCReadyFails)
 
 	if res.exit == 0 {

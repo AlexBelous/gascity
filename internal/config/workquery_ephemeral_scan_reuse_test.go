@@ -11,7 +11,7 @@ import (
 
 // Regression coverage for #5712.
 //
-// The two ephemeral probes emitted inside the `for id in "$GC_SESSION_ID"
+// The two ephemeral probes emitted inside the `for id in "$GC_WORK_QUERY_SESSION_ID"
 // "$GC_SESSION_NAME" "$GC_ALIAS"` identity loops each read a full-store
 // `bd query --limit=0` scan whose predicate does not mention the loop variable
 // — the identity filter is applied by jq AFTER the array comes back. The
@@ -76,9 +76,9 @@ func scanCounts(t *testing.T, script string, bdScript string, env map[string]str
 // tmux name and alias all differ, so every identity loop runs its full three
 // iterations before falling through.
 var threeIdentities = map[string]string{
-	"GC_SESSION_ID":   "sess-1",
-	"GC_SESSION_NAME": "claude-sess-1",
-	"GC_ALIAS":        "act/claude-1",
+	"GC_WORK_QUERY_SESSION_ID": "sess-1",
+	"GC_SESSION_NAME":          "claude-sess-1",
+	"GC_ALIAS":                 "act/claude-1",
 }
 
 // TestEphemeralScanRunsOncePerStatusNotPerIdentity is the #5712 regression: the
@@ -108,9 +108,9 @@ func TestLegacyControlEphemeralScanRunsOncePerStatus(t *testing.T) {
 	}
 	script := legacyControlAssignedWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	env := map[string]string{
-		"GC_SESSION_ID":   "rig-a/control-dispatcher",
-		"GC_SESSION_NAME": "claude-control-dispatcher",
-		"GC_ALIAS":        "act/control-dispatcher",
+		"GC_WORK_QUERY_SESSION_ID": "rig-a/control-dispatcher",
+		"GC_SESSION_NAME":          "claude-control-dispatcher",
+		"GC_ALIAS":                 "act/control-dispatcher",
 	}
 	inProgress, open, _ := scanCounts(t, script, fakeBdLoggingQueries("[]", "[]"), env)
 

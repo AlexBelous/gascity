@@ -136,7 +136,8 @@ func candidateLegacyVariant(id string) string {
 
 // controlReadyCandidates returns the deduped, precedence-ordered assignee
 // candidates the shell script would have checked: GC_CONTROL_SESSION_NAME,
-// GC_SESSION_NAME, GC_ALIAS, GC_CONTROL_TARGET, GC_SESSION_ID, each paired
+// GC_SESSION_NAME, GC_ALIAS, GC_CONTROL_TARGET, GC_SESSION_ID (before the
+// shell edge projects it as GC_WORK_QUERY_SESSION_ID), each paired
 // with its control-dispatcher -> workflow-control legacy variant.
 func controlReadyCandidates(parsed parsedControlReadyQuery, envList []string) []string {
 	sources := []string{

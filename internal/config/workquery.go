@@ -457,7 +457,7 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
 	if !topo.FederatedReady {
 		return `gc_assigned_workflow_anchor_json=""; ` +
-			`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+			`for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 			`[ -z "$id" ] && continue; ` +
 			assignedInProgressTierCommand("id", topo) +
 			`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -474,7 +474,7 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 	}
 	return `gc_assigned_workflow_anchor_json=""; ` +
 		federatedAssignedBatchRead("gc_assigned_in_progress_all_json", ` --status in_progress`) +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		selectAssignedIdentityFromBatch("gc_assigned_in_progress_all_json", 1) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -498,7 +498,7 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 // backlog hiding another identity before selection.
 func federatedAssignedBatchRead(dst, extraArgs string) string {
 	return `gc_read_assigned_batch() { set --; ` +
-		`for gc_identity in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`for gc_identity in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$gc_identity" ] && continue; set -- "$@" "--assignee-any=$gc_identity"; done; ` +
 		`[ "$#" -gt 0 ] || { printf "[]"; return 0; }; ` +
 		gcReadyCommand + extraArgs + ` "$@" --json --limit=0; }; ` +
@@ -559,7 +559,7 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
 func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 	if !topo.FederatedReady {
-		return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		return `for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 			`[ -z "$id" ] && continue; ` +
 			assignedInProgressTierCommand("id", topo) +
 			`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -569,7 +569,7 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 			`done; `
 	}
 	return federatedAssignedBatchRead("gc_assigned_in_progress_all_json", ` --status in_progress`) +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		selectAssignedIdentityFromBatch("gc_assigned_in_progress_all_json", 1) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
@@ -742,7 +742,7 @@ func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 
 func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
 	if !topo.FederatedReady {
-		return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		return `for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 			`[ -z "$id" ] && continue; ` +
 			assignedReadyTierCommand("id", topo) +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -750,7 +750,7 @@ func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
 			`done; `
 	}
 	return federatedAssignedBatchRead("gc_assigned_ready_all_json", "") +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		selectAssignedIdentityFromBatch("gc_assigned_ready_all_json", 1) +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -765,7 +765,7 @@ func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
 
 func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
 	return `gc_assigned_workflow_anchor_json=""; ` +
-		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
@@ -786,7 +786,7 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 }
 
 func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+	return `for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
@@ -801,7 +801,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 }
 
 func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
-	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+	return `for id in "${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID}" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
 		`for cand in "$id" "$legacy"; do ` +
@@ -1037,7 +1037,7 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // If WorkQuery is set, returns it as-is. Otherwise returns the default
 // three-tier query with multi-identifier assignee resolution.
 //
-// Assignee resolution order: $GC_SESSION_ID (bead ID) > $GC_SESSION_NAME
+// Assignee resolution order: ${GC_WORK_QUERY_SESSION_ID:-$GC_SESSION_ID} (bead ID) > $GC_SESSION_NAME
 // (tmux session name) > $GC_ALIAS (named identity / qualified name).
 // All three are checked so work is found regardless of which identifier
 // was used when assigning.

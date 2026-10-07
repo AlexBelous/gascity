@@ -597,8 +597,9 @@ func TestHandleStatusBoundedPoolUsesCachedSessionState(t *testing.T) {
 	}
 }
 
-func TestHandleStatusOnlyUsesProviderLiveness(t *testing.T) {
+func TestHandleStatusLegacyLivenessWithIndependentSIDProjection(t *testing.T) {
 	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
 	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -617,10 +618,22 @@ func TestHandleStatusOnlyUsesProviderLiveness(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	for _, call := range state.sp.Calls {
-		switch call.Method {
-		case "ProcessAlive", "IsAttached", "GetLastActivity", "GetMeta", "ListRunning":
-			t.Fatalf("/status called provider %s for %q; calls=%#v", call.Method, call.Name, state.sp.Calls)
+	// The SID projection enumerates live handles and reads only native identity.
+	// Legacy configured-agent health still uses IsRunning, independent of the
+	// provider's suspended metadata, attachment, activity and process probes.
+	wantCalls := []runtime.Call{
+		{Method: "ListRunning"},
+		{Method: "GetMeta", Name: "myrig--worker", Key: "GC_SESSION_ID"},
+		{Method: "GetMeta", Name: "myrig--worker", Key: "GC_TEMPLATE"},
+		{Method: "IsRunning", Name: "myrig--worker"},
+	}
+	if len(state.sp.Calls) != len(wantCalls) {
+		t.Fatalf("/status provider calls=%#v, want %#v", state.sp.Calls, wantCalls)
+	}
+	for i, call := range state.sp.Calls {
+		want := wantCalls[i]
+		if call.Method != want.Method || call.Name != want.Name || call.Key != want.Key {
+			t.Fatalf("/status provider call %d=%#v, want %#v", i, call, want)
 		}
 	}
 	var resp statusResponse
@@ -632,6 +645,12 @@ func TestHandleStatusOnlyUsesProviderLiveness(t *testing.T) {
 	}
 	if resp.Running != 1 {
 		t.Fatalf("Running = %d, want 1", resp.Running)
+	}
+	if resp.RuntimeSessions == nil || resp.RuntimeSessions.ProviderComplete {
+		t.Fatal("live handle without native identity must leave the SID projection incomplete")
+	}
+	if resp.Partial {
+		t.Fatal("incomplete SID projection changed legacy health completeness")
 	}
 }
 

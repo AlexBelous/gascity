@@ -50,7 +50,10 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+	return extractCodexTailMetaFromFile(f)
+}
 
+func extractCodexTailMetaFromFile(f *os.File) (*TailMeta, error) {
 	data, startsMidLine, truncated, err := readTailWindow(f, tailChunkSize)
 	if err != nil {
 		return nil, err
@@ -66,11 +69,12 @@ func ExtractCodexTailMeta(path string) (*TailMeta, error) {
 // verifying path resolves under one of the merged Codex session roots (the
 // defaults plus searchPaths).
 func ExtractCodexTailMetaFromSearchPaths(searchPaths []string, path string) (*TailMeta, error) {
-	safePath, err := validateSearchPathFile(mergeCodexSearchPaths(searchPaths), path)
+	f, err := openSearchPathFile(mergeCodexSearchPaths(searchPaths), path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractCodexTailMeta(safePath)
+	defer func() { _ = f.Close() }()
+	return extractCodexTailMetaFromFile(f)
 }
 
 func extractCodexTailMetaFromLines(lines [][]byte, startsMidLine, truncated bool) *TailMeta {
@@ -274,7 +278,10 @@ func ExtractCodexTailUsage(path string) ([]TailUsage, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
+	return extractCodexTailUsageFromFile(f)
+}
 
+func extractCodexTailUsageFromFile(f *os.File) ([]TailUsage, error) {
 	// One size snapshot feeds both windows. The seed and the tail read are
 	// adjacent halves of the same file, so deriving them from separate SeekEnd
 	// calls would leave the bytes appended in between — these rollouts are
@@ -519,9 +526,10 @@ func codexTurnContextModel(line []byte) string {
 // verifying path resolves under one of the merged codex session roots (the
 // defaults plus searchPaths). Mirrors ExtractTailUsageFromSearchPaths.
 func ExtractCodexTailUsageFromSearchPaths(searchPaths []string, path string) ([]TailUsage, error) {
-	safePath, err := validateSearchPathFile(mergeCodexSearchPaths(searchPaths), path)
+	f, err := openSearchPathFile(mergeCodexSearchPaths(searchPaths), path)
 	if err != nil {
 		return nil, err
 	}
-	return ExtractCodexTailUsage(safePath)
+	defer func() { _ = f.Close() }()
+	return extractCodexTailUsageFromFile(f)
 }

@@ -11,6 +11,8 @@ go_test(
     name = "execenv_test",
     srcs = [
         "execenv_test.go",
+        "owner_tuple_boundary_diagnostic_integration_test.go",  # keep
+        "owner_tuple_boundary_diagnostic_test.go",
         "testenv_import_test.go",
     ],
     data = glob(

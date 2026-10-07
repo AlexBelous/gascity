@@ -34,6 +34,7 @@ go_test(
     srcs = [
         "census_test.go",
         "census_v3_birth_conservation_test.go",
+        "census_v3_chain_composition_test.go",
         "census_v3_city_context_test.go",
         "census_v3_envelope_vector_test.go",
         "census_v3_nullable_producer_vector_test.go",
@@ -53,7 +54,10 @@ go_test(
         "observation_transport_integration_test.go",
         "testenv_import_test.go",
     ],
-    data = ["//internal/runtime/observation:consumer_fixture"],
+    data = [
+        "testdata/protected-chain-f386.json",  # keep
+        "//internal/runtime/observation:consumer_fixture",
+    ],
     embed = [":procobserver"],
     deps = [
         "//internal/runtime",

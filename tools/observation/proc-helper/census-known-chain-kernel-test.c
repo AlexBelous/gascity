@@ -342,10 +342,14 @@ int main(int argc,char **argv) {
   later->rows=reappeared;later->allocated_rows=3;
   bool same_incarnation_reappeared=census_certificates_history_valid(s,r);
   later->rows=original_rows;later->allocated_rows=original_n;
+  struct timespec original_clock=ev.monotonic_start;
+  ev.monotonic_start.tv_sec-=11;
+  bool deadline_expired=census_certificates_history_valid(s,r);
+  ev.monotonic_start=original_clock;
   if(wrong_suffix||wrong_uid||bad_prior||duplicate_error||root_changed||cross_scan||
-      same_incarnation_reappeared||
+      same_incarnation_reappeared||deadline_expired||
       !census_final_resolutions_valid(s,r,&j)) {rc=41;goto cleanup;}
-  printf("negative=wrong_suffix:deny wrong_uid:deny bad_prior:deny duplicate_error:deny root_changed:deny cross_scan:deny same_incarnation_reappeared:deny\n");
+  printf("negative=wrong_suffix:deny wrong_uid:deny bad_prior:deny duplicate_error:deny root_changed:deny cross_scan:deny same_incarnation_reappeared:deny expired_deadline:deny\n");
 cleanup:
   census_resolution_free(&b,r);census_global_free(s);close(ev.procfd);
   if(b.used||b.fd_failed||b.fd_peak>32) rc=32;

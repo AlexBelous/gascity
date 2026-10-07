@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* These facts are supplied by the syscall adapter, never by the requester.
@@ -19,13 +20,15 @@ enum census_absence_kind {
   CENSUS_UNPROVEN = 0,
   CENSUS_ENUMERATED_ABSENT,
   CENSUS_INCARNATION_RETIRED,
-  CENSUS_TERMINAL_ZOMBIE
+  CENSUS_TERMINAL_ZOMBIE,
+  CENSUS_UNCLASSIFIED_INCARNATION_RETIRED
 };
 static inline const char *census_proof_kind_name(enum census_absence_kind kind) {
   switch (kind) {
   case CENSUS_ENUMERATED_ABSENT: return "enumerated_pid_absent";
   case CENSUS_INCARNATION_RETIRED: return "incarnation_retired";
   case CENSUS_TERMINAL_ZOMBIE: return "terminal_zombie";
+  case CENSUS_UNCLASSIFIED_INCARNATION_RETIRED: return "unclassified_incarnation_retired";
   default: return NULL;
   }
 }

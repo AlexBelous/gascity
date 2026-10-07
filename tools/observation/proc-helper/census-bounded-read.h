@@ -9,6 +9,7 @@ struct census_buffer {unsigned char *data;size_t n,capacity;};
 /* Owned-child scheduling only. This does not inject errno or a kernel proof;
  * production source contains no callback or request-selectable scheduling. */
 static void (*census_test_before_status)(uint32_t);
+static void (*census_test_before_environ)(uint32_t);
 #endif
 static inline void census_buffer_clear(struct census_budget *budget,struct census_buffer *b) {
   if(b->data) {volatile unsigned char *wipe=b->data;for(size_t i=0;i<b->capacity;i++) wipe[i]=0;}
@@ -160,6 +161,9 @@ static inline bool census_bounded_fields(struct census_budget *budget,int dir,ui
 #endif
   if(!census_read_bounded_uids(budget,dir,out->uids)) return false;
   fault->operation="environ";
+#ifdef GC_HELPER_TEST
+  if(census_test_before_environ) census_test_before_environ(pid);
+#endif
   if(!out->kernel_flags) {
     if(!census_read_bounded_environment(budget,dir,out)) return false;
   } else {
@@ -184,6 +188,11 @@ static inline bool census_equal_bounded(const struct census_owned_identity *a,
     !strcmp(a->sid,b->sid) && !strcmp(a->city,b->city) && !strcmp(a->template,b->template) &&
     !strcmp(a->token,b->token) && (a->kernel_flags==PF_KTHREAD || !strcmp(a->name,b->name));
 }
+static inline bool census_same_bound_stat(const struct census_owned_identity *a,
+    const struct census_owned_identity *b) {
+  return a->pid==b->pid && a->start==b->start && a->ppid==b->ppid &&
+    a->pgid==b->pgid && a->kernel_flags==b->kernel_flags;
+}
 static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_budget *budget,
     struct census_owned_identity *out,struct census_capture_fault *fault) {
   *fault=(struct census_capture_fault){.pid=pid,.operation="deadline"};
@@ -196,8 +205,9 @@ static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_b
     census_fd_close(budget,pin);fault->operation="fd_budget";fault->error=errno=EMFILE;return false;
   }
   char path[32];snprintf(path,sizeof path,"%u",pid);
-  int dir=fixed_open(ev.procfd,path,O_DIRECTORY);bool ok=false;short events=0;
-  struct census_owned_identity a={0},b={0},last={0};
+  int dir=fixed_open(ev.procfd,path,O_DIRECTORY),bound_pin=-1,current_dir=-1;
+  bool ok=false,bound_live=false;short events=0;
+  struct census_owned_identity a={0},b={0},last={0},bound_a={0},bound_b={0},current={0};
   fault->operation="proc_directory";
   if(dir<0) goto done;
   fault->operation="fd_budget";
@@ -205,8 +215,60 @@ static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_b
   fault->operation="pidfd_poll";
   if(process_poll(pin,&events)!=0) goto done;
   if(events) {errno=ESTALE;goto done;}
+  /* Preserve the original first pidfd for no-PID faults. For a live user
+   * incarnation, bind a NEW flags0 pidfd between two same-directory stat
+   * reads; an older pidfd opened before the first stat is not this witness. */
+  fault->operation="stat";
+  if(!census_read_bounded_stat(budget,dir,pid,&bound_a)) goto done;
+  fault->start=bound_a.start;
+  if(bound_a.start && !bound_a.kernel_flags) {
+    fault->operation="pidfd_open";
+    bound_pin=process_pidfd(pid);if(bound_pin<0) goto done;
+    fault->operation="fd_budget";
+    if(!census_fd_take(budget,bound_pin)) {errno=EMFILE;goto done;}
+    fault->operation="stat";
+    if(!census_read_bounded_stat(budget,dir,pid,&bound_b)) goto done;
+    fault->operation="identity_comparison";
+    if(!census_same_bound_stat(&bound_a,&bound_b)) {errno=ESTALE;goto done;}
+    /* A pinned old /proc/PID directory can outlive numeric PID reuse. Check
+     * the current numeric entry after pidfd_open before accepting its pin. */
+    fault->operation="proc_directory";
+    current_dir=fixed_open(ev.procfd,path,O_DIRECTORY);if(current_dir<0) goto done;
+    fault->operation="fd_budget";
+    if(!census_fd_take(budget,current_dir)) {errno=EMFILE;goto done;}
+    fault->operation="stat";
+    if(!census_read_bounded_stat(budget,current_dir,pid,&current)) goto done;
+    fault->operation="identity_comparison";
+    if(!census_same_bound_stat(&bound_a,&current)) {errno=ESTALE;goto done;}
+    census_fd_close(budget,current_dir);current_dir=-1;
+    if(budget->fd_failed) {errno=EBADF;goto done;}
+    fault->operation="pidfd_poll";events=0;
+    if(process_poll(bound_pin,&events)!=0) goto done;
+    if(events) {errno=ESTALE;goto done;}
+    census_fd_close(budget,pin);pin=bound_pin;bound_pin=-1;
+    if(budget->fd_failed) {errno=EBADF;goto done;}
+    bound_live=true;
+  }
   if(!census_bounded_fields(budget,dir,pid,&a,fault) ||
-     !census_bounded_fields(budget,dir,pid,&b,fault)) goto done;
+     !census_bounded_fields(budget,dir,pid,&b,fault)) {
+    int original_error=errno;
+    if(bound_live && !a.name && original_error==ESRCH && fault->operation &&
+        !strcmp(fault->operation,"environ") && fault->start==bound_a.start &&
+        pid>1 && pid!=ev.binding.pid && ev.trusted_kernel && !fixture &&
+        ev.ns[0] && !strcmp(ev.ns,ev.binding.ns) && !budget->fd_failed && !expired()) {
+      short exit_events=0;int polled=process_poll(pin,&exit_events);
+      uint64_t origin=(uint64_t)ev.monotonic_start.tv_sec*1000u+
+        (uint64_t)ev.monotonic_start.tv_nsec/1000000u;
+      uint64_t now=mono_ms();
+      if(polled==1 && (exit_events&POLLIN) &&
+          !(exit_events&(POLLERR|POLLNVAL)) && now>=origin &&
+          now-origin<10000 && !expired() && !budget->fd_failed) {
+        fault->bound_exit_valid=true;fault->bound_start=bound_a.start;
+        fault->bound_exit_offset_ms=now-origin;
+      }
+    }
+    errno=original_error;goto done;
+  }
   fault->operation="identity_comparison";fault->start=a.start;
   if(!census_equal_bounded(&a,&b)) {errno=ESTALE;goto done;}
   fault->operation="final_stat";
@@ -224,7 +286,9 @@ static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_b
 done:
   {int error=errno;census_identity_clear(budget,&a);census_identity_clear(budget,&b);
     census_fd_close(budget,dir);
+    census_fd_close(budget,current_dir);
     census_fd_close(budget,pin);
+    census_fd_close(budget,bound_pin);
     if(ok && budget->fd_failed) {
       census_identity_clear(budget,out);memset(out,0,sizeof *out);ok=false;error=EBADF;fault->operation="close";
     }

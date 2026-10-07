@@ -30,6 +30,9 @@ struct census_capture_fault {
   uint32_t pid;
   uint64_t start;
   int error;
+  /* Internal source witness, never copied into the raw wire error. */
+  bool bound_exit_valid;
+  uint64_t bound_start, bound_exit_offset_ms;
 };
 
 static inline void *census_alloc(struct census_budget *budget,size_t n) {

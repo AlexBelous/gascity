@@ -5,6 +5,7 @@
 #include "census-global-scan.h"
 #include "census-resolution-ledger.h"
 #include "census-standalone-absence.h"
+#include "census-unclassified-retirement.h"
 
 static inline bool census_positive_birth(const struct census_global_source *s,
     const struct census_global_fault *e) {
@@ -25,7 +26,9 @@ static inline bool census_continuation_gate(struct census_global_source *s,
     if(census_positive_birth(s,&s->errors[e])) continue;
     bool resolved=false;
     for(unsigned k=0;k<r->resolutions_n;k++) if(r->resolutions[k].error_index==e+1) resolved=true;
-    if(!resolved && !census_resolve_descendant(s,r,e+1) && !census_resolve_standalone(s,r,e+1)) return false;
+    if(!resolved && !census_resolve_descendant(s,r,e+1) &&
+        !census_resolve_unclassified_retirement(s,r,e+1) &&
+        !census_resolve_standalone(s,r,e+1)) return false;
   }
   return true;
 }
@@ -66,7 +69,9 @@ static inline bool census_final_resolutions_valid(const struct census_global_sou
     unsigned matches=0;
     for(unsigned k=0;k<r->resolutions_n;k++) {
       const struct census_typed_resolution *v=&r->resolutions[k];if(v->error_index!=e+1) continue;
-      if(v->kind==CENSUS_RESOLUTION_ABSENCE) {
+      if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
+        if(!census_unclassified_link_valid(s,r,v)) return false;
+      } else if(v->kind==CENSUS_RESOLUTION_ABSENCE) {
         if(!census_absence_raw_eligible(&s->errors[e]) || !v->proof_index || v->proof_index>r->proofs_n ||
             v->classified_scan || v->selected_seal) return false;
         const struct census_typed_proof *p=&r->proofs[v->proof_index-1];

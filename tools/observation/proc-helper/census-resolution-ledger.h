@@ -14,7 +14,8 @@ struct census_typed_certificate {
   unsigned id,prior_scan,absence_proof,retirement_proof;
   struct census_descendant_witness witness;
 };
-enum census_resolution_kind {CENSUS_RESOLUTION_ABSENCE,CENSUS_RESOLUTION_FRESH};
+enum census_resolution_kind {CENSUS_RESOLUTION_ABSENCE,CENSUS_RESOLUTION_FRESH,
+  CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT};
 struct census_typed_resolution {
   unsigned error_index,proof_index,classified_scan,selected_seal;
   enum census_resolution_kind kind;
@@ -84,11 +85,17 @@ static inline bool census_typed_proofs_valid(const struct census_resolution_ledg
     } else if(v->kind==CENSUS_INCARNATION_RETIRED) {
       if(!v->start || strcmp(v->method,"pidfd_no_pid") ||
           (p->protected_identity?(!p->certificate_id || p->certificate_id>r->certificates_n):p->certificate_id!=0)) return false;
+    } else if(v->kind==CENSUS_UNCLASSIFIED_INCARNATION_RETIRED) {
+      if(!v->start || p->protected_identity || p->certificate_id ||
+          strcmp(v->method,"bound_pidfd_exited")) return false;
     } else return false;
     for(unsigned k=0;k<i;k++) {
       const struct proof_item *old=&r->proofs[k].source;
       if(old->pid==v->pid && old->start==v->start &&
-          (old->scan_index==v->scan_index || v->kind==CENSUS_INCARNATION_RETIRED)) return false;
+          (old->scan_index==v->scan_index || v->kind==CENSUS_INCARNATION_RETIRED ||
+           v->kind==CENSUS_UNCLASSIFIED_INCARNATION_RETIRED ||
+           old->kind==CENSUS_INCARNATION_RETIRED ||
+           old->kind==CENSUS_UNCLASSIFIED_INCARNATION_RETIRED)) return false;
     }
   }
   for(unsigned i=0;i<r->certificates_n;i++) {
@@ -128,6 +135,33 @@ static inline bool census_absence_proof_matches(const struct census_global_fault
       e->raw.error==ESTALE && !e->raw.start && p->start &&
       p->method && !strcmp(p->method,"pidfd_zombie_stat");
   return p->start==e->raw.start;
+}
+/* The producer captured this in-scan exit on one freshly bound pidfd. An
+ * arbitrary later no-PID syscall, env errno alone, or cross-scan proof cannot
+ * be substituted for the original source witness. */
+static inline bool census_unclassified_link_valid(const struct census_global_source *s,
+    const struct census_resolution_ledger *r,const struct census_typed_resolution *link) {
+  if(link->kind!=CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT || !link->error_index ||
+      link->error_index>s->errors_n || !link->proof_index || link->proof_index>r->proofs_n ||
+      link->classified_scan || link->selected_seal) return false;
+  const struct census_global_fault *e=&s->errors[link->error_index-1];
+  const struct census_typed_proof *proof=&r->proofs[link->proof_index-1];
+  const struct proof_item *p=&proof->source;
+  if(strcmp(e->reason,"process_unavailable") || !e->raw.operation ||
+      strcmp(e->raw.operation,"environ") || e->raw.error!=ESRCH || !e->raw.start ||
+      !e->raw.bound_exit_valid || e->raw.bound_start!=e->raw.start ||
+      e->raw.pid<=1 || e->raw.pid==ev.binding.pid || !e->scan_index ||
+      e->scan_index>s->history->n || !ev.trusted_kernel || fixture ||
+      !ev.ns[0] || strcmp(ev.ns,ev.binding.ns) ||
+      p->kind!=CENSUS_UNCLASSIFIED_INCARNATION_RETIRED || !p->method ||
+      strcmp(p->method,"bound_pidfd_exited") || proof->protected_identity ||
+      proof->certificate_id || p->pid!=e->raw.pid || p->start!=e->raw.start ||
+      p->replacement_start || p->scan_index!=(int)e->scan_index ||
+      p->offset_ms!=e->raw.bound_exit_offset_ms ||
+      p->offset_ms>s->history->scans[e->scan_index-1].receipt.offset_ms ||
+      (e->scan_index>1 && p->offset_ms<
+        s->history->scans[e->scan_index-2].receipt.offset_ms)) return false;
+  return true;
 }
 /* Derive the full chain ONLY from one immutable prior scan; no supplied chain,
  * root selector, errno or callback proof is accepted by this assembler. */
@@ -206,10 +240,14 @@ static inline bool census_resolution_prefix_valid(const struct census_global_sou
     for(unsigned k=0;k<r->resolutions_n;k++) {
       const struct census_typed_resolution *resolution=&r->resolutions[k];
       if(resolution->error_index!=i+1) continue;
-      if(resolution->kind!=CENSUS_RESOLUTION_ABSENCE || !census_absence_raw_eligible(e) ||
-          !resolution->proof_index || resolution->proof_index>r->proofs_n) return false;
-      const struct census_typed_proof *proof=&r->proofs[resolution->proof_index-1];
-      if(!census_absence_proof_matches(e,&proof->source)) return false;
+      if(resolution->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
+        if(!census_unclassified_link_valid(s,r,resolution)) return false;
+      } else {
+        if(resolution->kind!=CENSUS_RESOLUTION_ABSENCE || !census_absence_raw_eligible(e) ||
+            !resolution->proof_index || resolution->proof_index>r->proofs_n) return false;
+        const struct census_typed_proof *proof=&r->proofs[resolution->proof_index-1];
+        if(!census_absence_proof_matches(e,&proof->source)) return false;
+      }
       matched++;
     }
     if(matched!=1) return false;

@@ -483,9 +483,11 @@ func certificateOwnFault(c CensusV3, errors []EvidenceError, cert DescendantCert
 		if e.PID != leaf.PID || e.ScanIndex != retirement.ScanIndex || e.Reason != "process_unavailable" || e.ResolvedBy != 0 {
 			continue
 		}
-		if !(e.Operation == "stat" && e.Errno == 2 || e.Operation == "environ" && e.Errno == 3 ||
-			e.Operation == "comm" && (e.Errno == 2 || e.Errno == 3) || e.Operation == "pidfd_open" && (e.Errno == 3 || e.Errno == 22 && e.StartTicks == nil) ||
-			e.Operation == "status" && e.Errno == 3 && e.StartTicks != nil) {
+		if (e.Operation != "stat" || e.Errno != 2) &&
+			(e.Operation != "environ" || e.Errno != 3) &&
+			(e.Operation != "comm" || (e.Errno != 2 && e.Errno != 3)) &&
+			(e.Operation != "pidfd_open" || (e.Errno != 3 && (e.Errno != 22 || e.StartTicks != nil))) &&
+			(e.Operation != "status" || e.Errno != 3 || e.StartTicks == nil) {
 			continue
 		}
 		if e.StartTicks == nil && r.ProofIndex == cert.AbsenceProof || e.StartTicks != nil && *e.StartTicks == leaf.StartTicks && r.ProofIndex == cert.RetirementProof {

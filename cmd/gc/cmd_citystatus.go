@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -20,16 +21,17 @@ import (
 
 // StatusJSON is the JSON output format for gc status.
 type StatusJSON struct {
-	SchemaVersion string                 `json:"schema_version"`
-	OK            bool                   `json:"ok"`
-	CityName      string                 `json:"city_name"`
-	Workspace     WorkspaceJSON          `json:"workspace"`
-	CityPath      string                 `json:"city_path"`
-	Controller    ControllerJSON         `json:"controller"`
-	Running       bool                   `json:"running"`
-	Suspended     bool                   `json:"suspended"`
-	Health        HealthJSON             `json:"health"`
-	Beads         *beads.BeadsDiagnostic `json:"beads,omitempty"`
+	RuntimeSessions *observation.RuntimeSessions `json:"runtime_sessions,omitempty"`
+	SchemaVersion   string                       `json:"schema_version"`
+	OK              bool                         `json:"ok"`
+	CityName        string                       `json:"city_name"`
+	Workspace       WorkspaceJSON                `json:"workspace"`
+	CityPath        string                       `json:"city_path"`
+	Controller      ControllerJSON               `json:"controller"`
+	Running         bool                         `json:"running"`
+	Suspended       bool                         `json:"suspended"`
+	Health          HealthJSON                   `json:"health"`
+	Beads           *beads.BeadsDiagnostic       `json:"beads,omitempty"`
 	// ConditionalWrites mirrors the API status block verbatim (§12.5).
 	ConditionalWrites *api.StatusConditionalWrites `json:"conditional_writes,omitempty"`
 	Agents            []StatusAgentJSON            `json:"agents"`
@@ -319,6 +321,7 @@ func renderCityStatusFromAPI(cityPath string, cr api.CachedRead[api.StatusView],
 // helpers produce identical output on the API path.
 func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapshot {
 	snapshot := cityStatusSnapshot{
+		RuntimeSessions:   v.RuntimeSessions,
 		CityName:          v.CityName,
 		CityPath:          v.CityPath,
 		Suspended:         v.Suspended,
@@ -659,6 +662,18 @@ func doCityStatusJSONWithDiagnosticAndSnapshot(
 	}
 
 	status := cityStatusJSONFromSnapshot(snapshot, snapshot.Summary)
+	identities := []observation.NativeStatusIdentity{}
+	if statusSnapshot != nil {
+		for _, info := range statusSnapshot.OpenInfos() {
+			if info.Closed || session.State(strings.TrimSpace(info.MetadataState)) == session.StateArchived {
+				continue
+			}
+			identities = append(identities, observation.NativeStatusIdentity{ID: info.ID, Template: info.Template, AgentName: info.AgentName, RuntimeName: info.SessionNameMetadata})
+		}
+	}
+	projection, problems := observation.ProjectRuntimeSessions(context.Background(), identities, !snapshotDegraded, sp, time.Now())
+	status.RuntimeSessions = &projection
+	status.PartialErrors = append(status.PartialErrors, problems...)
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr

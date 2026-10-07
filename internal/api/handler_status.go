@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -215,6 +216,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sessTmpl := cfg.Workspace.SessionTemplate
 	sessionSnapshot := s.statusSessionSnapshot(ctx)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
+	runtimeSessions, runtimeErrors := observation.ProjectRuntimeSessions(ctx, sessionSnapshot.identities, len(sessionSnapshot.partialErrors) == 0, sp, time.Now())
 
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 
@@ -262,7 +264,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			if rigName != "" {
 				perRigAgentTotals[rigName]++
 			}
-			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, sessionSnapshot)
+			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, isPool, sessionSnapshot)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
 			// An agent whose work runs under a relocated-graph wisp session is
@@ -403,7 +405,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		}
 	}
 
+	legacyPartial := len(partialErrors) > 0
+	partialErrors = append(partialErrors, runtimeErrors...)
 	return StatusBody{
+		RuntimeSessions:     &runtimeSessions,
 		Name:                cityName,
 		Path:                s.state.CityPath(),
 		Version:             s.state.Version(),
@@ -418,7 +423,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		Rigs:                rc,
 		Work:                wc,
 		Mail:                mc,
-		Partial:             len(partialErrors) > 0,
+		Partial:             legacyPartial,
 		PartialErrors:       partialErrors,
 		StoreHealth:         storeHealth,
 		Beads:               s.cityBeadsDiagnostic(),
@@ -556,16 +561,19 @@ func (s *Server) countSessions(snapshot statusSessionSnapshot) (active, suspende
 }
 
 type statusSessionSnapshot struct {
+	identities    []observation.NativeStatusIdentity
 	bySessionName map[string]statusSessionInfo
 	byTemplate    map[string][]statusSessionInfo
 	partialErrors []string
 }
 
 type statusSessionInfo struct {
-	sessionName string
-	agentName   string
-	template    string
-	state       session.State
+	sessionName             string
+	agentName               string
+	template                string
+	configuredNamedIdentity string
+	origin                  string
+	state                   session.State
 }
 
 // statusSessionSnapshot reads the session-class beads every session-derived
@@ -660,11 +668,19 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		if sessInfo.Closed {
 			continue
 		}
+		if statusSessionStateInfo(sessInfo) != session.StateArchived {
+			snapshot.identities = append(snapshot.identities, observation.NativeStatusIdentity{
+				ID: sessInfo.ID, Template: sessInfo.Template, AgentName: sessInfo.AgentName,
+				RuntimeName: sessInfo.SessionNameMetadata,
+			})
+		}
 		info := statusSessionInfo{
-			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
-			agentName:   strings.TrimSpace(sessInfo.AgentName),
-			template:    strings.TrimSpace(sessInfo.Template),
-			state:       statusSessionStateInfo(sessInfo),
+			sessionName:             strings.TrimSpace(sessInfo.SessionNameMetadata),
+			agentName:               strings.TrimSpace(sessInfo.AgentName),
+			template:                strings.TrimSpace(sessInfo.Template),
+			configuredNamedIdentity: strings.TrimSpace(sessInfo.ConfiguredNamedIdentity),
+			origin:                  strings.TrimSpace(sessInfo.SessionOrigin),
+			state:                   statusSessionStateInfo(sessInfo),
 		}
 		if info.sessionName == "" {
 			continue
@@ -1116,12 +1132,12 @@ func statusSessionStateInfo(info session.Info) session.State {
 // Resolution order, strongest evidence first:
 //  1. a session bead sitting on the canonical name — today's behavior, kept
 //     exactly so canonically named sessions are unaffected;
-//  2. a session bead whose recorded agent identity IS this instance;
-//  3. for a single-instance identity, the one session bead recorded against
-//     it as template.
+//  2. a recorded configured named identity, or an explicit pool instance;
+//  3. for a pool identity, its one non-manual session recorded against the
+//     template. A manual same-template session never becomes a configured name.
 //
 // Anything ambiguous falls back to the canonical name rather than guessing.
-func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, snapshot statusSessionSnapshot) string {
+func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, isPool bool, snapshot statusSessionSnapshot) string {
 	canonical := agentSessionName(cityName, qualifiedName, sessTmpl)
 	if _, ok := snapshot.bySessionName[canonical]; ok {
 		return canonical
@@ -1132,20 +1148,30 @@ func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName strin
 		candidates = append(append([]statusSessionInfo(nil), candidates...), snapshot.byTemplate[groupName]...)
 	}
 
-	// (2) an explicit per-instance identity match is unambiguous.
+	// (2) Configured named identity is independent of a manual session's
+	// descriptive agent_name. Pool instances retain their explicit routing.
+	var explicit string
 	for _, info := range candidates {
-		if info.agentName != "" && info.agentName == qualifiedName && info.sessionName != "" {
-			return info.sessionName
+		namedMatch := info.configuredNamedIdentity == qualifiedName
+		poolMatch := isPool && info.agentName == qualifiedName && (qualifiedName != groupName || info.origin != "manual")
+		if (namedMatch || poolMatch) && info.sessionName != "" {
+			if explicit != "" && explicit != info.sessionName {
+				return canonical
+			}
+			explicit = info.sessionName
 		}
 	}
+	if explicit != "" {
+		return explicit
+	}
 
-	// (3) a session recorded against this identity as its template, with no
+	// (3) a non-manual pool session recorded against this identity, with no
 	// competing sibling. Deterministic by construction: more than one
 	// candidate means the pool has instances we cannot tell apart here, so
 	// the canonical name is the honest answer.
 	var only string
 	for _, info := range snapshot.byTemplate[qualifiedName] {
-		if info.sessionName == "" {
+		if !isPool || info.origin == "manual" || info.sessionName == "" {
 			continue
 		}
 		if only != "" && only != info.sessionName {

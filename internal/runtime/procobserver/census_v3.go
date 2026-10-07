@@ -238,7 +238,7 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 			if p.ProtectedIdentity {
 				id := p.DescendantCertificateID
 				if id < 1 || id > len(c.Certificates) || usedCertificates[id] || p.Method != "pidfd_no_pid" ||
-					!validDescendantCertificate(c, byScan, c.Certificates[id-1], index+1, controllerPID) {
+					!validDescendantCertificate(c, byScan, c.Certificates[id-1], index+1, controllerPID, errors, usedCertificates) {
 					return bad()
 				}
 				usedCertificates[id] = true
@@ -377,7 +377,7 @@ func sameInheritedTuple(a, b CensusIdentity) bool {
 	return a.SessionID == b.SessionID && a.City == b.City && a.Template == b.Template && a.Epoch == b.Epoch && a.InstanceTokenSHA256 == b.InstanceTokenSHA256 && a.UIDs == b.UIDs
 }
 
-func validDescendantCertificate(c CensusV3, rows map[int]map[int]CensusIdentity, cert DescendantCertificate, proofIndex, controller int) bool {
+func validDescendantCertificate(c CensusV3, rows map[int]map[int]CensusIdentity, cert DescendantCertificate, proofIndex, controller int, errors []EvidenceError, validated map[int]bool) bool {
 	if cert.ID < 1 || cert.ID > len(c.Certificates) || c.Certificates[cert.ID-1].ID != cert.ID || c.Proofs[proofIndex-1].DescendantCertificateID != cert.ID || cert.RetirementProof != proofIndex ||
 		cert.AbsenceProof < 1 || cert.AbsenceProof >= proofIndex || cert.PriorScan < 1 || cert.PriorScan > len(c.Scans) ||
 		len(cert.Chain) < 2 || len(cert.Chain) > MaxProcesses {
@@ -388,6 +388,9 @@ func validDescendantCertificate(c CensusV3, rows map[int]map[int]CensusIdentity,
 	if retirement.StartTicks == nil || leaf.PID != retirement.PID || leaf.StartTicks != *retirement.StartTicks || leaf.DeclaredRoot ||
 		cert.PriorScan >= retirement.ScanIndex || absence.Kind != "enumerated_pid_absent" || absence.Method != "pidfd_no_pid" ||
 		absence.StartTicks != nil || absence.PID != leaf.PID || absence.ScanIndex != retirement.ScanIndex || absence.OffsetMS != retirement.OffsetMS {
+		return false
+	}
+	if _, present := rows[retirement.ScanIndex][leaf.PID]; present {
 		return false
 	}
 	seen := map[int]bool{}
@@ -403,12 +406,86 @@ func validDescendantCertificate(c CensusV3, rows map[int]map[int]CensusIdentity,
 			return false
 		}
 		if i > 0 {
+			continuing := true
 			for scan := cert.PriorScan + 1; scan <= len(c.Scans); scan++ {
 				if rows[scan][v.PID] != v {
+					continuing = false
+					break
+				}
+			}
+			if continuing {
+				continue
+			}
+			if v.DeclaredRoot || !certificateOwnFault(c, errors, cert) {
+				return false
+			}
+			matched := false
+			for _, parent := range c.Certificates {
+				if !validated[parent.ID] || parent.RetirementProof >= proofIndex ||
+					len(parent.Chain) != len(cert.Chain)-i || !certificateOwnFault(c, errors, parent) {
+					continue
+				}
+				proof := c.Proofs[parent.RetirementProof-1]
+				if proof.ScanIndex != retirement.ScanIndex || !proof.ProtectedIdentity || proof.Kind != "incarnation_retired" {
+					continue
+				}
+				matched = true
+				for j, owned := range parent.Chain {
+					if owned != cert.Chain[i+j] {
+						matched = false
+						break
+					}
+				}
+				if matched {
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+			if _, present := rows[retirement.ScanIndex][v.PID]; present {
+				return false
+			}
+			for scan := cert.PriorScan + 1; scan < retirement.ScanIndex; scan++ {
+				if rows[scan][v.PID] != v {
+					return false
+				}
+			}
+			for scan := retirement.ScanIndex; scan <= len(c.Scans); scan++ {
+				if later, exists := rows[scan][v.PID]; exists && later.StartTicks == v.StartTicks {
 					return false
 				}
 			}
 		}
 	}
 	return true
+}
+
+// certificateOwnFault links a composed certificate to its own original fault.
+// The global resolution pass independently validates operation/errno and every
+// error link before the census can be accepted.
+func certificateOwnFault(c CensusV3, errors []EvidenceError, cert DescendantCertificate) bool {
+	if cert.RetirementProof < 1 || cert.RetirementProof > len(c.Proofs) || len(cert.Chain) == 0 {
+		return false
+	}
+	retirement, leaf := c.Proofs[cert.RetirementProof-1], cert.Chain[0]
+	count := 0
+	for _, r := range c.Resolutions {
+		if r.ErrorIndex < 1 || r.ErrorIndex > len(errors) || r.Kind != "kernel_absence" || r.ClassifiedScan != 0 || r.SelectedSeal != 0 {
+			continue
+		}
+		e := errors[r.ErrorIndex-1]
+		if e.PID != leaf.PID || e.ScanIndex != retirement.ScanIndex || e.Reason != "process_unavailable" || e.ResolvedBy != 0 {
+			continue
+		}
+		if !(e.Operation == "stat" && e.Errno == 2 || e.Operation == "environ" && e.Errno == 3 ||
+			e.Operation == "comm" && (e.Errno == 2 || e.Errno == 3) || e.Operation == "pidfd_open" && (e.Errno == 3 || e.Errno == 22 && e.StartTicks == nil) ||
+			e.Operation == "status" && e.Errno == 3 && e.StartTicks != nil) {
+			continue
+		}
+		if e.StartTicks == nil && r.ProofIndex == cert.AbsenceProof || e.StartTicks != nil && *e.StartTicks == leaf.StartTicks && r.ProofIndex == cert.RetirementProof {
+			count++
+		}
+	}
+	return count == 1
 }

@@ -138,6 +138,7 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 	}
 	seenProof := map[string]bool{}
 	seenRetirement := map[string]bool{}
+	unclassifiedProofs := map[int]bool{}
 	usedCertificates := map[int]bool{}
 	for i, cert := range c.Certificates {
 		if cert.ID != i+1 {
@@ -146,8 +147,18 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 	}
 	retireFirst, retireSecond := 0, 0
 	for index, p := range c.Proofs {
-		if p.PID <= 1 || p.PID > 2147483647 || p.PID == controllerPID || p.ScanIndex < 1 || p.ScanIndex > n ||
-			p.OffsetMS < c.Scans[p.ScanIndex-1].OffsetMS || p.OffsetMS > duration {
+		if p.PID <= 1 || p.PID > 2147483647 || p.PID == controllerPID || p.ScanIndex < 1 || p.ScanIndex > n || p.OffsetMS < 0 || p.OffsetMS > duration {
+			return bad()
+		}
+		if p.Kind == "unclassified_incarnation_retired" {
+			var previousEnd int64
+			if p.ScanIndex > 1 {
+				previousEnd = c.Scans[p.ScanIndex-2].OffsetMS
+			}
+			if p.OffsetMS < previousEnd || p.OffsetMS > c.Scans[p.ScanIndex-1].OffsetMS {
+				return bad()
+			}
+		} else if p.OffsetMS < c.Scans[p.ScanIndex-1].OffsetMS {
 			return bad()
 		}
 		start := ""
@@ -176,6 +187,24 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 					return bad()
 				}
 			}
+		case "unclassified_incarnation_retired":
+			if p.StartTicks == nil || !positiveNumber(start) || p.Method != "bound_pidfd_exited" ||
+				p.ReplacementStart != "" || p.ProtectedIdentity || p.DescendantCertificateID != 0 {
+				return bad()
+			}
+			incarnation := fmt.Sprintf("%d/%s", p.PID, start)
+			if seenRetirement[incarnation] {
+				return bad()
+			}
+			seenRetirement[incarnation] = true
+			for scan := 1; scan < p.ScanIndex; scan++ {
+				if _, known := byScan[scan][p.PID]; known {
+					return bad()
+				}
+			}
+			// An unread ownership tuple grants neither a certificate nor a
+			// retirement count for any previously classified incarnation.
+			unclassifiedProofs[index+1] = false
 		case "incarnation_retired":
 			if p.StartTicks == nil || !positiveNumber(start) {
 				return bad()
@@ -249,13 +278,25 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 			return bad()
 		}
 		switch r.Kind {
+		case "unclassified_retirement":
+			if r.ClassifiedScan != 0 || r.SelectedSeal != 0 || r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) ||
+				e.Reason != "process_unavailable" || e.Operation != "environ" || e.Errno != 3 || e.StartTicks == nil {
+				return bad()
+			}
+			p := c.Proofs[r.ProofIndex-1]
+			used, exists := unclassifiedProofs[r.ProofIndex]
+			if !exists || used || p.Kind != "unclassified_incarnation_retired" || p.PID != e.PID ||
+				p.ScanIndex != e.ScanIndex || !sameStart(p.StartTicks, e.StartTicks) {
+				return bad()
+			}
+			unclassifiedProofs[r.ProofIndex] = true
 		case "kernel_absence":
 			if r.ClassifiedScan != 0 || r.SelectedSeal != 0 || r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) ||
 				e.Reason != "process_unavailable" || !(e.Operation == "stat" && e.Errno == 2 || e.Operation == "environ" && e.Errno == 3 || e.Operation == "comm" && (e.Errno == 2 || e.Errno == 3) || e.Operation == "pidfd_open" && (e.Errno == 3 || e.Errno == 22 && e.StartTicks == nil) || e.Operation == "status" && e.Errno == 3 && e.StartTicks != nil || e.Operation == "pidfd_poll" && e.Errno == 116 && e.StartTicks == nil) {
 				return bad()
 			}
 			p := c.Proofs[r.ProofIndex-1]
-			if p.PID != e.PID || p.ScanIndex < e.ScanIndex ||
+			if p.Kind == "unclassified_incarnation_retired" || p.PID != e.PID || p.ScanIndex < e.ScanIndex ||
 				(p.Kind == "terminal_zombie") != (e.Operation == "pidfd_poll") ||
 				(p.Kind != "terminal_zombie" && !sameStart(p.StartTicks, e.StartTicks)) ||
 				p.Kind == "enumerated_pid_absent" && e.Operation != "stat" && !(e.Operation == "pidfd_open" && (e.Errno == 3 || e.Errno == 22 && e.StartTicks == nil)) {
@@ -291,6 +332,11 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 				return bad()
 			}
 		default:
+			return bad()
+		}
+	}
+	for _, used := range unclassifiedProofs {
+		if !used {
 			return bad()
 		}
 	}

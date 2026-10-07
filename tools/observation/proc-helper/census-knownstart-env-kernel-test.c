@@ -182,7 +182,8 @@ done:
 int main(int argc,char **argv) {
   if(argc==2 && !strcmp(argv[1],"vector")) return run_vector();
   if(argc==2 && !strcmp(argv[1],"prior")) return run_prior_guard();
-  if(argc!=1) return 4;
+  bool second_pass=argc==2 && !strcmp(argv[1],"second-pass");
+  if(argc!=1 && !second_pass) return 4;
   int gate[2]={-1,-1},rc=1;
   struct census_budget budget={.limit=16777216};
   struct census_owned_identity row={0};
@@ -201,6 +202,7 @@ int main(int argc,char **argv) {
     ssize_t got=read(gate[0],&command,1);close(gate[0]);_exit(got==1?0:2);
   }
   close(gate[0]);gate[0]=-1;gate_write=gate[1];gate[1]=-1;
+  retire_on_hit=second_pass?2:1;
   census_test_before_environ=retire_before_environ;
   int captured=census_capture_bounded_evidenced((uint32_t)owned_child,&budget,&row,&fault);
   int raw_match=!captured && hook_ok && fault.operation &&
@@ -209,7 +211,7 @@ int main(int argc,char **argv) {
     fault.bound_exit_offset_ms<10000;
   printf("raw_environ_esrch_known_start=%d bound_exit_witness=%d fd_budget_ok=%d\n",
     raw_match,witness,!budget.fd_failed);
-  rc=witness && !budget.fd_failed?0:2;
+  rc=raw_match && hook_ok && !budget.fd_failed && (second_pass?!witness:witness)?0:2;
 done:
   census_identity_clear(&budget,&row);
   if(gate[0]>=0) close(gate[0]);

@@ -252,7 +252,7 @@ static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_b
   if(!census_bounded_fields(budget,dir,pid,&a,fault) ||
      !census_bounded_fields(budget,dir,pid,&b,fault)) {
     int original_error=errno;
-    if(bound_live && original_error==ESRCH && fault->operation &&
+    if(bound_live && !a.name && original_error==ESRCH && fault->operation &&
         !strcmp(fault->operation,"environ") && fault->start==bound_a.start &&
         pid>1 && pid!=ev.binding.pid && ev.trusted_kernel && !fixture &&
         ev.ns[0] && !strcmp(ev.ns,ev.binding.ns) && !budget->fd_failed && !expired()) {

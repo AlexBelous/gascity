@@ -109,6 +109,9 @@ func TestExtractTailMetaFromSearchPathsRejectsNestedSymlinkEscape(t *testing.T) 
 
 func TestExtractTailMetaFromSearchPathsAllowsAccountRootAlias(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	accountRoot := t.TempDir()
 	path := filepath.Join(accountRoot, "session.jsonl")
 	writeTailJSONL(t, path, []map[string]any{{

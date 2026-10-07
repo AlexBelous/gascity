@@ -989,6 +989,9 @@ func TestExtractCodexTailUsageFromSearchPaths(t *testing.T) {
 
 func TestCodexAliasLookupRetainsExtractablePath(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	accountRoot := t.TempDir()
 	workDir := filepath.Join(root, "workdir")
 	alias := filepath.Join(root, "aimux-acct")
@@ -1193,6 +1196,9 @@ func TestFindCodexSessionFileNear(t *testing.T) {
 
 	t.Run("symlinked extra root yields extractable lexical path", func(t *testing.T) {
 		root := t.TempDir()
+		if err := os.Chmod(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
 		target := t.TempDir() // aimux-managed account store outside the root
 		if err := os.Symlink(target, filepath.Join(root, "aimux-acct")); err != nil {
 			t.Fatalf("Symlink: %v", err)

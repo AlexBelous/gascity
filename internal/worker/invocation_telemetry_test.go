@@ -770,6 +770,9 @@ func TestMessageRecordsCodexTokensFreshWakeWithoutSessionKey(t *testing.T) {
 func TestMessageRecordsCodexTokensBehindSymlinkedRoot(t *testing.T) {
 	reader := setupInvocationMetricsReader(t)
 	handle, _, searchBase, workDir := newFamilyTelemetryHandle(t, ProfileCodexTmuxCLI, "codex", "codex", nil)
+	if err := os.Chmod(searchBase, 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	target := t.TempDir() // account session store outside the search root
 	if err := os.Symlink(target, filepath.Join(searchBase, "aimux-acct")); err != nil {

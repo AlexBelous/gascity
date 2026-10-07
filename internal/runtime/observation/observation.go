@@ -106,7 +106,7 @@ func ObserveProcessEvidenceContext(ctx context.Context, city string, sp runtime.
 }
 
 func observe(ctx context.Context, city string, sp runtime.Provider, readRoots func() ([]proctable.ObservedRoot, error), readEvidence func() ProcessEvidence, now func() time.Time) Observation {
-	out := Observation{Schema: Schema, CityPath: city, ObservedAt: now().UTC(), ProviderType: fmt.Sprintf("%T", sp), Sessions: []Session{}, Processes: []Process{}, UnknownReasons: []string{}}
+	out := Observation{Schema: Schema, CityPath: city, ObservedAt: now().UTC(), ProviderType: ProviderBoundaryType(sp), Sessions: []Session{}, Processes: []Process{}, UnknownReasons: []string{}}
 	fail := func(reason string) { out.UnknownReasons = append(out.UnknownReasons, reason) }
 	if city == "" || !filepath.IsAbs(city) || sp == nil || (readRoots == nil && readEvidence == nil) {
 		fail("observation context unavailable")

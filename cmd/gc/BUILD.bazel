@@ -1148,6 +1148,7 @@ go_test(
         "load_city_config_snapshot_test.go",
         "main_scope_symlink_test.go",
         "main_test.go",
+        "status_sid_projection_test.go",
         "maintenance_startup_test.go",
         "management_json_test.go",
         "max_session_age_tracker_test.go",

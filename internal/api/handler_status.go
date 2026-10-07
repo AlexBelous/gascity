@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -215,6 +216,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sessTmpl := cfg.Workspace.SessionTemplate
 	sessionSnapshot := s.statusSessionSnapshot(ctx)
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
+	runtimeSessions, runtimeErrors := observation.ProjectRuntimeSessions(ctx, sessionSnapshot.identities, len(sessionSnapshot.partialErrors) == 0, sp, time.Now())
 
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 
@@ -403,7 +405,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		}
 	}
 
+	legacyPartial := len(partialErrors) > 0
+	partialErrors = append(partialErrors, runtimeErrors...)
 	return StatusBody{
+		RuntimeSessions:     &runtimeSessions,
 		Name:                cityName,
 		Path:                s.state.CityPath(),
 		Version:             s.state.Version(),
@@ -418,7 +423,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		Rigs:                rc,
 		Work:                wc,
 		Mail:                mc,
-		Partial:             len(partialErrors) > 0,
+		Partial:             legacyPartial,
 		PartialErrors:       partialErrors,
 		StoreHealth:         storeHealth,
 		Beads:               s.cityBeadsDiagnostic(),
@@ -556,6 +561,7 @@ func (s *Server) countSessions(snapshot statusSessionSnapshot) (active, suspende
 }
 
 type statusSessionSnapshot struct {
+	identities    []observation.NativeStatusIdentity
 	bySessionName map[string]statusSessionInfo
 	byTemplate    map[string][]statusSessionInfo
 	partialErrors []string
@@ -659,6 +665,12 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 	for _, sessInfo := range infos {
 		if sessInfo.Closed {
 			continue
+		}
+		if statusSessionStateInfo(sessInfo) != session.StateArchived {
+			snapshot.identities = append(snapshot.identities, observation.NativeStatusIdentity{
+				ID: sessInfo.ID, Template: sessInfo.Template, AgentName: sessInfo.AgentName,
+				RuntimeName: sessInfo.SessionNameMetadata,
+			})
 		}
 		info := statusSessionInfo{
 			sessionName: strings.TrimSpace(sessInfo.SessionNameMetadata),
@@ -1133,10 +1145,17 @@ func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName strin
 	}
 
 	// (2) an explicit per-instance identity match is unambiguous.
+	var explicit string
 	for _, info := range candidates {
 		if info.agentName != "" && info.agentName == qualifiedName && info.sessionName != "" {
-			return info.sessionName
+			if explicit != "" && explicit != info.sessionName {
+				return canonical
+			}
+			explicit = info.sessionName
 		}
+	}
+	if explicit != "" {
+		return explicit
 	}
 
 	// (3) a session recorded against this identity as its template, with no

@@ -60,6 +60,27 @@ static inline bool census_standalone_history_valid(const struct census_global_so
         r->certificates[k].retirement_proof==i+1) certificate_member=true;
     if(certificate_member) continue;
     const struct proof_item *v=&p->source;const struct census_owned_identity *known=NULL;
+    if(v->kind==CENSUS_UNCLASSIFIED_INCARNATION_RETIRED) {
+      if(p->protected_identity || p->certificate_id || v->pid==ev.binding.pid ||
+          v->scan_index<1 || (unsigned)v->scan_index>s->history->n) return false;
+      /* Unknown means no earlier positively classified incarnation, including
+       * a root or descendant. A later same-start verified row refutes exit;
+       * a later different start is admitted only by its ordinary full capture. */
+      for(unsigned scan=0;scan<s->history->n;scan++) {
+        const struct census_history_row *row=census_history_find(&s->history->scans[scan],v->pid);
+        if(scan<(unsigned)v->scan_index-1 && census_row_verified(row)) return false;
+        if(scan>=(unsigned)v->scan_index && census_row_verified(row) &&
+            row->identity.start==v->start) return false;
+      }
+      unsigned links=0;
+      for(unsigned k=0;k<r->resolutions_n;k++) {
+        if(r->resolutions[k].proof_index!=i+1) continue;
+        if(!census_unclassified_link_valid(s,r,&r->resolutions[k])) return false;
+        links++;
+      }
+      if(links!=1) return false;
+      continue;
+    }
     if(p->protected_identity || p->certificate_id || v->pid==ev.binding.pid ||
         v->scan_index<1 || (unsigned)v->scan_index>s->history->n ||
         v->offset_ms<s->history->scans[v->scan_index-1].receipt.offset_ms ||

@@ -100,7 +100,9 @@ static inline void census_json_census(struct census_json *o,const struct census_
   for(unsigned i=0;i<r->resolutions_n;i++) {
     const struct census_typed_resolution *v=&r->resolutions[i];if(i) census_json_text(o,",");
     census_json_printf(o,"{\"error_index\":%u,\"kind\":\"%s\",\"proof_index\":%u,\"classified_scan\":%u,\"selected_seal\":%u}",
-      v->error_index,v->kind==CENSUS_RESOLUTION_ABSENCE?"kernel_absence":"fresh_classification",v->proof_index,v->classified_scan,v->selected_seal);
+      v->error_index,v->kind==CENSUS_RESOLUTION_ABSENCE?"kernel_absence":
+        v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT?"unclassified_retirement":"fresh_classification",
+      v->proof_index,v->classified_scan,v->selected_seal);
   }
   census_json_printf(o,"],\"peak_fd\":%u,\"retained_bytes\":",s->budget->fd_peak);
   o->retained_offset=o->n;o->retained_set=true;
@@ -147,7 +149,9 @@ static inline void census_json_unknown_census(struct census_json *o,const struct
   for(unsigned i=0;i<r->resolutions_n;i++) {
     const struct census_typed_resolution *v=&r->resolutions[i];if(i) census_json_text(o,",");
     census_json_printf(o,"{\"error_index\":%u,\"kind\":\"%s\",\"proof_index\":%u,\"classified_scan\":%u,\"selected_seal\":%u}",
-      v->error_index,v->kind==CENSUS_RESOLUTION_ABSENCE?"kernel_absence":"fresh_classification",v->proof_index,v->classified_scan,v->selected_seal);
+      v->error_index,v->kind==CENSUS_RESOLUTION_ABSENCE?"kernel_absence":
+        v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT?"unclassified_retirement":"fresh_classification",
+      v->proof_index,v->classified_scan,v->selected_seal);
   }
   census_json_printf(o,"],\"peak_fd\":%u,\"retained_bytes\":",s->budget->fd_peak);
   o->retained_offset=o->n;o->retained_set=true;census_json_printf(o,"%16zu}",s->budget->peak);

@@ -12,10 +12,14 @@ static inline bool census_closing_absence_link(const struct census_global_source
   for(unsigned e=0;e<s->errors_n;e++) {
     const struct census_global_fault *fault=&s->errors[e];
     if(fault->scan_index!=scan->receipt.scan_id || fault->raw.pid!=row->pid) continue;
-    if(!census_absence_raw_eligible(fault)) return false;
     for(unsigned i=0;i<r->resolutions_n;i++) {
       const struct census_typed_resolution *v=&r->resolutions[i];
       if(v->error_index!=e+1) continue;
+      if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
+        if(!census_unclassified_link_valid(s,r,v)) return false;
+        matches++;continue;
+      }
+      if(!census_absence_raw_eligible(fault)) return false;
       if(v->kind!=CENSUS_RESOLUTION_ABSENCE || !v->proof_index ||
           v->proof_index>r->proofs_n || v->classified_scan || v->selected_seal) return false;
       const struct proof_item *p=&r->proofs[v->proof_index-1].source;
@@ -91,10 +95,14 @@ static inline bool census_current_closings_equal(const struct census_global_sour
     for(unsigned i=0;i<r->resolutions_n;i++) {
       const struct census_typed_resolution *v=&r->resolutions[i];
       if(v->error_index!=e+1) continue;
-      if(v->kind!=CENSUS_RESOLUTION_ABSENCE || !census_absence_raw_eligible(&s->errors[e]) ||
-          !v->proof_index || v->proof_index>r->proofs_n || v->classified_scan || v->selected_seal) return false;
-      const struct proof_item *p=&r->proofs[v->proof_index-1].source;
-      if(!census_absence_proof_matches(&s->errors[e],p) || p->scan_index>(int)n) return false;
+      if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
+        if(!census_unclassified_link_valid(s,r,v)) return false;
+      } else {
+        if(v->kind!=CENSUS_RESOLUTION_ABSENCE || !census_absence_raw_eligible(&s->errors[e]) ||
+            !v->proof_index || v->proof_index>r->proofs_n || v->classified_scan || v->selected_seal) return false;
+        const struct proof_item *p=&r->proofs[v->proof_index-1].source;
+        if(!census_absence_proof_matches(&s->errors[e],p) || p->scan_index>(int)n) return false;
+      }
       matches++;
     }
     if(matches!=1) return false;

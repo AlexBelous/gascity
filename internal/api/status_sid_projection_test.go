@@ -14,12 +14,20 @@ func TestStatusSIDLegacyLookupNeverChoosesFirstSibling(t *testing.T) {
 		s.byTemplate["postman-out"] = append(s.byTemplate["postman-out"], statusSessionInfo{agentName: "postman-out", template: "postman-out", sessionName: handle})
 	}
 	canonical := agentSessionName("city", "postman-out", "")
-	if got := statusRuntimeSessionName("city", "", "postman-out", "", s); got != canonical {
+	if got := statusRuntimeSessionName("city", "", "postman-out", "", false, s); got != canonical {
 		t.Fatalf("ambiguous template selected sibling %q", got)
 	}
 	s.byTemplate["postman-out"] = s.byTemplate["postman-out"][2:]
-	if got := statusRuntimeSessionName("city", "", "postman-out", "", s); got != "live-manual" {
-		t.Fatalf("unique recorded lookup=%q", got)
+	if got := statusRuntimeSessionName("city", "", "postman-out", "", false, s); got != canonical {
+		t.Fatalf("manual session relabeled configured identity: %q", got)
+	}
+	s.byTemplate["postman-out"][0].origin = "manual"
+	if got := statusRuntimeSessionName("city", "", "postman-out", "postman-out", true, s); got != canonical {
+		t.Fatalf("manual session relabeled singleton pool identity: %q", got)
+	}
+	s.byTemplate["postman-out"][0].configuredNamedIdentity = "postman-out"
+	if got := statusRuntimeSessionName("city", "", "postman-out", "", false, s); got != "live-manual" {
+		t.Fatalf("explicit configured named identity ignored: %q", got)
 	}
 }
 

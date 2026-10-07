@@ -21,9 +21,11 @@ static inline void census_descendant_witness_clear(struct census_budget *b,
   for(size_t i=0;i<w->chain_n;i++) census_identity_clear(b,&w->chain[i]);
   census_release(b,w->chain,w->chain_n*sizeof *w->chain);memset(w,0,sizeof *w);
 }
-static inline bool census_descendant_no_pid(struct census_budget *budget,
-    const struct census_owned_identity *prior,size_t n,
-    const struct census_owned_identity *fresh_ancestors,int scan_index,
+/* Only the ledger may call this after proving every continuing ancestor from
+ * a live row or a strictly older, independently certified terminal suffix.
+ * It never manufactures a live row for a retired parent. */
+static inline bool census_descendant_no_pid_checked_chain(struct census_budget *budget,
+    const struct census_owned_identity *prior,size_t n,int scan_index,
     struct census_descendant_witness *out) {
   if(out->chain || n<2 || n>128 || scan_index<2 || expired() ||
       budget->fd_failed || !ev.trusted_kernel || fixture) return false;
@@ -35,7 +37,6 @@ static inline bool census_descendant_no_pid(struct census_budget *budget,
         p->declared_root!=(i==n-1)) return false;
     for(size_t k=0;k<i;k++) if(prior[k].pid==p->pid) return false;
     if(i+1<n && p->ppid!=prior[i+1].pid) return false;
-    if(i && !census_same_owned(p,&fresh_ancestors[i-1])) return false;
   }
   /* Check all source identities BEFORE the real kernel probe. A permission,
    * procfs disappearance, bare callback ESRCH or test marker is not proof. */
@@ -62,5 +63,14 @@ static inline bool census_descendant_no_pid(struct census_budget *budget,
     .chain=chain,.chain_n=n,.provisional=true};
   /* No global error/history is cleared, no frame COMPLETE/admission is returned. */
   return true;
+}
+/* Original direct caller remains strictly live-ancestor-only. */
+static inline bool census_descendant_no_pid(struct census_budget *budget,
+    const struct census_owned_identity *prior,size_t n,
+    const struct census_owned_identity *fresh_ancestors,int scan_index,
+    struct census_descendant_witness *out) {
+  if(!prior || !out || !fresh_ancestors || n<2 || n>128) return false;
+  for(size_t i=1;i<n;i++) if(!census_same_owned(&prior[i],&fresh_ancestors[i-1])) return false;
+  return census_descendant_no_pid_checked_chain(budget,prior,n,scan_index,out);
 }
 #endif

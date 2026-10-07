@@ -19,18 +19,27 @@ static inline bool census_continuation_gate(struct census_global_source *s,
     struct census_resolution_ledger *r) {
   if(r->denied || !census_typed_proofs_valid(r) || !census_recorded_prefix_valid(s) ||
       !census_standalone_history_valid(s,r)) return false;
-  for(unsigned i=0;i<r->certificates_n;i++) if(!census_certificate_history(s->history,&r->certificates[i])) return false;
-  for(unsigned e=0;e<s->errors_n;e++) {
-    /* A positively captured seal birth may motivate the next bounded triplet.
-     * It stays UNRESOLVED until two fresh closings and a seal verify it. */
-    if(census_positive_birth(s,&s->errors[e])) continue;
-    bool resolved=false;
-    for(unsigned k=0;k<r->resolutions_n;k++) if(r->resolutions[k].error_index==e+1) resolved=true;
-    if(!resolved && !census_resolve_descendant(s,r,e+1) &&
-        !census_resolve_unclassified_retirement(s,r,e+1) &&
-        !census_resolve_standalone(s,r,e+1)) return false;
+  if(!census_certificates_history_valid(s,r)) return false;
+  /* A child can appear before its independently retiring parent in raw PID
+   * order. At most the existing error budget's finite passes can add a proof;
+   * no progress preserves UNKNOWN and never fabricates a forward reference. */
+  for(unsigned pass=0;pass<=s->errors_n;pass++) {
+    unsigned pending=0;bool progress=false;
+    for(unsigned e=0;e<s->errors_n;e++) {
+      /* A positively captured seal birth motivates only another triplet. */
+      if(census_positive_birth(s,&s->errors[e])) continue;
+      bool resolved=false;
+      for(unsigned k=0;k<r->resolutions_n;k++) if(r->resolutions[k].error_index==e+1) resolved=true;
+      if(resolved) continue;
+      if(census_resolve_descendant(s,r,e+1) ||
+          census_resolve_unclassified_retirement(s,r,e+1) ||
+          census_resolve_standalone(s,r,e+1)) progress=true;
+      else pending++;
+    }
+    if(!pending) return true;
+    if(!progress) return false;
   }
-  return true;
+  return false;
 }
 static inline bool census_same_classified(const struct census_history_row *a,
     const struct census_history_row *b) {
@@ -64,7 +73,7 @@ static inline bool census_final_resolutions_valid(const struct census_global_sou
   if(r->resolutions_n!=s->errors_n || r->denied || !census_typed_proofs_valid(r) ||
       !census_recorded_prefix_valid(s) || !census_standalone_history_valid(s,r) || j->selected_seal!=s->history->n ||
       j->selected_first+1!=j->selected_second || j->selected_second+1!=j->selected_seal) return false;
-  for(unsigned c=0;c<r->certificates_n;c++) if(!census_certificate_history(s->history,&r->certificates[c])) return false;
+  if(!census_certificates_history_valid(s,r)) return false;
   for(unsigned e=0;e<s->errors_n;e++) {
     unsigned matches=0;
     for(unsigned k=0;k<r->resolutions_n;k++) {

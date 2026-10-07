@@ -163,6 +163,131 @@ static inline bool census_unclassified_link_valid(const struct census_global_sou
         s->history->scans[e->scan_index-2].receipt.offset_ms)) return false;
   return true;
 }
+/* A terminal ancestor is authority only through its OWN raw fault, resolution
+ * and protected certificate. The child's resolution never covers that fault. */
+static inline bool census_certificate_source_link_valid(const struct census_global_source *s,
+    const struct census_resolution_ledger *r,unsigned index) {
+  if(index>=r->certificates_n || expired()) return false;
+  const struct census_typed_certificate *c=&r->certificates[index];
+  if(!c->absence_proof || !c->retirement_proof || c->retirement_proof>r->proofs_n ||
+      c->absence_proof>=c->retirement_proof) return false;
+  const struct proof_item *a=&r->proofs[c->absence_proof-1].source;
+  const struct proof_item *p=&r->proofs[c->retirement_proof-1].source;
+  if(a->kind!=CENSUS_ENUMERATED_ABSENT || p->kind!=CENSUS_INCARNATION_RETIRED ||
+      !r->proofs[c->retirement_proof-1].protected_identity ||
+      r->proofs[c->retirement_proof-1].certificate_id!=c->id ||
+      !p->method || strcmp(p->method,"pidfd_no_pid") ||
+      a->pid!=p->pid || a->scan_index!=p->scan_index ||
+      a->offset_ms!=p->offset_ms || !p->start) return false;
+  unsigned matches=0;
+  for(unsigned e=0;e<s->errors_n;e++) {
+    if(expired()) return false;
+    const struct census_global_fault *fault=&s->errors[e];
+    if(fault->raw.pid!=p->pid || fault->scan_index!=(unsigned)p->scan_index) continue;
+    if(!census_absence_raw_eligible(fault) || fault->scan_index>s->history->n) return false;
+    const struct census_history_row *row=census_history_find(
+        &s->history->scans[fault->scan_index-1],p->pid);
+    if(!row || row->failure!=CENSUS_ROW_CAPTURE_FAILED ||
+        row->raw_fault.pid!=fault->raw.pid ||
+        !row->raw_fault.operation || !fault->raw.operation ||
+        strcmp(row->raw_fault.operation,fault->raw.operation) ||
+        row->raw_fault.error!=fault->raw.error || row->raw_fault.start!=fault->raw.start) return false;
+    const struct proof_item *chosen=fault->raw.start?p:a;
+    if(fault->raw.start && fault->raw.start!=p->start) return false;
+    if(!census_absence_proof_matches(fault,chosen)) return false;
+    unsigned links=0;
+    for(unsigned k=0;k<r->resolutions_n;k++) {
+      if(expired()) return false;
+      const struct census_typed_resolution *v=&r->resolutions[k];
+      if(v->error_index!=e+1) continue;
+      if(v->kind!=CENSUS_RESOLUTION_ABSENCE ||
+          v->proof_index!=(fault->raw.start?c->retirement_proof:c->absence_proof) ||
+          v->classified_scan || v->selected_seal) return false;
+      links++;
+    }
+    if(links!=1) return false;
+    matches++;
+  }
+  return matches==1;
+}
+/* Certificate array order is topological: a terminal suffix must be an older
+ * fully checked protected certificate. Equal full identities include UID,
+ * start, owner tuple and flags; a matching numeric PID alone is insufficient. */
+static inline bool census_certificates_history_valid(const struct census_global_source *s,
+    const struct census_resolution_ledger *r) {
+  const struct census_history *h=s->history;
+  if(!h || !h->n || r->certificates_n>64 || expired() ||
+      !census_typed_proofs_valid(r)) return false;
+  bool validated[64]={0};
+  for(unsigned ci=0;ci<r->certificates_n;ci++) {
+    if(expired()) return false;
+    const struct census_typed_certificate *c=&r->certificates[ci];
+    const size_t n=c->witness.chain_n;
+    if(!c->prior_scan || c->prior_scan>=h->n || !c->witness.provisional ||
+        n<2 || n>128 || !c->witness.chain ||
+        !census_certificate_source_link_valid(s,r,ci)) return false;
+    const struct proof_item *ret=&r->proofs[c->retirement_proof-1].source;
+    const unsigned terminal=(unsigned)ret->scan_index;
+    if(terminal<=c->prior_scan || terminal>h->n ||
+        c->witness.chain[0].pid!=ret->pid || c->witness.chain[0].start!=ret->start) return false;
+    for(size_t i=0;i<n;i++) {
+      if(expired()) return false;
+      const struct census_owned_identity *v=&c->witness.chain[i];
+      const struct census_history_row *prior=census_history_find(&h->scans[c->prior_scan-1],v->pid);
+      if(!census_managed_identity(v) || v->declared_root!=(i==n-1) ||
+          !census_same_inherited(&c->witness.chain[0],v) ||
+          !census_row_verified(prior) || !census_same_owned(v,&prior->identity) ||
+          (i+1<n && v->ppid!=c->witness.chain[i+1].pid)) return false;
+      for(size_t k=0;k<i;k++) if(c->witness.chain[k].pid==v->pid) return false;
+      bool substituted=false;
+      for(unsigned scan=c->prior_scan+1;scan<=h->n;scan++) {
+        if(expired()) return false;
+        const struct census_history_row *fresh=census_history_find(&h->scans[scan-1],v->pid);
+        if(scan<terminal || i==n-1) {
+          if(!census_row_verified(fresh) || !census_same_owned(v,&fresh->identity)) return false;
+          continue;
+        }
+        if(scan==terminal && i==0) {
+          if(!fresh || fresh->failure!=CENSUS_ROW_CAPTURE_FAILED) return false;
+          continue; /* Own exact raw/error link was checked above. */
+        }
+        if(scan==terminal && census_row_verified(fresh) && census_same_owned(v,&fresh->identity)) continue;
+        if(scan==terminal && i>0 && fresh && fresh->failure==CENSUS_ROW_CAPTURE_FAILED) {
+          unsigned matches=0;
+          for(unsigned parent=0;parent<ci;parent++) {
+            if(expired()) return false;
+            const struct census_typed_certificate *pc=&r->certificates[parent];
+            if(!validated[parent] || pc->prior_scan>=terminal ||
+                pc->retirement_proof>=c->absence_proof ||
+                pc->witness.chain_n!=n-i ||
+                pc->witness.retirement.scan_index!=(int)terminal ||
+                pc->witness.retirement.pid!=v->pid ||
+                pc->witness.retirement.start!=v->start) continue;
+            bool suffix=true;
+            for(size_t k=0;k<n-i;k++) {
+              if(expired()) return false;
+              if(!census_same_owned(&pc->witness.chain[k],&c->witness.chain[i+k])) {suffix=false;break;}
+            }
+            if(suffix) matches++;
+          }
+          if(matches!=1) return false;
+          substituted=true;continue;
+        }
+        if(substituted) {
+          if(fresh && (!census_row_verified(fresh) || fresh->identity.start==v->start)) return false;
+          continue; /* A different incarnation needs its own ordinary checks. */
+        }
+        if(i==0) {
+          if(fresh && (!census_row_verified(fresh) || fresh->identity.start==v->start)) return false;
+          continue;
+        }
+        if(!census_row_verified(fresh) || !census_same_owned(v,&fresh->identity)) return false;
+      }
+    }
+    validated[ci]=true;
+  }
+  return true;
+}
 /* Derive the full chain ONLY from one immutable prior scan; no supplied chain,
  * root selector, errno or callback proof is accepted by this assembler. */
 static inline bool census_resolve_descendant(struct census_global_source *s,
@@ -199,10 +324,33 @@ static inline bool census_resolve_descendant(struct census_global_source *s,
     at=census_history_find(&h->scans[prior_index-1],at->identity.ppid);
   }
   if(count<2 || !chain[count-1].declared_root) valid=false;
+  bool terminal_suffix=false;
   for(size_t i=1;valid && i<count;i++) {
+    if(expired()) {valid=false;break;}
     for(unsigned scan=prior_index;scan<h->n;scan++) {
+      if(expired()) {valid=false;break;}
       struct census_history_row *v=census_history_find(&h->scans[scan],chain[i].pid);
-      if(!census_row_verified(v) || !census_same_owned(&chain[i],&v->identity)) {valid=false;break;}
+      if(!census_row_verified(v) || !census_same_owned(&chain[i],&v->identity)) {
+        if(scan!=h->n-1 || i==count-1 || !v || v->failure!=CENSUS_ROW_CAPTURE_FAILED ||
+            !census_certificates_history_valid(s,r)) {valid=false;break;}
+        unsigned matches=0;
+        for(unsigned parent=0;parent<r->certificates_n;parent++) {
+          if(expired()) {valid=false;break;}
+          const struct census_typed_certificate *pc=&r->certificates[parent];
+          if(pc->prior_scan>=h->n || pc->witness.chain_n!=count-i ||
+              pc->witness.retirement.scan_index!=(int)h->n ||
+              pc->witness.retirement.pid!=chain[i].pid ||
+              pc->witness.retirement.start!=chain[i].start) continue;
+          bool suffix=true;
+          for(size_t k=0;k<count-i;k++) {
+            if(expired()) {valid=false;break;}
+            if(!census_same_owned(&pc->witness.chain[k],&chain[i+k])) {suffix=false;break;}
+          }
+          if(suffix) matches++;
+        }
+        if(matches!=1) {valid=false;break;}
+        terminal_suffix=true;continue;
+      }
       fresh[i-1]=v->identity;
     }
   }
@@ -211,7 +359,9 @@ static inline bool census_resolve_descendant(struct census_global_source *s,
     if(census_row_verified(v) && v->identity.start==leaf->identity.start) valid=false;
   }
   struct census_descendant_witness witness={0};
-  if(valid) valid=census_descendant_no_pid(s->budget,chain,count,fresh,(int)h->n,&witness);
+  if(valid) valid=terminal_suffix?
+    census_descendant_no_pid_checked_chain(s->budget,chain,count,(int)h->n,&witness):
+    census_descendant_no_pid(s->budget,chain,count,fresh,(int)h->n,&witness);
   census_release(s->budget,chain,128*sizeof *chain);census_release(s->budget,fresh,127*sizeof *fresh);
   if(!valid) return false;
   /* Exactly one known-start retirement per incarnation in the global ledger. */
@@ -227,6 +377,10 @@ static inline bool census_resolve_descendant(struct census_global_source *s,
     .protected_identity=true,.certificate_id=id};
   r->resolutions[r->resolutions_n++]=(struct census_typed_resolution){.error_index=error_index,
     .proof_index=e->raw.start?retirement:absence,.kind=CENSUS_RESOLUTION_ABSENCE};
+  if(!census_certificates_history_valid(s,r)) {
+    r->resolutions_n--;r->proofs_n-=2;r->certificates_n--;
+    census_descendant_witness_clear(s->budget,&witness);return false;
+  }
   return true;
 }
 /* This check is repeated before every subsequent capture and final serialization;
@@ -234,7 +388,7 @@ static inline bool census_resolve_descendant(struct census_global_source *s,
 static inline bool census_resolution_prefix_valid(const struct census_global_source *s,
     const struct census_resolution_ledger *r) {
   if(r->denied || !census_typed_proofs_valid(r) || s->truncated || s->errors_n!=s->errors_total || s->budget->fd_failed || expired()) return false;
-  for(unsigned i=0;i<r->certificates_n;i++) if(!census_certificate_history(s->history,&r->certificates[i])) return false;
+  if(!census_certificates_history_valid(s,r)) return false;
   for(unsigned i=0;i<s->errors_n;i++) {
     const struct census_global_fault *e=&s->errors[i];unsigned matched=0;
     for(unsigned k=0;k<r->resolutions_n;k++) {

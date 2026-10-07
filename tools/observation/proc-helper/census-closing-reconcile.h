@@ -87,8 +87,7 @@ static inline bool census_current_closings_equal(const struct census_global_sour
    * and witness creator fences. This pure comparator neither replaces them nor
    * infers namespace authority from optional unit-fixture metadata strings. */
   if(r->proofs_n && (!ev.trusted_kernel || fixture)) return false;
-  for(unsigned c=0;c<r->certificates_n;c++)
-    if(!census_certificate_history(s->history,&r->certificates[c])) return false;
+  if(!census_certificates_history_valid(s,r)) return false;
   for(unsigned e=0;e<s->errors_n;e++) {
     if(census_positive_birth(s,&s->errors[e])) continue;
     unsigned matches=0;

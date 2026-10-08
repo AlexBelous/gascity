@@ -2,7 +2,6 @@ package scripts_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,7 +49,7 @@ func TestLocalWorkerEnvPreservesExplicitBDWithoutLiveEndpoints(t *testing.T) {
 		t.Fatal("worker command boundary missing")
 	}
 	prefix := body[:end+len("bash -lc")]
-	cmd := exec.Command("bash", "-c", prefix+" '"+strings.ReplaceAll(bdToolCarrierProbe, "'", `'"'"'`)+"'")
+	cmd := testCommand("bash", "-c", prefix+" '"+strings.ReplaceAll(bdToolCarrierProbe, "'", `'"'"'`)+"'")
 	cmd.Dir = repoRoot(t)
 	cmd.Env = bdToolCarrierEnv()
 	out, err := cmd.CombinedOutput()

@@ -77,8 +77,8 @@ func TestEffectiveWorkQueryForSingleSessionConfigAgentServesRoutedUnassignedWork
 		// A live single-session seat: concrete session identity, no alias,
 		// and — being a plain config agent, not a [[named_session]] — no
 		// GC_SESSION_ORIGIN.
-		"GC_SESSION_ID":   "gcg-session-6020",
-		"GC_SESSION_NAME": "gascity--run-operator",
+		"GC_WORK_QUERY_SESSION_ID": "gcg-session-6020",
+		"GC_SESSION_NAME":          "gascity--run-operator",
 	}, fakeBDSelfRoutedFrontier(a.QualifiedName(), "gcg-routed-step"))
 
 	if !strings.Contains(out, "gcg-routed-step") {
@@ -102,8 +102,8 @@ func TestEffectiveWorkQueryForSingleSessionConfigAgentSkipsForeignRoutedWork(t *
 	a := singleSessionConfigAgent()
 
 	out := runShellWithFakeBd(t, a.EffectiveWorkQueryFor(QueryTopology{}), map[string]string{
-		"GC_SESSION_ID":   "gcg-session-6020",
-		"GC_SESSION_NAME": "gascity--run-operator",
+		"GC_WORK_QUERY_SESSION_ID": "gcg-session-6020",
+		"GC_SESSION_NAME":          "gascity--run-operator",
 	}, fakeBDRoutedFrontier("gascity/other-operator", "gcg-foreign-step", routedReadGlob(a.QualifiedName()), `*"--unassigned"*`))
 
 	if strings.Contains(out, "gcg-foreign-step") {

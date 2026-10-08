@@ -1,7 +1,9 @@
 package workertest
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	worker "github.com/gastownhall/gascity/internal/worker"
@@ -120,6 +122,43 @@ func TestPhase1Conformance(t *testing.T) {
 			t.Run(string(RequirementFreshSessionIsolation), func(t *testing.T) {
 				reporter.Require(t, FreshSessionResult(profile, fresh, reset))
 			})
+		})
+	}
+}
+
+func TestPhase1UsageWithSymlinkedFixture(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+	for _, profile := range Phase1Profiles() {
+		if !profile.Usage.Supported {
+			continue
+		}
+		t.Run(string(profile.ID), func(t *testing.T) {
+			sourcePath, err := DiscoverTranscript(profile, profile.Fixtures.FreshRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			relativePath, err := filepath.Rel(profile.Fixtures.FreshRoot, sourcePath)
+			if err != nil || !filepath.IsLocal(relativePath) {
+				t.Fatalf("fixture transcript path %q is not local to %q: %v", sourcePath, profile.Fixtures.FreshRoot, err)
+			}
+			fixtureRoot := t.TempDir()
+			linkedPath := filepath.Join(fixtureRoot, relativePath)
+			if err := os.MkdirAll(filepath.Dir(linkedPath), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			absoluteSource, err := filepath.Abs(sourcePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(absoluteSource, linkedPath); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := mustLoadSnapshot(t, profile, fixtureRoot)
+			if err := TranscriptUsageResult(profile, snapshot).Err(); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -245,5 +284,22 @@ func mustLoadSnapshot(t *testing.T, profile Profile, fixtureRoot string) *Snapsh
 	if err != nil {
 		t.Fatalf("LoadSnapshot(%s, %s): %v", profile.ID, root, err)
 	}
+	if !filepath.IsLocal(snapshot.TranscriptPathHint) {
+		t.Fatalf("fixture transcript path %q is not local to %q", snapshot.TranscriptPath, root)
+	}
+	transcript, err := os.ReadFile(snapshot.TranscriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializedRoot := t.TempDir()
+	materializedPath := filepath.Join(materializedRoot, snapshot.TranscriptPathHint)
+	if err := os.MkdirAll(filepath.Dir(materializedPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(materializedPath, transcript, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.FixtureRoot = materializedRoot
+	snapshot.TranscriptPath = materializedPath
 	return snapshot
 }

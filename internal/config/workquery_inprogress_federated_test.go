@@ -47,8 +47,8 @@ func runFederatedInProgressTier(t *testing.T, row string) (rows []map[string]any
 	showLog := filepath.Join(t.TempDir(), "bd-show.log")
 	script := standardAssignedInProgressWorkQueryScript(federatedTopology()) + `printf "[]"`
 	res := runGeneratedQueryWithBD(t, script, map[string]string{
-		"GC_SESSION_ID": "sess-1",
-		"BD_SHOW_LOG":   showLog,
+		"GC_WORK_QUERY_SESSION_ID": "sess-1",
+		"BD_SHOW_LOG":              showLog,
 	}, fakeGCServingInProgress(row), fakeBDRecordingShow)
 	if res.exit != 0 {
 		t.Fatalf("federated tier exited %d; stderr=%s", res.exit, res.stderr)
@@ -121,7 +121,7 @@ func TestFederatedInProgressTierFallsBackWhenTheRowCarriesNoBlockedBy(t *testing
 func TestFederatedInProgressTierPropagatesADeadLeg(t *testing.T) {
 	requireJQ(t)
 	script := standardAssignedInProgressWorkQueryScript(federatedTopology()) + `printf "[]"`
-	res := runGeneratedQuery(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, fakeGCReadyFails)
+	res := runGeneratedQuery(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, fakeGCReadyFails)
 	if res.exit == 0 {
 		t.Fatalf("federated crash-recovery tier exited 0 on a dead leg; stdout=%q", res.stdout)
 	}

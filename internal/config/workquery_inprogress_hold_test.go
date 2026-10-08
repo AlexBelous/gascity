@@ -60,7 +60,7 @@ func TestInProgressTierFallsThroughWhenHeld(t *testing.T) {
 				t.Skip("jq not available; the work-query shell requires it")
 			}
 			script := standardAssignedWorkQueryScript(QueryTopology{}) + `printf "[]"`
-			out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, fakeBdHeldInProgress(label))
+			out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, fakeBdHeldInProgress(label))
 
 			var rows []map[string]any
 			if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
@@ -87,7 +87,7 @@ case "$1" in
 esac
 `
 	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
@@ -115,7 +115,7 @@ case "$1" in
 esac
 `
 	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
@@ -142,7 +142,7 @@ case "$1" in
 esac
 `
 	script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
@@ -170,7 +170,7 @@ case "$1" in
 esac
 `
 	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, bdScript)
 
 	if out != blob {
 		t.Fatalf("unparseable bd list stdout was not served unchanged: got %q, want %q", out, blob)

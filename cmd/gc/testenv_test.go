@@ -96,8 +96,14 @@ func clearGCEnv(t *testing.T) {
 	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(td))
 }
 
-func clearProcessLiveEnvForTests() {
-	for _, k := range liveEnvKeysForTests() {
+// clearProcessLiveEnvForTests shares the existing environment-unset boundary
+// between startup isolation and restored no-runtime fixtures. With no explicit
+// keys it retains the full startup scrub.
+func clearProcessLiveEnvForTests(keys ...string) {
+	if len(keys) == 0 {
+		keys = liveEnvKeysForTests()
+	}
+	for _, k := range keys {
 		_ = os.Unsetenv(k)
 	}
 }

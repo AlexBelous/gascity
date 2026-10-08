@@ -148,6 +148,7 @@ func TestInstallBeadHooksPreservesUserOwnedLegacyNamedHook(t *testing.T) {
 // TestInstallBeadHooksInitIntegration verifies that gc init does NOT install
 // bd event-forwarding hooks; autoclose now runs in the controller.
 func TestInstallBeadHooksInitIntegration(t *testing.T) {
+	stubInitRemoteImports(t)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_SESSION", "fake")

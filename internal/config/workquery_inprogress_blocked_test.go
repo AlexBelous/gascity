@@ -51,7 +51,7 @@ func runInProgressTier(t *testing.T, bdScript string) []map[string]any {
 	// `printf "[]"` is the terminal fallback the real query uses when no tier
 	// produces a candidate.
 	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
@@ -141,7 +141,7 @@ func TestInProgressTierServesUnparseableCandidateUnchanged(t *testing.T) {
 	bdScript := "#!/bin/sh\nprintf '%s' " + shellquote.Quote(blob) + "\n"
 
 	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, bdScript)
 
 	if out != blob {
 		t.Fatalf("unparseable bd list stdout was not served unchanged: got %q, want %q", out, blob)
@@ -158,7 +158,7 @@ func TestLegacyControlInProgressTierServesUnparseableCandidateUnchanged(t *testi
 	bdScript := "#!/bin/sh\nprintf '%s' " + shellquote.Quote(blob) + "\n"
 
 	script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, bdScript)
 
 	if out != blob {
 		t.Fatalf("unparseable bd list stdout was not served unchanged: got %q, want %q", out, blob)
@@ -183,7 +183,7 @@ case "$1" in
 esac
 `
 	script := standardAssignedWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
@@ -205,7 +205,7 @@ func TestLegacyControlInProgressTierSkipsBlockedCandidate(t *testing.T) {
 		t.Skip("jq not available; the work-query shell requires it")
 	}
 	script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"},
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"},
 		fakeBdWithDeps(`[{"id":"gate-1","status":"open","dependency_type":"blocks","await_type":"human"}]`))
 
 	var rows []map[string]any
@@ -224,7 +224,7 @@ func TestLegacyControlInProgressTierServesUnblockedCandidate(t *testing.T) {
 		t.Skip("jq not available; the work-query shell requires it")
 	}
 	script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
-	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"},
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_WORK_QUERY_SESSION_ID": "sess-1"},
 		fakeBdWithDeps(`[]`))
 
 	var rows []map[string]any

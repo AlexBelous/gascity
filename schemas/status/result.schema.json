@@ -211,6 +211,12 @@
           },
           "default_sling_target": {
             "type": "string"
+          },
+          "default_sling_targets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }
@@ -238,6 +244,47 @@
         },
         "suspended_sessions": {
           "type": "integer"
+        },
+        "store_health": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "size_bytes",
+            "live_rows",
+            "ratio_mb_per_row",
+            "warning",
+            "threshold_mb_per_row"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "size_bytes": {
+              "type": "integer"
+            },
+            "live_rows": {
+              "type": "integer"
+            },
+            "live_rows_unknown": {
+              "type": "boolean"
+            },
+            "ratio_mb_per_row": {
+              "type": "number"
+            },
+            "warning": {
+              "type": "boolean"
+            },
+            "threshold_mb_per_row": {
+              "type": "number"
+            },
+            "last_gc_at": {
+              "type": "string"
+            },
+            "last_gc_status": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -251,6 +298,199 @@
       "items": {
         "type": "string"
       }
+    },
+    "runtime_sessions": {
+      "additionalProperties": false,
+      "properties": {
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "provider_complete": {
+          "type": "boolean"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "sessions": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "agent_name": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "provider": {
+                "type": "string"
+              },
+              "running": {
+                "type": "boolean"
+              },
+              "runtime_name": {
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "template",
+              "agent_name",
+              "runtime_name",
+              "provider",
+              "running"
+            ],
+            "type": "object"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "observed_at",
+        "provider_complete",
+        "sessions"
+      ],
+      "type": "object"
+    },
+    "conditional_writes": {
+      "additionalProperties": false,
+      "properties": {
+        "effective": {
+          "description": "Aggregate verdict: off (gate off), active (every store capable), degraded (auto with at least one incapable store), fail_closed (require with at least one incapable store \u2014 fenced writes on it refuse), pending_restart (on-disk config drifted from the latched mode).",
+          "enum": [
+            "off",
+            "active",
+            "degraded",
+            "fail_closed",
+            "pending_restart"
+          ],
+          "type": "string"
+        },
+        "mode": {
+          "description": "Boot-latched beads.conditional_writes mode.",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "type": "string"
+        },
+        "notices": {
+          "description": "Retained rollout notices (env overrides, drift, invalid spellings).",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "config_value": {
+                "description": "Raw config spelling; empty when unset.",
+                "type": "string"
+              },
+              "env_value": {
+                "description": "Raw env spelling as found.",
+                "type": "string"
+              },
+              "env_var": {
+                "description": "Environment variable involved, when env-related.",
+                "type": "string"
+              },
+              "flag_key": {
+                "description": "Rollout gate key the notice is about.",
+                "type": "string"
+              },
+              "kind": {
+                "description": "Notice kind (env_overrides_config, pending_restart, invalid_value, ...).",
+                "type": "string"
+              },
+              "message": {
+                "description": "Human-readable line carrying the gate and the outcome.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "flag_key",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "origin": {
+          "description": "Where the latched mode came from.",
+          "enum": [
+            "builtin",
+            "config",
+            "env"
+          ],
+          "type": "string"
+        },
+        "stores": {
+          "description": "Per-store verdicts, one row per controller-owned store.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "capable": {
+                "description": "What the write path uses today: false only on a definitive incapable verdict.",
+                "type": "boolean"
+              },
+              "kind": {
+                "description": "Store kind in the degraded-event wire vocabulary (bd, native, caching, mem, file).",
+                "type": "string"
+              },
+              "latch": {
+                "description": "Runtime unsupported latch: incapable after the store rejected a real fenced write; cleared only by restart.",
+                "enum": [
+                  "incapable",
+                  "unlatched"
+                ],
+                "type": "string"
+              },
+              "probe": {
+                "description": "Memoized capability-probe verdict. unprobed means no fenced write has exercised this store yet.",
+                "enum": [
+                  "capable",
+                  "incapable",
+                  "unprobed"
+                ],
+                "type": "string"
+              },
+              "reason": {
+                "description": "Incapable cause, verbatim from the probe or latch.",
+                "type": "string"
+              },
+              "store_id": {
+                "description": "Store scope: city, or rig/<name>.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store_id",
+              "kind",
+              "probe",
+              "latch",
+              "capable"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode",
+        "origin",
+        "effective"
+      ],
+      "type": "object"
+    },
+    "_cache_age_s": {
+      "type": "number",
+      "description": "Age in seconds of the supervisor status cache on the routed API path."
     }
   }
 }

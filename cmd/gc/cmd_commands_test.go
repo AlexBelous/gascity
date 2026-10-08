@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -237,6 +238,13 @@ func TestPackCommandExitHelper(t *testing.T) {
 				_, _ = os.Stderr.WriteString("write post-run marker: " + err.Error() + "\n")
 			}
 		}()
+		if invocation.scenario == "observer-relay" {
+			if err := fixtureControllerRelay(context.Background(), cwd, strings.Repeat("a", 40), os.Stdout); err != nil {
+				_, _ = fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+			return 0
+		}
 		return runPackCommandScenario(t, invocation.scenario, invocation.args, os.Stdout, os.Stderr)
 	}()
 	os.Exit(code)
@@ -275,6 +283,7 @@ func packCommandProcessEnv(extra ...string) []string {
 
 type packCommandProcessResult struct {
 	exitCode int
+	pid      int
 	stdout   string
 	stderr   string
 }
@@ -312,7 +321,7 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String())}
+	return packCommandProcessResult{exitCode: exitCode, pid: cmd.ProcessState.Pid(), stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String())}
 }
 
 // stripLeakGuardNoise removes BOTH test leak guards' own diagnostic lines from

@@ -30,7 +30,7 @@ name = "test-city"
 [[agent]]
 name = "reviewer"
 start_command = "true"
-work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\" \"$GC_AGENT\" \"$GC_TEMPLATE\" \"$GC_SESSION_NAME\" \"$GC_SESSION_ORIGIN\""
+work_query = "printf 'config=reviewer|pwd=%s|agent=%s|template_set=%s|session=%s|origin=%s' \"$PWD\" \"$GC_AGENT\" \"${GC_TEMPLATE+x}\" \"$GC_SESSION_NAME\" \"$GC_SESSION_ORIGIN\""
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
@@ -58,8 +58,11 @@ work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\"
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "template=reviewer") {
+	if !strings.Contains(out, "config=reviewer|") {
 		t.Fatalf("stdout = %q, want reviewer work_query selected via GC_TEMPLATE", out)
+	}
+	if !strings.Contains(out, "|template_set=|session=") {
+		t.Fatalf("stdout = %q, want ownership template absent from work-query shell", out)
 	}
 	if !strings.Contains(out, "agent=mayor") {
 		t.Fatalf("stdout = %q, want GC_AGENT to remain the public named handle", out)
@@ -92,7 +95,7 @@ name = "test-city"
 [[agent]]
 name = "reviewer"
 start_command = "true"
-work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \"$GC_TEMPLATE\" \"$GC_SESSION_NAME\" \"$GC_SESSION_ORIGIN\""
+work_query = "printf 'config=reviewer|agent=%s|template_set=%s|session=%s|origin=%s' \"$GC_AGENT\" \"${GC_TEMPLATE+x}\" \"$GC_SESSION_NAME\" \"$GC_SESSION_ORIGIN\""
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
@@ -122,7 +125,8 @@ work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \
 	out := stdout.String()
 	for _, want := range []string{
 		"agent=s-gc-ordinary",
-		"template=reviewer",
+		"config=reviewer|",
+		"|template_set=|session=",
 		"session=s-gc-ordinary",
 		"origin=ephemeral",
 	} {
@@ -132,7 +136,7 @@ work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \
 	}
 }
 
-func TestPhase0Hook_NamedSessionContextPreservesExactOwnerEnv(t *testing.T) {
+func TestPhase0Hook_NamedSessionContextPreservesRoutingWithoutOwnerEnv(t *testing.T) {
 	clearGCEnv(t)
 	clearInheritedBeadsEnv(t)
 	disableManagedDoltRecoveryForTest(t)
@@ -156,7 +160,7 @@ start_command = "true"
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'id=%s\\nname=%s\\nalias=%s\\nagent=%s\\norigin=%s\\ntemplate=%s\\nargs=%s\\n' \"$GC_SESSION_ID\" \"$GC_SESSION_NAME\" \"$GC_ALIAS\" \"$GC_AGENT\" \"$GC_SESSION_ORIGIN\" \"$GC_TEMPLATE\" \"$*\"\n"
+	script := "#!/bin/sh\nprintf 'id_set=%s\\nrouting=%s\\nname=%s\\nalias=%s\\nagent=%s\\norigin=%s\\ntemplate_set=%s\\nargs=%s\\n' \"${GC_SESSION_ID+x}\" \"$GC_WORK_QUERY_SESSION_ID\" \"$GC_SESSION_NAME\" \"$GC_ALIAS\" \"$GC_AGENT\" \"$GC_SESSION_ORIGIN\" \"${GC_TEMPLATE+x}\" \"$*\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -187,12 +191,13 @@ start_command = "true"
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		"id=mc-session-123",
+		"id_set=\n",
+		"routing=mc-session-123\n",
 		"name=test-city--mayor",
 		"alias=mayor",
 		"agent=mayor",
 		"origin=named",
-		"template=reviewer",
+		"template_set=\n",
 		"--assignee=mc-session-123",
 	} {
 		if !strings.Contains(out, want) {

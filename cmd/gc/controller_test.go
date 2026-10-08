@@ -233,7 +233,27 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	var legacyCalls atomic.Int32
+	var observerMu sync.Mutex
+	var observer func(context.Context) controllerObservationReplyV3
+	observe := func(ctx context.Context) controllerObservationReplyV3 {
+		observerMu.Lock()
+		current := observer
+		observerMu.Unlock()
+		if current == nil {
+			return unknownControllerObservationV3(ctx, cityPath, "", "fixture not installed")
+		}
+		return current(ctx)
+	}
+	setObserver := func(current func(context.Context) controllerObservationReplyV3) {
+		observerMu.Lock()
+		observer = current
+		observerMu.Unlock()
+	}
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh, controllerSocketOptions{observeV3: observe, observe: func(context.Context) controllerObservationReply {
+		legacyCalls.Add(1)
+		return controllerObservationReply{}
+	}})
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -274,6 +294,14 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	case <-pokeCh:
 	default:
 		t.Fatal("reload did not enqueue poke")
+	}
+	resolvedCity, err := filepath.EvalSymlinks(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertControllerV3SupportedFullRPCRoute(t, resolvedCity, setObserver)
+	if legacyCalls.Load() != 0 {
+		t.Fatal("supported FULL route fell back to V2")
 	}
 	if !tryStopController(cityPath, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, want true via fallback socket")

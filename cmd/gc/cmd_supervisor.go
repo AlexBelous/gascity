@@ -2456,9 +2456,9 @@ func startOneCity(
 	// Start controller socket AFTER the alreadyRunning check so we
 	// never destroy a live city's socket or leak a listener.
 	sockPath := controllerSocketPath(path)
-	observer := newControllerObservationService(cityCtx, path)
+	observer := newControllerObservationServiceV3(cityCtx, path)
 	observer.install(cs)
-	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, controllerSocketOptions{observe: observer.observe})
+	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, controllerSocketOptions{observeV3: observer.observe})
 	if lisErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 		lock.Close()                                                                               //nolint:errcheck // no socket to race with

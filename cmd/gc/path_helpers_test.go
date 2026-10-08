@@ -103,6 +103,11 @@ func clearInheritedBeadsEnv(t *testing.T) {
 			continue
 		}
 		t.Setenv(key, "")
+		// Presence, even empty, is a managed claim. No-runtime fixtures need
+		// absence; Setenv above still registers restoration of inherited state.
+		if bdOwnerKey(key) {
+			clearProcessLiveEnvForTests(key)
+		}
 	}
 }
 
@@ -1020,5 +1025,17 @@ func TestRegisterRealBDServerStopStopsServerBeforeTempDirCleanup(t *testing.T) {
 		if pathutil.PathWithin(cityPath, extractConfigPath(p.Argv)) {
 			t.Fatalf("dolt sql-server pid=%d still alive under %s after the subtest's cleanup chain ran; registerRealBDServerStop did not stop it before t.Run returned", p.PID, cityPath)
 		}
+	}
+}
+
+// TestClearInheritedBeadsEnvLeavesOwnershipAbsent keeps no-runtime fixtures
+// distinct from a present-empty, malformed managed-session claim.
+func TestClearInheritedBeadsEnvLeavesOwnershipAbsent(t *testing.T) {
+	for _, key := range []string{"GC_SESSION_ID", "GC_TEMPLATE", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN", "BEADS_HOLDER_TOKEN"} {
+		t.Setenv(key, "fixture-claim")
+	}
+	clearInheritedBeadsEnv(t)
+	if !bdOwnerContextAbsent(os.Environ()) {
+		t.Fatal("no-runtime fixture still presents a managed ownership claim")
 	}
 }

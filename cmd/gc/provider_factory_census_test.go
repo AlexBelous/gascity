@@ -51,6 +51,7 @@ var canonicalProviderAliasBindings = map[string]int{
 // disposition. bind-error means the second result is a named local; the
 // forwarding shapes below are the only reviewed multi-result pass-throughs.
 var canonicalProviderCalls = map[string]int{
+	"bd_child_execution_linux.go:acquireBDLinuxChildAuthority:newSessionProviderFromContext:bind-error":                                        1,
 	"cmd_citystatus.go:cmdCityStatus:newStatusSessionProviderForCityWithSnapshot:bind-error":                                                   1,
 	"cmd_citystatus.go:cmdCityStatusLocalFallback:newStatusSessionProviderForCityWithSnapshot:bind-error":                                      1,
 	"cmd_convoy_dispatch.go:runControlDispatcherWithStoreAndConfig:dispatchControlSessionProvider:bind-error":                                  2,
@@ -296,6 +297,20 @@ func unreviewed() (runtime.Provider, error) { return newSessionProvider() }
 
 func TestProviderFactoryCensusRejectsUncheckedBoundErrors(t *testing.T) {
 	tests := map[string]string{
+		"error and cancellation": `package main
+func evade(ctx context.Context) {
+	provider, err := newSessionProvider()
+	if err != nil && ctx.Err() != nil { return }
+	use(provider)
+}
+`,
+		"cancellation before error": `package main
+func evade(ctx context.Context) {
+	provider, err := newSessionProvider()
+	if ctx.Err() != nil || err != nil { return }
+	use(provider)
+}
+`,
 		"blank use": `package main
 func evade() {
 	provider, err := newSessionProvider()
@@ -338,6 +353,20 @@ func allowed() error {
 `)
 	if len(census.violations) != 0 {
 		t.Fatalf("immediate error check violations = %q", census.violations)
+	}
+}
+
+func TestProviderFactoryCensusAllowsCancellationAfterImmediateErrorCheck(t *testing.T) {
+	census := scanProviderFactoryFixture(t, "fixture.go", `package main
+func allowed(ctx context.Context) error {
+	provider, err := newSessionProvider()
+	if err != nil || ctx.Err() != nil { return err }
+	use(provider)
+	return nil
+}
+`)
+	if len(census.violations) != 0 {
+		t.Fatalf("error-first short-circuit violations = %q", census.violations)
 	}
 }
 
@@ -592,7 +621,15 @@ func providerStatementSequence(statement ast.Stmt, parents map[ast.Node]ast.Node
 
 func isExactProviderErrorCondition(expression ast.Expr, errorName string) bool {
 	condition, ok := expression.(*ast.BinaryExpr)
-	if !ok || condition.Op != token.NEQ {
+	if !ok {
+		return false
+	}
+	// An error-first OR short-circuits before the extra predicate when the
+	// constructor fails. AND or an error check on the right cannot prove that.
+	if condition.Op == token.LOR {
+		return isExactProviderErrorCondition(condition.X, errorName)
+	}
+	if condition.Op != token.NEQ {
 		return false
 	}
 	left, leftOK := condition.X.(*ast.Ident)

@@ -18,7 +18,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -28,8 +27,8 @@ import (
 
 // Fixed protocol versions and bounds cannot be increased by a client.
 const (
-	Schema           = "host-process-evidence/v1"
-	RequestSchema    = "observe-host-processes/v1"
+	Schema           = "host-process-evidence/v2"
+	RequestSchema    = "observe-host-processes/v2"
 	MaxRequestBytes  = 1024
 	MaxResponseBytes = 16 << 20
 	MaxProcesses     = 65536
@@ -82,10 +81,13 @@ type Root struct {
 
 // EvidenceError is a bounded diagnostic containing no environment or token contents.
 type EvidenceError struct {
-	Reason    string `json:"reason"`
-	PID       int    `json:"pid,omitempty"`
-	Operation string `json:"operation"`
-	Errno     int    `json:"errno"`
+	Reason     string  `json:"reason"`
+	PID        int     `json:"pid,omitempty"`
+	Operation  string  `json:"operation"`
+	Errno      int     `json:"errno"`
+	StartTicks *string `json:"start_ticks"`
+	ScanIndex  int     `json:"scan_index"`
+	ResolvedBy int     `json:"resolved_by"`
 }
 
 // Response is the independent process-only evidence, including coverage failures.
@@ -111,6 +113,9 @@ type Response struct {
 	ErrorsTotal             int             `json:"errors_total"`
 	ErrorsTruncated         bool            `json:"errors_truncated"`
 	CallerBinding           CallerBinding   `json:"caller_binding"`
+	KernelRelease           string          `json:"kernel_release"`
+	KernelProofProfile      string          `json:"kernel_proof_profile"`
+	Census                  Census          `json:"census"`
 }
 
 // ObservedRoots converts only redacted fields. Err from Read must remain attached;
@@ -207,10 +212,6 @@ func ReadContext(ctx context.Context, p Policy) (Response, error) {
 	return exchangeContextWithReader(ctx, c, p, time.Now, read)
 }
 
-func exchangeContext(ctx context.Context, c *net.UnixConn, p Policy, now func() time.Time) (Response, error) {
-	return exchangeContextWithReader(ctx, c, p, now, func(data []byte) (int, error) { return readNoAncillary(c, data) })
-}
-
 func exchangeContextWithReader(ctx context.Context, c *net.UnixConn, p Policy, now func() time.Time, read func([]byte) (int, error)) (Response, error) {
 	stopClose := context.AfterFunc(ctx, func() { _ = c.Close() })
 	defer stopClose()
@@ -222,10 +223,6 @@ func exchangeContextWithReader(ctx context.Context, c *net.UnixConn, p Policy, n
 		return Response{}, fmt.Errorf("observer deadline unavailable")
 	}
 	return exchangeWithReader(c, p, now, read)
-}
-
-func exchange(c *net.UnixConn, p Policy, now func() time.Time) (Response, error) {
-	return exchangeWithReader(c, p, now, func(data []byte) (int, error) { return readNoAncillary(c, data) })
 }
 
 func exchangeWithReader(c *net.UnixConn, p Policy, now func() time.Time, read func([]byte) (int, error)) (Response, error) {
@@ -296,8 +293,32 @@ func decodeResponse(data []byte, p Policy, nonce string, now time.Time) (Respons
 		}
 		last = v.PID
 	}
-	if !r.Complete || r.ErrorsTotal != 0 || len(r.Errors) != 0 || r.ErrorsTruncated || r.EnumeratedCountBefore != r.EnumeratedCountAfter || r.EnumerationDigestBefore != r.EnumerationDigestAfter {
+	if !r.Complete || r.KernelProofProfile != KernelProofProfile || !strings.HasPrefix(r.KernelRelease, "6.8.") || ValidateCensus(r.Census, r.Errors, r.ErrorsTotal, r.ErrorsTruncated, r.DurationMS) != nil {
 		return r, fmt.Errorf("observer process coverage incomplete")
+	}
+	if len(r.Roots) > r.Census.ReconciledCount || len(r.Roots) > r.Census.Seal.ClassifiedCount {
+		return Response{}, fmt.Errorf("observer roots exceed classified census")
+	}
+	for _, proof := range r.Census.Proofs {
+		for _, root := range r.Roots {
+			if proof.PID == root.PID && proof.StartTicks != nil && *proof.StartTicks == root.StartTicks {
+				return Response{}, fmt.Errorf("observer retired incarnation is still a root")
+			}
+		}
+	}
+	if r.EnumeratedCountBefore != r.EnumeratedCountAfter || r.EnumerationDigestBefore != r.EnumerationDigestAfter {
+		found := false
+		for _, e := range r.Errors {
+			if e.Reason == "coverage_changed" && e.ResolvedBy == -1 {
+				found = true
+			}
+		}
+		if !found {
+			return Response{}, fmt.Errorf("observer raw coverage change lost diagnostic")
+		}
+	}
+	if r.Census.Closings[1].EnumeratedCount != r.EnumeratedCountAfter || r.Census.Closings[1].EnumerationDigest != r.EnumerationDigestAfter {
+		return Response{}, fmt.Errorf("observer closing census binding mismatch")
 	}
 	return r, nil
 }
@@ -346,30 +367,6 @@ func writeFrame(c *net.UnixConn, data []byte) error {
 	return nil
 }
 
-func readNoAncillary(c *net.UnixConn, data []byte) (int, error) {
-	oob := make([]byte, 32)
-	n, on, flags, _, err := c.ReadMsgUnix(data, oob)
-	if on != 0 {
-		messages, _ := syscall.ParseSocketControlMessage(oob[:on])
-		for _, message := range messages {
-			fds, err := syscall.ParseUnixRights(&message)
-			if err == nil {
-				for _, fd := range fds {
-					_ = syscall.Close(fd)
-				}
-			}
-		}
-	}
-	if on != 0 || flags&(syscall.MSG_CTRUNC|syscall.MSG_TRUNC) != 0 {
-		return 0, fmt.Errorf("observer ancillary data rejected")
-	}
-	return n, err
-}
-
-func readFrame(c *net.UnixConn, byteLimit int) ([]byte, error) {
-	return readFrameWithReader(func(data []byte) (int, error) { return readNoAncillary(c, data) }, byteLimit)
-}
-
 func readFrameWithReader(read func([]byte) (int, error), byteLimit int) ([]byte, error) {
 	readFull := func(data []byte) error {
 		for len(data) > 0 {
@@ -412,6 +409,12 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 		token, err := d.Token()
 		if err != nil {
 			return err
+		}
+		if token == nil && t == reflect.TypeOf((*string)(nil)) {
+			return nil
+		}
+		if t == reflect.TypeOf((*string)(nil)) {
+			t = t.Elem()
 		}
 		if token == nil {
 			return fmt.Errorf("null wire value")
@@ -477,14 +480,19 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 					return fmt.Errorf("required wire key missing")
 				}
 			}
-		case reflect.Slice:
+		case reflect.Slice, reflect.Array:
 			if token != json.Delim('[') {
 				return fmt.Errorf("wire array type invalid")
 			}
+			count := 0
 			for d.More() {
 				if err = walk(t.Elem(), depth+1); err != nil {
 					return err
 				}
+				count++
+			}
+			if t.Kind() == reflect.Array && count != t.Len() {
+				return fmt.Errorf("wire fixed array length invalid")
 			}
 			if _, err = d.Token(); err != nil {
 				return err

@@ -1,7 +1,7 @@
 # Read-only per-SID runtime observation
 
 `gc pool-admission-probe --per-session` emits the typed
-`managed-session-observation/v1` contract. The existing command without this
+`managed-session-observation/v2` contract. The existing command without this
 flag retains its aggregate output. An incomplete observation is printed and
 exits nonzero. This command neither opens a bead store nor spends a reservation,
 starts, wakes, resumes, drains, or terminates a session.
@@ -154,7 +154,7 @@ change, worker start or #32 cutover is authorized by this source package.
 helper, its strict framed protocol, synthetic fixtures, syscall denial probes
 and staging-only service/socket examples. The full contract is
 `engdocs/architecture/process-observer-helper.md`. Its fixed operation reads host proc
-identity twice; it cannot accept client paths, PID/UID filters, plugins or
+identity in an initial census and two closing censuses, with a final numeric/stat seal; it cannot accept client paths, PID/UID filters, plugins or
 commands. The capability proposal is **CAP_SYS_PTRACE plus
 CAP_DAC_READ_SEARCH**, solely for the dedicated helper service. Neither is a
 read-only capability. A default-deny syscall filter excludes tracing, signals,
@@ -164,11 +164,14 @@ pathnames/flags. Baseline deployment therefore explicitly trusts the reviewed
 fixed code for its wider read surface. No LSM confinement is claimed.
 
 `internal/runtime/procobserver` validates the separate
-`host-process-evidence/v1` contract against exact source/binary/policy/boot/PID
-namespace and connecting-caller pins. JSON keys/types are required; null,
+`host-process-evidence/v2` contract against exact source/binary/policy/boot/PID
+namespace and connecting-caller pins. JSON keys/types are required; null except typed unknown incarnation starts,
 duplicate or unknown fields, stale/replayed/partial responses, extra frames,
 ancillary FDs and oversized replies refuse. It preserves the helper's earliest
-evidence time. No provider or ledger access occurs in the helper. The adapter
+evidence time and original raw counts/digests/errors. Version2 requires typed
+kernel absence/retirement witnesses and independently reconciled closing rows;
+ordinary read errno never substitutes for kernel proof. Both helper frames and
+the exact kernel/filter provenance profile are required for COMPLETE. No provider or ledger access occurs in the helper. The adapter
 has no permission-grant, process-start or fallback operation.
 
 `gc pool-admission-probe --per-session --via-controller` selects the fixed

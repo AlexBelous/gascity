@@ -32,7 +32,8 @@ var (
 	_ runtime.Provider = (*seamBackedProvider)(nil)
 	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 18
 	// seam-routed methods, so the warm-box relaunch stays on the real provider.
-	_ runtime.RelaunchProvider = (*seamBackedProvider)(nil)
+	_ runtime.RelaunchProvider            = (*seamBackedProvider)(nil)
+	_ runtime.AttachmentObserverWithError = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

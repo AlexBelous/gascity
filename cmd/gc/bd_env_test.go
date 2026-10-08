@@ -217,8 +217,25 @@ type boundScopeTransportProbe struct {
 	bdErr        error
 }
 
+// installExactBDRunnerMock connects legacy recording collaborators to the
+// Linux exact-entry boundary without changing production ENV projection.
+func installExactBDRunnerMock(t *testing.T) {
+	t.Helper()
+	original := beadsExecCommandRunnerWithExactEntriesContext
+	t.Cleanup(func() { beadsExecCommandRunnerWithExactEntriesContext = original })
+	beadsExecCommandRunnerWithExactEntriesContext = func(_ context.Context, entries []string) beads.CommandRunner {
+		env := make(map[string]string, len(entries))
+		for _, entry := range entries {
+			key, value, _ := strings.Cut(entry, "=")
+			env[key] = value
+		}
+		return beadsExecCommandRunnerWithEnv(env)
+	}
+}
+
 func newBoundScopeTransportProbe(t *testing.T) *boundScopeTransportProbe {
 	t.Helper()
+	installExactBDRunnerMock(t)
 	origRunner := beadsExecCommandRunnerWithEnv
 	origRecover := recoverManagedBDCommand
 	t.Cleanup(func() {
@@ -4631,6 +4648,7 @@ func TestBdRuntimeEnvPreservesInheritedBeadsActor(t *testing.T) {
 }
 
 func TestControlBdCommandRunnerDefaultsBeadsActorToControllerWhenUnset(t *testing.T) {
+	installExactBDRunnerMock(t)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	_ = os.Unsetenv("BEADS_ACTOR")

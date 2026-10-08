@@ -18,7 +18,11 @@ import (
 )
 
 // Schema is the exact consumer contract version for per-SID observations.
-const Schema = "managed-session-observation/v1"
+const Schema = "managed-session-observation/v2"
+
+// SchemaV3 adds explicitly provisional descendant certificates. It cannot be
+// advertised by a legacy helper or interpreted by the V2 controller consumer.
+const SchemaV3 = "managed-session-observation/v3"
 
 // Session is a live provider handle attributed by its own incarnation metadata.
 type Session struct {
@@ -47,17 +51,18 @@ type Process struct {
 // Observation is evidence, not permission to start or terminate a runtime.
 // Complete booleans are false on ambiguity; partial rows remain inspectable.
 type Observation struct {
-	Schema            string    `json:"schema"`
-	CityPath          string    `json:"city_path"`
-	ObservedAt        time.Time `json:"observed_at"`
-	ProcessObservedAt time.Time `json:"process_observed_at"`
-	FinishedAt        time.Time `json:"finished_at"`
-	ProviderComplete  bool      `json:"provider_complete"`
-	ProcessComplete   bool      `json:"process_complete"`
-	ProviderType      string    `json:"provider_type"`
-	Sessions          []Session `json:"sessions"`
-	Processes         []Process `json:"processes"`
-	UnknownReasons    []string  `json:"unknown_reasons"`
+	Schema                 string    `json:"schema"`
+	CityPath               string    `json:"city_path"`
+	ObservedAt             time.Time `json:"observed_at"`
+	ProcessObservedAt      time.Time `json:"process_observed_at"`
+	FinishedAt             time.Time `json:"finished_at"`
+	ProviderComplete       bool      `json:"provider_complete"`
+	ProcessComplete        bool      `json:"process_complete"`
+	ProviderType           string    `json:"provider_type"`
+	Sessions               []Session `json:"sessions"`
+	Processes              []Process `json:"processes"`
+	UnknownReasons         []string  `json:"unknown_reasons"`
+	CertificateDisposition string    `json:"certificate_disposition,omitempty"`
 }
 
 // TokenDigest returns a non-reversible comparison value for an incarnation
@@ -83,6 +88,10 @@ type ProcessEvidence struct {
 	Roots                 []proctable.ObservedRoot
 	StartedAt, FinishedAt time.Time
 	Err                   error
+	// CensusContract is empty for the unchanged legacy path. Versioned
+	// certificates are provisional process claims, never provider authority.
+	CensusContract    string
+	RetirementAnchors []proctable.ObservedRoot
 }
 
 // ObserveProcessEvidence joins external process evidence through positive live
@@ -97,7 +106,7 @@ func ObserveProcessEvidenceContext(ctx context.Context, city string, sp runtime.
 }
 
 func observe(ctx context.Context, city string, sp runtime.Provider, readRoots func() ([]proctable.ObservedRoot, error), readEvidence func() ProcessEvidence, now func() time.Time) Observation {
-	out := Observation{Schema: Schema, CityPath: city, ObservedAt: now().UTC(), ProviderType: fmt.Sprintf("%T", sp), Sessions: []Session{}, Processes: []Process{}, UnknownReasons: []string{}}
+	out := Observation{Schema: Schema, CityPath: city, ObservedAt: now().UTC(), ProviderType: ProviderBoundaryType(sp), Sessions: []Session{}, Processes: []Process{}, UnknownReasons: []string{}}
 	fail := func(reason string) { out.UnknownReasons = append(out.UnknownReasons, reason) }
 	if city == "" || !filepath.IsAbs(city) || sp == nil || (readRoots == nil && readEvidence == nil) {
 		fail("observation context unavailable")
@@ -164,6 +173,10 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 		}
 		e := readEvidence()
 		evidence = append(evidence, e)
+		if e.CensusContract != "" {
+			out.Schema = SchemaV3
+			out.CertificateDisposition = "provisional"
+		}
 		if !e.StartedAt.IsZero() && e.StartedAt.Before(out.ObservedAt) {
 			out.ObservedAt = e.StartedAt.UTC()
 		}
@@ -291,6 +304,18 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 		processOK = false
 		fail("process identities changed or became unavailable during observation")
 	}
+	if readEvidence != nil {
+		versioned := false
+		for _, e := range evidence {
+			versioned = versioned || e.CensusContract != "" || len(e.RetirementAnchors) > 0
+		}
+		if versioned {
+			if len(evidence) != 2 || !verifiedRetirementAnchors(evidence, out.Processes, city) {
+				processOK = false
+				fail("descendant retirement anchor lacks both fresh provider joins")
+			}
+		}
+	}
 	if canceled() {
 		return out
 	}
@@ -302,9 +327,60 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 	}
 	out.ProviderComplete = providerOK
 	out.ProcessComplete = processOK
+	if out.Schema == SchemaV3 {
+		out.CertificateDisposition = "provisional"
+		if providerOK && processOK {
+			out.CertificateDisposition = "provider_verified"
+		}
+	}
 	sort.Slice(out.Sessions, func(i, j int) bool { return out.Sessions[i].SessionID < out.Sessions[j].SessionID })
 	sort.Slice(out.Processes, func(i, j int) bool { return out.Processes[i].PID < out.Processes[j].PID })
 	return out
+}
+
+func verifiedRetirementAnchors(frames []ProcessEvidence, processes []Process, city string) bool {
+	if len(frames) != 2 {
+		return false
+	}
+	for _, frame := range frames {
+		if frame.CensusContract != "bounded-process-census/v3" || frame.Err != nil || frame.RetirementAnchors == nil {
+			return false
+		}
+		for _, anchor := range frame.RetirementAnchors {
+			r := anchor.Runtime
+			if r.City != city || r.PID <= 1 || anchor.StartIdentity == "" {
+				return false
+			}
+			matched := false
+			for _, p := range processes {
+				if p.PID == r.PID && p.PPID == r.PPID && p.StartIdentity == anchor.StartIdentity && p.SessionID == r.SessionID &&
+					p.CityPath == r.City && p.Template == anchor.Template && p.RunEpoch == r.Epoch && p.InstanceTokenSHA256 == anchor.InstanceTokenSHA256 {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+			// Provider-owned process rows derive from frame1. Require the same exact
+			// anchor in BOTH fully fresh helper frames, even if only one retires a child.
+			for _, other := range frames {
+				found := false
+				for _, root := range other.Roots {
+					q := root.Runtime
+					if q.PID == r.PID && q.PPID == r.PPID && q.SessionID == r.SessionID && q.City == r.City && q.Epoch == r.Epoch &&
+						root.StartIdentity == anchor.StartIdentity && root.Template == anchor.Template && root.InstanceTokenSHA256 == anchor.InstanceTokenSHA256 {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func readProviderSessionContext(ctx context.Context, sp runtime.Provider, name string) (Session, error) {

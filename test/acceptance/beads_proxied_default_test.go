@@ -737,10 +737,6 @@ func TestBeadsProxiedDefault(t *testing.T) {
 			bdCalls.Count(), bdCalls.Count("ping"), bdCalls.Describe())
 	})
 
-	t.Run("native-lane", func(t *testing.T) {
-		runProxiedNativeLaneGates(t, bdPath, doltPath)
-	})
-
 	var createdBead string
 	t.Run("bd-front-door", func(t *testing.T) {
 		out, err := city.GCStdout("bd", "create", "e2e proxied default", "--json")
@@ -801,6 +797,12 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		// bd-owned proxied scopes with no backup anywhere, and this is the only
 		// doctor line that says so.
 		assertProxiedBackupAdvisory(t, city, "a proxied city with a rig", true, "city", filepath.Base(rigDir))
+	})
+
+	// Keep fixture-health checks next to topology setup. The independent
+	// no-start city owns the native lane's fork and budget probes.
+	t.Run("native-lane", func(t *testing.T) {
+		runProxiedNativeLaneGates(t, bdPath, doltPath)
 	})
 
 	t.Run("start-default-pack", func(t *testing.T) {

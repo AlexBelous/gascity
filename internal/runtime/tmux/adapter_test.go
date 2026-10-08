@@ -126,6 +126,11 @@ func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.SocketName = fmt.Sprintf("gc-test-color-%d", time.Now().UnixNano())
 	p := NewProviderWithConfig(cfg)
+	// This owner proves the real launched pane's environment. Script only the
+	// initial no-server protocol response; the production guard still checks
+	// the actual socket. Creation, readiness and cleanup use real tmux.
+	// Server-probe owners retain the real live/degraded protocol boundary.
+	p.Tmux().exec = &noServerPreflightExecutor{}
 	t.Cleanup(func() { _ = p.TeardownServer() })
 	name := "gc-test-adapter-color-env"
 

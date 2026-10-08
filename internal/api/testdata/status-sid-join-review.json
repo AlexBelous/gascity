@@ -1,0 +1,153 @@
+{
+  "schema": "status-sid-join-review-fixture/v1",
+  "scope": "SANITIZED_JOIN_PROJECTION_ONLY; notnativeauthentication fixture",
+  "native_basis": "c72bd888a89df7562351fd2d0a45845bae9261b1",
+  "snapshots": [
+    {
+      "original_path": "/Users/ba/Projects/strategy/reviews/evidence/2026-10-07-status-sid-join/original-1420-join.json",
+      "sha256": "d8586d23e8cbe899a4b05683c5d59d7a60709f0a60f2ce684e0d2b354b2954f5",
+      "captured_at": "2026-10-07T14:20:10.791926Z",
+      "failure": "provider_identity_unmapped",
+      "provider_targets": [
+        {
+          "index": 4,
+          "sid": "gcg-534258985155283648",
+          "status_name": "tenders/gastown.polecat",
+          "running": true
+        },
+        {
+          "index": 5,
+          "sid": "gcg-534258985155285794",
+          "status_name": "postman-out",
+          "running": true
+        }
+      ],
+      "status_rows": [
+        {
+          "index": 27,
+          "qualified_name": "postman-out",
+          "running": false
+        },
+        {
+          "index": 33,
+          "qualified_name": "tenders/gastown.furiosa",
+          "running": false
+        }
+      ]
+    },
+    {
+      "original_path": "/Users/ba/Projects/strategy/reviews/evidence/2026-10-07-status-sid-join/original-1450-join.json",
+      "sha256": "cf0e3548bc5c7676176f950d360413e8a5b7528835f5208defa213cfa20bc491",
+      "captured_at": "2026-10-07T14:50:09.580852Z",
+      "failure": "provider_identity_unmapped",
+      "provider_targets": [
+        {
+          "index": 4,
+          "sid": "gcg-534258985155283648",
+          "status_name": "tenders/gastown.polecat",
+          "running": true
+        },
+        {
+          "index": 5,
+          "sid": "gcg-534258985155285794",
+          "status_name": "postman-out",
+          "running": true
+        }
+      ],
+      "status_rows": [
+        {
+          "index": 27,
+          "qualified_name": "postman-out",
+          "running": false
+        },
+        {
+          "index": 33,
+          "qualified_name": "tenders/gastown.furiosa",
+          "running": false
+        }
+      ]
+    }
+  ],
+  "postman_out_native_records": [
+    {
+      "sid": "gcg-534258985155346679",
+      "template": "postman-out",
+      "agent_name": "postman-out",
+      "state": "asleep",
+      "runtime_name": "s-gcg-534258985155346679",
+      "origin": "manual"
+    },
+    {
+      "sid": "gcg-534258985155346638",
+      "template": "postman-out",
+      "agent_name": "postman-out",
+      "state": "asleep",
+      "runtime_name": "s-gcg-534258985155346638",
+      "origin": "manual"
+    },
+    {
+      "sid": "gcg-534258985155317976",
+      "template": "postman-out",
+      "agent_name": "postman-out",
+      "state": "asleep",
+      "runtime_name": "s-gcg-534258985155317976",
+      "origin": "manual"
+    },
+    {
+      "sid": "gcg-534258985155314095",
+      "template": "postman-out",
+      "agent_name": "postman-out",
+      "state": "asleep",
+      "runtime_name": "s-gcg-534258985155314095",
+      "origin": "manual"
+    },
+    {
+      "sid": "gcg-534258985155303920",
+      "template": "postman-out",
+      "agent_name": "postman-out",
+      "state": "asleep",
+      "runtime_name": "s-gcg-534258985155303920",
+      "origin": "manual"
+    },
+    {
+      "sid": "gcg-534258985155285794",
+      "template": "postman-out",
+      "agent_name": "postman-out",
+      "state": "active",
+      "runtime_name": "s-gcg-534258985155273443",
+      "origin": "manual"
+    }
+  ],
+  "adhoc_native_record": {
+    "sid": "gcg-534258985155283648",
+    "template": "tenders/gastown.polecat",
+    "agent_name": "tenders/gastown.polecat-adhoc-1f196b09fa",
+    "alias": "tenders/gastown.polecat-adhoc-1f196b09fa",
+    "state": "active",
+    "runtime_name": "polecat-adhoc-1f196b09fa",
+    "origin": "manual"
+  },
+  "configured_roles": {
+    "postman-out": {
+      "pool_min": 0,
+      "pool_max": 1,
+      "suspended": false
+    },
+    "tenders/gastown.polecat": {
+      "pool_min": 0,
+      "pool_max": 1,
+      "suspended": false
+    }
+  },
+  "expected_current": [
+    "provider_identity_unmapped foradhoctemplate absentfromconfiguredstatus",
+    "postmanoutfirst-asleep/ambiguoussameagent-name canreportfalse despiteoneactivesid"
+  ],
+  "required_future_constraints": [
+    "explicitSID/runtimehandle identity coverage nofirstmatch/templatealiasguess",
+    "configurednamed/expanded rows unchanged",
+    "closed/missing/duplicate/reused-runtime/SID orambiguousinstance remainsUNKNOWN",
+    "allprovider/process/caller/UID/BOTH/freshness/currentroute/owneddrain gates unchanged"
+  ],
+  "tests_executed": false
+}

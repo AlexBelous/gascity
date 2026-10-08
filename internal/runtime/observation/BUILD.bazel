@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "observation",
-    srcs = ["observation.go"],
+    srcs = [
+        "observation.go",
+        "status_sessions.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/observation",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -14,17 +17,21 @@ go_library(
 go_test(
     name = "observation_test",
     srcs = [
+        "census_v3_join_golden_test.go",
+        "descendant_evidence_test.go",
         "evidence_test.go",
         "observation_test.go",
+        "status_sessions_test.go",
         "testenv_import_test.go",
     ],
     data = glob(["testdata/**"]),
     embed = [":observation"],
     deps = [
-        "//internal/testenv",
         "//internal/runtime",
         "//internal/runtime/auto",
+        "//internal/runtime/procobserver",
         "//internal/runtime/proctable",
+        "//internal/testenv",
     ],
 )
 
@@ -32,7 +39,11 @@ go_test(
 
 filegroup(
     name = "bazel_repo_srcs",
-    srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
     visibility = ["//visibility:public"],
 )
 

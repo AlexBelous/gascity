@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 )
 
 // This file hosts stable, CLI-facing read-path envelope types that are
@@ -53,17 +54,18 @@ const cacheAgeHeader = "X-GC-Cache-Age-S"
 // locally by the CLI (controllerStatusForCity) because the server
 // handling the request IS the controller — no wire field is needed.
 type StatusView struct {
-	CityName      string
-	CityPath      string
-	Version       string
-	UptimeSec     int
-	Suspended     bool
-	Agents        []StatusAgentView
-	Rigs          []StatusRigView
-	NamedSessions []StatusNamedSessionView
-	SessionCounts StatusSessionCountsView
-	StoreHealth   *StatusStoreHealthView
-	Beads         *beads.BeadsDiagnostic
+	RuntimeSessions *observation.RuntimeSessions
+	CityName        string
+	CityPath        string
+	Version         string
+	UptimeSec       int
+	Suspended       bool
+	Agents          []StatusAgentView
+	Rigs            []StatusRigView
+	NamedSessions   []StatusNamedSessionView
+	SessionCounts   StatusSessionCountsView
+	StoreHealth     *StatusStoreHealthView
+	Beads           *beads.BeadsDiagnostic
 	// ConditionalWrites is the daemon's latched §12.5 snapshot, verbatim from
 	// the wire (the view reuses the wire struct — it is already CLI-shaped).
 	ConditionalWrites *StatusConditionalWrites

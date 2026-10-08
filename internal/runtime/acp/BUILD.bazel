@@ -3,12 +3,12 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "acp",
     srcs = [
-        "process_evidence.go",
         "acp.go",
         "activity_publisher.go",
         "conn.go",
         "cutover.go",
         "lifecycle_lock.go",
+        "process_evidence.go",
         "proctable.go",
         "protocol.go",
         "seams.go",
@@ -25,12 +25,12 @@ go_library(
 go_test(
     name = "acp_test",
     srcs = [
-        "process_evidence_test.go",
         "acp_test.go",
         "activity_test.go",
         "capacity_test.go",
         "meta_privacy_test.go",
         "pipe_error_test.go",
+        "process_evidence_test.go",  # keep: integration process-evidence owner
         "proctable_linux_test.go",
         "protocol_test.go",
         "seams_test.go",

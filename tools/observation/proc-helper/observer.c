@@ -2,6 +2,7 @@
  */
 #define _GNU_SOURCE
 #include "sha256.h"
+#include "census-proof.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +27,7 @@
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 #ifndef HELPER_SOURCE_REVISION
@@ -46,38 +48,59 @@
 #define MAX_ERRORS 128u
 #define MAX_REQUEST 1024u
 #define MAX_FIELD 4096u
+#define PF_KTHREAD 0x00200000u
 #define POLICY                                                                 \
   "gc-proc-helper/"                                                            \
-  "v1;fd=3;request=1024;wall_ms=10000;pids=65536;env=16777216;output="         \
+  "v2;fd=3;request=1024;wall_ms=10000;pids=65536;env=16777216;output="         \
   "16777216;retained=16777216;errors=128;openat2=beneath,no_symlinks,no_"      \
-  "magiclinks;seccomp=default_errno_x86_64_v2;roots=exact_tmux_v1"
+  "magiclinks;seccomp=default_errno_x86_64_v3_pidfd_flags0;roots=exact_tmux_v1;"             \
+  "kernel=pf_kthread_stat_v1;kernel_comm=excluded_from_coverage_v1;" \
+  "non_target_env=nul_no_gc_v1;census=kernel_absence_two_closings_v2"
 struct binding {
   uint32_t pid, uid;
   uint64_t start;
   char boot[37], ns[80], source[41], binary[65], helper_binary[65];
+  char kernel_release[128], proof_profile[96];
 };
 struct process {
   uint32_t pid, ppid, pgid;
-  uint64_t start, epoch;
+  uint64_t start, epoch, flags;
   char *sid, *city, *template, *name;
   char token[65];
-  bool valid, root, parent_infra;
+  bool valid, root, parent_infra, absent, pidfd_bound;
 };
 struct scan {
   struct process *p;
-  size_t n, retained;
-  char digest[65];
+  size_t n, retained, live_n;
+  char digest[65], live_digest[65];
 };
 struct error_item {
   const char *reason, *operation;
   uint32_t pid;
-  int error;
+  int error, scan_index, resolved_by;
+  uint64_t start;
+};
+struct proof_item {
+  enum census_absence_kind kind;
+  const char *method;
+  uint32_t pid;
+  uint64_t start, replacement_start, offset_ms;
+  int scan_index;
 };
 struct evidence {
   struct binding binding;
-  struct scan before, after;
+  struct scan before, closing, after, seal;
+  size_t sealed_n;
+  char sealed_digest[65], seal_pid_digest[65];
   struct error_item errors[MAX_ERRORS];
-  size_t errors_n, errors_total;
+  size_t errors_n, errors_total, unresolved;
+  struct proof_item proofs[MAX_ERRORS];
+  size_t proofs_n, reconciled_n;
+  char reconciled_digest[65];
+  int scan_index, processfd, active_pidfd;
+  uint32_t current_pid;
+  uint64_t current_start;
+  bool trusted_kernel;
   char nonce[65], boot[37], ns[80], binary[65], policy[65], started[40],
       finished[40];
   struct timespec monotonic_start, realtime_start;
@@ -89,12 +112,17 @@ static struct evidence ev;
 static const char *proc_path = "/proc",
                   *binding_path = "/etc/gascity-observer/binding.conf";
 static bool fixture = false;
+#ifdef GC_HELPER_TEST
+/* Deterministic owned-child lifecycle in kernel integration tests only. */
+static void (*test_environ_opened)(void);
+#endif
 static void add_error(const char *reason, const char *op, uint32_t pid,
                       int error) {
   ev.complete = false;
   ev.errors_total++;
+  ev.unresolved++;
   if (ev.errors_n < MAX_ERRORS)
-    ev.errors[ev.errors_n++] = (struct error_item){reason, op, pid, error};
+    ev.errors[ev.errors_n++] = (struct error_item){.reason=reason, .operation=op, .pid=pid, .error=error, .scan_index=ev.scan_index, .start=ev.current_start};
 }
 static uint64_t mono_ms(void) {
   struct timespec t;
@@ -220,9 +248,36 @@ static unsigned char *read_fd(int fd, size_t limit, size_t *size) {
   return b;
 }
 static unsigned char *read_proc(const char *path, size_t limit, size_t *size) {
-  int fd = fixed_open(ev.procfd, path, 0);
+#ifdef GC_HELPER_TEST
+  /* A synthetic proc tree cannot naturally return environ ESRCH. The fixture
+   * alone can inject that read error; no such path exists in the release. */
+  size_t path_len = strlen(path);
+  if (fixture && path_len >= 8 && !strcmp(path + path_len - 8, "/environ")) {
+    char marker[96];
+    snprintf(marker, sizeof marker, "%s.fixture-errno", path);
+    int injected = fixed_open(ev.procfd, marker, 0);
+    if (injected >= 0) {
+      char error;
+      ssize_t count = read(injected, &error, 1);
+      close(injected);
+      if (count == 1 && error == '3') {
+        errno = ESRCH;
+        return NULL;
+      }
+    }
+  }
+#endif
+  char prefix[32];
+  snprintf(prefix, sizeof prefix, "%u/", ev.current_pid);
+  size_t plen = strlen(prefix);
+  int fd = ev.processfd >= 0 && ev.current_pid && !strncmp(path,prefix,plen)
+             ? fixed_open(ev.processfd,path+plen,0) : fixed_open(ev.procfd,path,0);
   if (fd < 0)
     return NULL;
+#ifdef GC_HELPER_TEST
+  if (!fixture && test_environ_opened && strstr(path,"/environ"))
+    test_environ_opened();
+#endif
   unsigned char *b = read_fd(fd, limit, size);
   int e = errno;
   close(fd);
@@ -262,11 +317,13 @@ static bool parse_stat(const unsigned char *data, size_t n, struct process *p) {
     goto done;
   char *save = NULL, *part = strtok_r(end + 1, " \n", &save);
   unsigned field = 3;
-  uint64_t pp = 0, pg = 0, start = 0;
+  uint64_t pp = 0, pg = 0, start = 0, flags = 0;
   while (part) {
     if (field == 4 && !uint_value(part, &pp))
       goto done;
     if (field == 5 && !uint_value(part, &pg))
+      goto done;
+    if (field == 9 && !uint_value(part, &flags))
       goto done;
     if (field == 22 && !uint_value(part, &start))
       goto done;
@@ -278,6 +335,7 @@ static bool parse_stat(const unsigned char *data, size_t n, struct process *p) {
   p->ppid = (uint32_t)pp;
   p->pgid = (uint32_t)pg;
   p->start = start;
+  p->flags = flags;
   ok = true;
 done:
   free(b);
@@ -299,7 +357,7 @@ static bool read_stat(uint32_t pid, struct process *p) {
 }
 static char *retain(struct scan *s, const char *v, size_t n) {
   if (n > MAX_FIELD || !utf8((const unsigned char *)v, n) ||
-      s->retained + n + 1 > MAX_RETAINED) {
+      ev.before.retained + ev.closing.retained + ev.after.retained + n + 1 > MAX_RETAINED) {
     errno = EFBIG;
     return NULL;
   }
@@ -315,6 +373,22 @@ static bool parse_env(struct scan *s, struct process *p, unsigned char *b,
                       size_t n) {
   if (n && b[n - 1])
     return false;
+  /* sshd/nginx may replace their non-GC environment with process titles.
+   * Only a fully read, NUL-terminated environment with no GC_ entry can be
+   * classified as non-target. Any GC_ prefix retains the strict parser below. */
+  bool has_gc_entry = false;
+  for (size_t at = 0; at < n;) {
+    if (expired()) {
+      errno = ETIMEDOUT;
+      return false;
+    }
+    size_t len = strlen((char *)b + at);
+    if (len >= 3 && !memcmp(b + at, "GC_", 3))
+      has_gc_entry = true;
+    at += len + 1;
+  }
+  if (!has_gc_entry)
+    return true;
   char *seen[4096];
   size_t seen_n = 0;
   char *fallback = NULL;
@@ -393,7 +467,67 @@ static bool infra(const char *name) {
   return !strcmp(base, "tmux") || !strcmp(base, "tmux:") ||
          !strcmp(base, "tmux: server") || !strcmp(base, "tmux: client");
 }
-static bool read_process(struct scan *s, struct process *p) {
+/* A pidfd is held only while inspecting one pinned proc directory. */
+static int process_pidfd(uint32_t pid) {
+#ifdef GC_HELPER_TEST
+  if (fixture) {
+    char path[64]; size_t n;
+    snprintf(path,sizeof path,"%u/fixture_pidfd_errno",pid);
+    unsigned char *b=read_proc(path,32,&n);
+    if (b) {
+      b[n]=0; uint64_t value=0; bool ok=uint_value((char *)b,&value);
+      free(b); errno=ok && value<4096 ? (int)value : EINVAL;
+      return -1;
+    }
+    errno=0;
+    return -2; /* Virtual handle: fixture scope is never accepted by Go. */
+  }
+#endif
+  return (int)syscall(SYS_pidfd_open,pid,0);
+}
+static int process_poll(int fd, short *events) {
+#ifdef GC_HELPER_TEST
+  if (fixture && fd == -2) { *events=0; return 0; }
+#endif
+  struct pollfd p={.fd=fd,.events=POLLIN};
+  int result=poll(&p,1,0); *events=p.revents; return result;
+}
+static bool protected_process(const struct process *p) {
+  return p->pid<=1 || p->pid==ev.binding.pid || p->root ||
+         (p->sid && *p->sid) || *p->token || infra(p->name);
+}
+static int record_absence(struct process *p,int fd,int syscall_error,
+                          bool live_after_stat,int scan_index) {
+  short events=0;
+  if (!syscall_error && process_poll(fd,&events)<0) return 0;
+  struct census_probe probe={.pid=p->pid,.start=p->start,
+    .bound_start=p->pidfd_bound?p->start:0,.syscall_errno=syscall_error,
+    .poll_events=events,.trusted_kernel=ev.trusted_kernel,
+    .same_namespace=true,.live_after_stat=live_after_stat,
+    .protected_identity=protected_process(p)};
+  enum census_absence_kind kind=census_absence(&probe);
+  if (kind==CENSUS_UNPROVEN) return 0;
+  if (ev.proofs_n==MAX_ERRORS) {
+    add_error("limit_reached","kernel_proof",p->pid,EFBIG); return 0;
+  }
+  struct proof_item proof={.kind=kind,.pid=p->pid,.start=p->start,
+    .method=syscall_error==ESRCH?"pidfd_no_pid":"pidfd_exited",
+    .scan_index=scan_index,.offset_ms=mono_ms()-
+      ((uint64_t)ev.monotonic_start.tv_sec*1000u+(uint64_t)ev.monotonic_start.tv_nsec/1000000u)};
+#ifdef GC_HELPER_TEST
+  if (fixture) proof.method=syscall_error==ESRCH?"fixture_pidfd_no_pid":"fixture_pidfd_exited";
+#endif
+  ev.proofs[ev.proofs_n++]=proof;
+  p->absent=true;
+  return (int)ev.proofs_n;
+}
+static bool resolvable_error(const struct error_item *e) {
+  return !strcmp(e->reason,"process_unavailable") &&
+    ((!strcmp(e->operation,"stat") && e->error==ENOENT) ||
+     (!strcmp(e->operation,"environ") && e->error==ESRCH) ||
+     (!strcmp(e->operation,"comm") && (e->error==ENOENT || e->error==ESRCH)));
+}
+static bool read_process_fields(struct scan *s, struct process *p) {
   uint32_t pid = p->pid;
   struct process a = {0}, z = {0};
   if (!read_stat(pid, &a)) {
@@ -403,27 +537,39 @@ static bool read_process(struct scan *s, struct process *p) {
   p->ppid = a.ppid;
   p->pgid = a.pgid;
   p->start = a.start;
-  char path[48];
-  snprintf(path, sizeof path, "%u/environ", pid);
-  size_t n;
-  unsigned char *b = read_proc(path, MAX_ENV, &n);
-  if (!b) {
-    add_error(errno == EFBIG ? "limit_reached" : "process_unavailable",
-              "environ", pid, errno);
-    return false;
+  p->flags = a.flags & PF_KTHREAD;
+  ev.current_start=p->start;
+  short binding_events=0;
+  if (process_poll(ev.active_pidfd,&binding_events)!=0 || binding_events) {
+    add_error("incarnation_unbound","pidfd_poll",pid,errno); return false;
   }
-  errno = EINVAL;
-  bool ok = parse_env(s, p, b, n);
-  volatile unsigned char *wipe = b;
-  for (size_t i = 0; i < n; i++)
-    wipe[i] = 0;
-  free(b);
-  if (!ok) {
-    add_error(errno == EFBIG       ? "limit_reached"
-              : errno == ETIMEDOUT ? "deadline"
-                                   : "malformed_environment",
-              "environ", pid, errno);
-    return false;
+  p->pidfd_bound=true;
+  char path[48];
+  size_t n;
+  unsigned char *b;
+  /* Kernel threads have no user mm; environ returns ESRCH for a live thread.
+   * Do not drop their PID: both scans still prove stat/flags/comm identity. */
+  if (!(a.flags & PF_KTHREAD)) {
+    snprintf(path, sizeof path, "%u/environ", pid);
+    b = read_proc(path, MAX_ENV, &n);
+    if (!b) {
+      add_error(errno == EFBIG ? "limit_reached" : "process_unavailable",
+                "environ", pid, errno);
+      return false;
+    }
+    errno = EINVAL;
+    bool ok = parse_env(s, p, b, n);
+    volatile unsigned char *wipe = b;
+    for (size_t i = 0; i < n; i++)
+      wipe[i] = 0;
+    free(b);
+    if (!ok) {
+      add_error(errno == EFBIG       ? "limit_reached"
+                : errno == ETIMEDOUT ? "deadline"
+                                     : "malformed_environment",
+                "environ", pid, errno);
+      return false;
+    }
   }
   snprintf(path, sizeof path, "%u/comm", pid);
   b = read_proc(path, 256, &n);
@@ -443,12 +589,50 @@ static bool read_process(struct scan *s, struct process *p) {
     add_error("process_unavailable", "stat", pid, errno);
     return false;
   }
-  if (a.start != z.start || a.ppid != z.ppid || a.pgid != z.pgid) {
+  if (a.start != z.start || a.ppid != z.ppid || a.pgid != z.pgid ||
+      (a.flags & PF_KTHREAD) != (z.flags & PF_KTHREAD)) {
     add_error("incarnation_changed", "stat", pid, 0);
     return false;
   }
   p->valid = true;
   return true;
+}
+static bool read_process(struct scan *s, struct process *p) {
+  char directory[32]; snprintf(directory,sizeof directory,"%u",p->pid);
+  ev.current_pid=p->pid; ev.current_start=0;
+  ev.processfd=fixed_open(ev.procfd,directory,O_DIRECTORY);
+  int directory_error=errno;
+  int fd=process_pidfd(p->pid), fd_error=fd==-1?errno:0;
+  ev.active_pidfd=fd;
+  size_t first_error=ev.errors_n;
+  bool ok=false;
+  if (ev.processfd<0) add_error("process_unavailable","stat",p->pid,directory_error);
+  else if (fd==-1 && fd_error!=ESRCH) add_error("kernel_proof_unavailable","pidfd_open",p->pid,fd_error);
+  else if (fd==-1) {
+    /* Read stat for the original diagnostic only; ESRCH is a separate witness. */
+    struct process stat={0};
+    if (!read_stat(p->pid,&stat)) add_error("process_unavailable","stat",p->pid,errno);
+    /* A birth after no-PID is classified anew by the closing scans. */
+  } else ok=read_process_fields(s,p);
+  int proof=0;
+  bool narrow=ev.errors_n==first_error ||
+    (ev.errors_n==first_error+1 && resolvable_error(&ev.errors[first_error]));
+  if (narrow) {
+    if (fd_error==ESRCH) proof=record_absence(p,fd,fd_error,false,ev.scan_index);
+    else if (fd!=-1 && p->pidfd_bound) proof=record_absence(p,fd,0,true,ev.scan_index);
+    if (!proof && !ok) {
+      int fresh=process_pidfd(p->pid), error=fresh==-1?errno:0;
+      if (error==ESRCH) proof=record_absence(p,fresh,error,false,ev.scan_index);
+      if (fresh>=0) close(fresh);
+    }
+  }
+  if (proof && ev.errors_n==first_error+1 && ev.errors_total==ev.errors_n) {
+    ev.errors[first_error].resolved_by=proof; ev.unresolved--;
+  }
+  if (fd>=0) close(fd);
+  if (ev.processfd>=0) close(ev.processfd);
+  ev.processfd=-1; ev.active_pidfd=-1; ev.current_pid=0; ev.current_start=0;
+  return ok || proof;
 }
 struct linux_dirent64 {
   uint64_t ino;
@@ -472,7 +656,23 @@ static void digest_field(sha256_ctx *h, const char *s) {
   if (s)
     sha256_update(h, s, strlen(s));
 }
-static void scan(struct scan *s) {
+static void process_digest(sha256_ctx *hash,const struct process *p) {
+  char identity[160];
+  snprintf(identity,sizeof identity,"%u:%u:%u:%" PRIu64 ":%" PRIu64 ":%" PRIu64 ":%d:%d:%d",
+    p->pid,p->ppid,p->pgid,p->start,p->epoch,p->flags,p->valid,p->root,p->parent_infra);
+  digest_field(hash,identity);
+  if (!(p->flags&PF_KTHREAD)) digest_field(hash,p->name);
+  digest_field(hash,p->sid); digest_field(hash,p->city);
+  digest_field(hash,p->template); digest_field(hash,p->token);
+}
+static void live_digest(const struct scan *s,size_t *count,char digest[65]) {
+  sha256_ctx h; sha256_init(&h); *count=0;
+  for (size_t i=0;i<s->n;i++) if (s->p[i].valid && !s->p[i].absent) {
+    (*count)++; process_digest(&h,&s->p[i]);
+  }
+  sha256_hex(&h,digest);
+}
+static void enumerate(struct scan *s) {
   s->p = calloc(MAX_PIDS, sizeof *s->p);
   if (!s->p) {
     add_error("allocation_failed", "enumerate", 0, ENOMEM);
@@ -526,6 +726,9 @@ static void scan(struct scan *s) {
   }
   close(d);
   qsort(s->p, s->n, sizeof *s->p, compare_process);
+}
+static void scan(struct scan *s) {
+  enumerate(s);
   sha256_ctx hash;
   sha256_init(&hash);
   for (size_t i = 0; i < s->n; i++) {
@@ -540,10 +743,15 @@ static void scan(struct scan *s) {
     }
     read_process(s, p);
     char identity[128];
-    snprintf(identity, sizeof identity, "%u:%u:%u:%" PRIu64 ":%" PRIu64 ":%d",
-             p->pid, p->ppid, p->pgid, p->start, p->epoch, p->valid);
+    snprintf(identity, sizeof identity,
+             "%u:%u:%u:%" PRIu64 ":%" PRIu64 ":%" PRIu64 ":%d",
+             p->pid, p->ppid, p->pgid, p->start, p->epoch, p->flags, p->valid);
     digest_field(&hash, identity);
-    digest_field(&hash, p->name);
+    // Kernel workqueue comm describes mutable work, not task incarnation.
+    // PF_KTHREAD was positively checked in both stat reads; all other stat
+    // identity, validity and host enumeration fields remain in the digest.
+    if (!(p->flags & PF_KTHREAD))
+      digest_field(&hash, p->name);
     digest_field(&hash, p->sid);
     digest_field(&hash, p->city);
     digest_field(&hash, p->template);
@@ -552,11 +760,15 @@ static void scan(struct scan *s) {
   sha256_hex(&hash, s->digest);
   for (size_t i = 0; i < s->n; i++) {
     struct process *p = &s->p[i];
-    if (!p->valid || p->pid <= 1 || !p->sid || !*p->sid || infra(p->name))
+    if (!p->valid || p->absent || p->pid <= 1 || !p->sid || !*p->sid || infra(p->name))
       continue;
     struct process *par = parent(s, p->ppid);
-    if (p->ppid > 1 && (!par || !par->valid)) {
+    if (p->ppid > 1 && (!par || !par->valid || par->absent)) {
       add_error("parent_unavailable", "stat", p->pid, 0);
+      continue;
+    }
+    if (par && (par->flags & PF_KTHREAD)) {
+      add_error("parent_not_user_process", "stat", p->pid, 0);
       continue;
     }
     if (par && par->sid && !strcmp(par->sid, p->sid) && !infra(par->name))
@@ -569,6 +781,98 @@ static void scan(struct scan *s) {
     p->root = true;
     p->parent_infra = par && infra(par->name);
   }
+  live_digest(s,&s->live_n,s->live_digest);
+}
+static bool same_process(const struct process *a,const struct process *b) {
+  sha256_ctx x,y; char dx[65],dy[65]; sha256_init(&x);sha256_init(&y);
+  process_digest(&x,a);process_digest(&y,b);sha256_hex(&x,dx);sha256_hex(&y,dy);
+  return !strcmp(dx,dy);
+}
+static int missing_proof(struct process *old,struct process *new,int scan_index) {
+  if (protected_process(old)) return 0;
+  if (new && new->valid && !new->absent && new->pidfd_bound && new->start!=old->start) {
+    if (ev.proofs_n==MAX_ERRORS) { add_error("limit_reached","kernel_proof",old->pid,EFBIG);return 0; }
+    ev.proofs[ev.proofs_n++]=(struct proof_item){.kind=CENSUS_INCARNATION_RETIRED,
+      .method="pidfd_new_incarnation",.pid=old->pid,.start=old->start,
+      .replacement_start=new->start,.scan_index=scan_index,
+      .offset_ms=mono_ms()-((uint64_t)ev.monotonic_start.tv_sec*1000u+
+                           (uint64_t)ev.monotonic_start.tv_nsec/1000000u)};
+    old->absent=true;return (int)ev.proofs_n;
+  }
+  /* A genuine no-PID witness in this closing also retires a previously read
+   * incarnation. Keep the initial-absent witness separate, without a start. */
+  for (size_t i=0;i<ev.proofs_n;i++) {
+    struct proof_item q=ev.proofs[i];
+    if (q.pid==old->pid && q.scan_index==scan_index &&
+        (!strcmp(q.method,"pidfd_no_pid") || !strcmp(q.method,"fixture_pidfd_no_pid"))) {
+      if (q.start==old->start) { old->absent=true;return (int)i+1; }
+      if (!q.start && ev.proofs_n<MAX_ERRORS) {
+        q.start=old->start;q.kind=CENSUS_INCARNATION_RETIRED;
+        ev.proofs[ev.proofs_n++]=q;old->absent=true;return (int)ev.proofs_n;
+      }
+    }
+  }
+  int fd=process_pidfd(old->pid), error=fd==-1?errno:0;
+  int proof=error==ESRCH?record_absence(old,fd,error,false,scan_index):0;
+  if (fd>=0) close(fd);
+  return proof;
+}
+static void reconcile(struct scan *previous,struct scan *next,bool closing_pair) {
+  for (size_t i=0;i<previous->n;i++) {
+    struct process *p=&previous->p[i];
+    if (!p->valid || p->absent) continue;
+    struct process *q=parent(next,p->pid);
+    if (!q || !q->valid || q->absent || p->start!=q->start) {
+      if (!missing_proof(p,q,ev.scan_index))
+        add_error("unproved_retirement","kernel_proof",p->pid,0);
+    } else if (!same_process(p,q)) add_error("classification_changed","census",p->pid,0);
+  }
+  if (closing_pair) {
+    live_digest(previous,&ev.reconciled_n,ev.reconciled_digest);
+    size_t count;char digest[65];live_digest(next,&count,digest);
+    if (ev.reconciled_n!=count || strcmp(ev.reconciled_digest,digest))
+      add_error("closing_census_changed","census",0,0);
+  }
+}
+/* Final numeric enumeration and stat revalidation closes births/reuse that
+ * occur while the second closing is being read. New/unreadable live rows stay
+ * UNKNOWN; no caller-selected retries or extra wall-time are introduced. */
+static void seal_census(void) {
+  ev.scan_index=4;enumerate(&ev.seal);
+  sha256_ctx h;sha256_init(&h);
+  for (size_t i=0;i<ev.seal.n;i++) {
+    uint32_t pid=ev.seal.p[i].pid;
+    char id[32];snprintf(id,sizeof id,"%u",pid);digest_field(&h,id);
+    struct process *p=parent(&ev.after,pid);
+    if (!p) { add_error("uninspected_birth","census",pid,0);continue; }
+    if (p->absent) {
+      int fd=process_pidfd(pid), error=fd==-1?errno:0;
+      if (error!=ESRCH) add_error("birth_after_witness","census",pid,error);
+      if (fd>=0) close(fd);
+      continue;
+    }
+    if (!p->valid) continue; /* Original unresolved error is retained. */
+    struct process current={0};ev.current_start=p->start;
+    if (!read_stat(pid,&current)) {
+      int error=errno;size_t index=ev.errors_n;
+      add_error("process_unavailable","stat",pid,error);
+      int proof=error==ENOENT?missing_proof(p,NULL,4):0;
+      if (proof && ev.errors_n==index+1 && ev.errors_n==ev.errors_total) {
+        ev.errors[index].resolved_by=proof;ev.unresolved--;
+      }
+    } else if (p->start!=current.start || p->ppid!=current.ppid ||
+               p->pgid!=current.pgid || p->flags!=(current.flags&PF_KTHREAD))
+      add_error("uninspected_incarnation","census",pid,0);
+    ev.current_start=0;
+  }
+  sha256_hex(&h,ev.seal_pid_digest);
+  for (size_t i=0;i<ev.after.n;i++) {
+    struct process *p=&ev.after.p[i];
+    if (!p->valid || p->absent || parent(&ev.seal,p->pid)) continue;
+    if (!missing_proof(p,NULL,4)) add_error("unproved_retirement","kernel_proof",p->pid,0);
+  }
+  reconcile(&ev.closing,&ev.after,true);
+  live_digest(&ev.after,&ev.sealed_n,ev.sealed_digest);
 }
 static bool peer_binding(void) {
   struct ucred peer;
@@ -641,6 +945,12 @@ static bool parse_binding(unsigned char *buf, size_t n) {
       cap = sizeof ev.binding.helper_binary;
       if (!hex_string(eq, 64))
         return false;
+    } else if (!strcmp(line, "kernel_release")) {
+      bit=256; dst=ev.binding.kernel_release; cap=sizeof ev.binding.kernel_release;
+      if (strncmp(eq,"6.8.",4)) return false;
+    } else if (!strcmp(line, "kernel_proof_profile")) {
+      bit=512; dst=ev.binding.proof_profile; cap=sizeof ev.binding.proof_profile;
+      if (strcmp(eq,"linux6.8-pidfd-flags0-no-esrch-filters/v1")) return false;
     } else
       return false;
     if (seen & bit)
@@ -653,7 +963,7 @@ static bool parse_binding(unsigned char *buf, size_t n) {
     }
     line = strtok_r(NULL, "\n", &save);
   }
-  return seen == 255;
+  return seen == 1023;
 }
 static bool root_owned(int fd) {
   struct stat st;
@@ -818,7 +1128,7 @@ static bool parse_request(char *b) {
     if (!s)
       return false;
     if (!strcmp(key, "schema")) {
-      if ((fields & 1) || strcmp(value, "observe-host-processes/v1"))
+      if ((fields & 1) || strcmp(value, "observe-host-processes/v2"))
         return false;
       fields |= 1;
     } else if (!strcmp(key, "request_nonce")) {
@@ -914,6 +1224,20 @@ static int install_seccomp(void) {
       BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, CONNECTION_FD, 0, 1),
       BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
       BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_pidfd_open, 0, 13),
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data,args[0])+4),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data,args[0])),
+      BPF_JUMP(BPF_JMP | BPF_JGT | BPF_K, 0, 0, 7),
+      BPF_JUMP(BPF_JMP | BPF_JGT | BPF_K, INT32_MAX, 6, 0),
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data,args[1])+4),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data,args[1])),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
       /* mmap/mprotect never grant executable memory. */
       BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mmap, 1, 0),
       BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_mprotect, 0, 4),
@@ -970,7 +1294,7 @@ static void string(struct output *o, const char *s) {
 static void output(struct output *o, bool include_roots) {
   emit(o,
        "{\"schema\":\"host-process-evidence/"
-       "v1\",\"scope\":\"%s\",\"request_nonce\":",
+       "v2\",\"scope\":\"%s\",\"request_nonce\":",
        fixture ? "fixture_procfs" : "host_procfs");
   string(o, ev.nonce);
   emit(o,
@@ -996,7 +1320,7 @@ static void output(struct output *o, bool include_roots) {
   if (include_roots)
     for (size_t i = 0; i < ev.after.n; i++) {
       struct process *p = &ev.after.p[i];
-      if (!p->root)
+      if (!p->root || p->absent)
         continue;
       if (comma)
         emit(o, ",");
@@ -1023,11 +1347,34 @@ static void output(struct output *o, bool include_roots) {
     struct error_item *e = &ev.errors[i];
     if (i)
       emit(o, ",");
-    emit(o, "{\"reason\":\"%s\",\"operation\":\"%s\",\"pid\":%u,\"errno\":%d}",
-         e->reason, e->operation, e->pid, e->error);
+    emit(o, "{\"reason\":\"%s\",\"operation\":\"%s\",\"pid\":%u,\"errno\":%d,\"scan_index\":%d,\"resolved_by\":%d,\"start_ticks\":",
+         e->reason, e->operation, e->pid, e->error,e->scan_index,e->resolved_by);
+    if (e->start) emit(o,"\"%" PRIu64 "\"",e->start); else emit(o,"null");
+    emit(o,"}");
   }
-  emit(o, "],\"errors_total\":%zu,\"errors_truncated\":%s}", ev.errors_total,
+  emit(o, "],\"errors_total\":%zu,\"errors_truncated\":%s,\"kernel_release\":", ev.errors_total,
        ev.errors_total > ev.errors_n ? "true" : "false");
+  string(o,ev.binding.kernel_release); emit(o,",\"kernel_proof_profile\":");
+  string(o,ev.binding.proof_profile);
+  emit(o,",\"census\":{\"closings\":[");
+  struct scan *closings[]={&ev.closing,&ev.after};
+  for (size_t i=0;i<2;i++) {
+    struct scan *c=closings[i];
+    if (i) emit(o,",");
+    emit(o,"{\"scan_index\":%zu,\"enumerated_count\":%zu,\"enumeration_digest\":\"%s\",\"live_count\":%zu,\"live_digest\":\"%s\"}",
+      i+2,c->n,c->digest,c->live_n,c->live_digest);
+  }
+  emit(o,"],\"reconciled_count\":%zu,\"reconciled_digest\":\"%s\",\"seal\":{\"scan_index\":4,\"enumerated_count\":%zu,\"pid_digest\":\"%s\",\"classified_count\":%zu,\"classified_digest\":\"%s\"},\"proofs\":[",ev.reconciled_n,ev.reconciled_digest,ev.seal.n,ev.seal_pid_digest,ev.sealed_n,ev.sealed_digest);
+  for (size_t i=0;i<ev.proofs_n;i++) {
+    struct proof_item *p=&ev.proofs[i];if (i) emit(o,",");
+    emit(o,"{\"kind\":\"%s\",\"method\":\"%s\",\"pid\":%u,\"start_ticks\":",
+      p->kind==CENSUS_ENUMERATED_ABSENT?"enumerated_pid_absent":"incarnation_retired",p->method,p->pid);
+    if (p->start) emit(o,"\"%" PRIu64 "\"",p->start);else emit(o,"null");
+    emit(o,",\"replacement_start\":");
+    if (p->replacement_start) emit(o,"\"%" PRIu64 "\"",p->replacement_start);else emit(o,"\"\"");
+    emit(o,",\"scan_index\":%d,\"offset_ms\":%" PRIu64 ",\"protected_identity\":false}",p->scan_index,p->offset_ms);
+  }
+  emit(o,"]}}");
 }
 static void timestamp(struct timespec t, char out[40]) {
   struct tm utc;
@@ -1089,14 +1436,38 @@ static int sandbox_selftest(void) {
   DENIED(SYS_open_by_handle_at, -1, 0, 0, 0, 0, 0);
   DENIED(SYS_ioctl, -1, 0, 0, 0, 0, 0);
   DENIED(SYS_io_uring_setup, 0, 0, 0, 0, 0, 0);
+  DENIED(SYS_pidfd_open, own, 1, 0, 0, 0, 0);
+  DENIED(SYS_pidfd_open, 0, 0, 0, 0, 0, 0);
+  DENIED(SYS_pidfd_open, -1, 0, 0, 0, 0, 0);
+  DENIED(SYS_pidfd_open, own, 1ULL<<32, 0, 0, 0, 0);
+  DENIED(SYS_pidfd_getfd, -1, 0, 0, 0, 0, 0);
   DENIED(SYS_pidfd_send_signal, -1, 0, 0, 0, 0, 0);
   DENIED(SYS_write, STDOUT_FILENO, "x", 1, 0, 0, 0);
 #undef DENIED
+  int permitted=(int)syscall(SYS_pidfd_open,own,0);
+  if (permitted<0) return 5;
+  if (close(permitted)) return 5;
   return 0;
 }
 #endif
+static bool kernel_proof_provenance(void) {
+#ifdef GC_HELPER_TEST
+  if (fixture) return true;
+#endif
+  struct utsname u;
+  if (uname(&u) || strcmp(u.release,ev.binding.kernel_release) || strncmp(u.release,"6.8.",4)) return false;
+  char path[64]; snprintf(path,sizeof path,"%u/status",(unsigned)getpid());
+  size_t n; unsigned char *b=read_proc(path,65536,&n);
+  if (!b) return false;
+  b[n]=0; char *t=strstr((char *)b,"\nTracerPid:");
+  char *end=NULL;
+  unsigned long tracer=t?strtoul(t+11,&end,10):1;
+  bool ok=t && end!=t+11 && end && *end=='\n' && tracer==0;
+  free(b);return ok;
+}
 int main(int argc, char **argv) {
   ev.complete = true;
+  ev.processfd=-1; ev.active_pidfd=-1;
   clock_gettime(CLOCK_MONOTONIC, &ev.monotonic_start);
   clock_gettime(CLOCK_REALTIME, &ev.realtime_start);
   timestamp(ev.realtime_start, ev.started);
@@ -1137,6 +1508,8 @@ int main(int argc, char **argv) {
     return 2;
   if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0))
     return 2;
+  if (!kernel_proof_provenance()) return 2;
+  ev.trusted_kernel=true;
   /* Nonblocking writes preserve the deadline; SIGPIPE is ignored above. */
   int flags = fcntl(CONNECTION_FD, F_GETFL);
   if (flags < 0 || fcntl(CONNECTION_FD, F_SETFL, flags | O_NONBLOCK))
@@ -1144,10 +1517,18 @@ int main(int argc, char **argv) {
   if (install_seccomp()) {
     add_error("sandbox_unavailable", "startup", 0, errno);
   } else {
-    scan(&ev.before);
-    scan(&ev.after);
-    if (ev.before.n != ev.after.n || strcmp(ev.before.digest, ev.after.digest))
-      add_error("coverage_changed", "enumerate", 0, 0);
+    ev.scan_index=1; scan(&ev.before);
+    ev.scan_index=2; scan(&ev.closing); reconcile(&ev.before,&ev.closing,false);
+    ev.scan_index=3; scan(&ev.after); reconcile(&ev.closing,&ev.after,true);
+    seal_census();
+    if (ev.before.n != ev.after.n || strcmp(ev.before.digest,ev.after.digest)) {
+      size_t index=ev.errors_n;
+      bool resolved=ev.unresolved==0;
+      add_error("coverage_changed","enumerate",0,0);
+      if (resolved && ev.errors_n==index+1 && ev.errors_n==ev.errors_total) {
+        ev.errors[index].resolved_by=-1;ev.unresolved--;
+      }
+    }
     if (!peer_binding())
       add_error("caller_binding_changed", "binding", ev.binding.pid, 0);
     char boot[37];
@@ -1166,12 +1547,14 @@ int main(int argc, char **argv) {
       (finished.tv_sec == ev.realtime_start.tv_sec &&
        finished.tv_nsec < ev.realtime_start.tv_nsec))
     add_error("clock_reversal", "identity", 0, 0);
+  ev.complete=ev.unresolved==0;
   struct output o = {.b = malloc(MAX_OUTPUT)};
   if (!o.b)
     return 2;
   output(&o, true);
   if (o.overflow) {
     add_error("response_limit", "response", 0, EFBIG);
+    ev.complete=false;
     o.n = 0;
     o.overflow = false;
     output(&o, false);

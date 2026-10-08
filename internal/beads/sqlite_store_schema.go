@@ -29,6 +29,9 @@ func inspectSQLiteStoreSchemaAtPath(ctx context.Context, databasePath string) (l
 }
 
 const (
+	// Reader compatibility only: store creation does not install this index.
+	sqliteSchemaActiveTypeIndex = `CREATE INDEX idx_beads_active_type ON beads(tier, issue_type, status) WHERE status <> 'closed'`
+
 	sqliteSchemaKVTable = `CREATE TABLE kv (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
@@ -128,6 +131,7 @@ func sqliteStoreCreationSchemaStatements() []string {
 type sqliteStoreSchemaLayout struct {
 	hasRevisionColumn    bool
 	legacyDepsPrimaryKey bool
+	hasActiveTypeIndex   bool
 }
 
 type sqliteSchemaObject struct {
@@ -167,8 +171,8 @@ type sqliteSchemaForeignKey struct {
 	match    string
 }
 
-// ValidateSQLiteStoreSchema verifies that db uses one of the four exact
-// deployed SQLite bead-store schema layouts.
+// ValidateSQLiteStoreSchema verifies the exact legacy and active-index
+// SQLite bead-store schema layouts.
 func ValidateSQLiteStoreSchema(ctx context.Context, db *sql.DB) error {
 	_, err := inspectSQLiteStoreSchema(ctx, db)
 	return err
@@ -231,8 +235,11 @@ func matchCanonicalSQLiteSchemaObjects(actual []sqliteSchemaObject) (sqliteStore
 		{hasRevisionColumn: true, legacyDepsPrimaryKey: false},
 		{hasRevisionColumn: true, legacyDepsPrimaryKey: true},
 	} {
-		if reflect.DeepEqual(actual, canonicalSQLiteSchemaObjects(layout)) {
-			return layout, true
+		for _, activeIndex := range []bool{false, true} {
+			layout.hasActiveTypeIndex = activeIndex
+			if reflect.DeepEqual(actual, canonicalSQLiteSchemaObjects(layout)) {
+				return layout, true
+			}
 		}
 	}
 	return sqliteStoreSchemaLayout{}, false
@@ -262,6 +269,10 @@ func canonicalSQLiteSchemaObjects(layout sqliteStoreSchemaLayout) []sqliteSchema
 	for _, statement := range sqliteSchemaIndexStatements {
 		name, table := sqliteSchemaIndexIdentity(statement)
 		objects = append(objects, sqliteSchemaObject{kind: "index", name: name, table: table, sql: statement})
+	}
+	if layout.hasActiveTypeIndex {
+		name, table := sqliteSchemaIndexIdentity(sqliteSchemaActiveTypeIndex)
+		objects = append(objects, sqliteSchemaObject{kind: "index", name: name, table: table, sql: sqliteSchemaActiveTypeIndex})
 	}
 	for index := range objects {
 		objects[index].sql = normalizeSQLiteSchemaSQL(objects[index].sql)
@@ -523,6 +534,11 @@ func canonicalSQLiteSchemaIndexes(layout sqliteStoreSchemaLayout) map[string][]s
 	}
 	if layout.legacyDepsPrimaryKey {
 		indexes["deps"][2].columns = []string{"issue_id", "depends_on_id", "dep_type"}
+	}
+	if layout.hasActiveTypeIndex {
+		indexes["beads"] = append([]sqliteSchemaIndex{
+			{name: "idx_beads_active_type", origin: "c", partial: 1, columns: []string{"tier", "issue_type", "status"}},
+		}, indexes["beads"]...)
 	}
 	return indexes
 }

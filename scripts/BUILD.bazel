@@ -44,6 +44,7 @@ go_test(
         "sign_darwin_local_test.go",
         "test_go_test_shard_test.go",
         "test_integration_shard_test.go",
+        "test_local_bd_tool_carrier_test.go",
         "test_local_parallel_budget_test.go",
         "test_slice_enroll_test.go",
         "test_timing_plan_test.go",

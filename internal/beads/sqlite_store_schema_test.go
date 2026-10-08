@@ -14,38 +14,46 @@ import (
 func TestSQLiteStoreAcceptsOnlyCanonicalDeployedSchemaLayoutsWithoutRewrite(t *testing.T) {
 	for _, revision := range []bool{false, true} {
 		for _, legacyDeps := range []bool{false, true} {
-			name := fmt.Sprintf("revision=%t/legacy-deps=%t", revision, legacyDeps)
-			t.Run(name, func(t *testing.T) {
-				dir := t.TempDir()
-				createSQLiteSchemaFixture(t, dir, revision, legacyDeps, nil)
-				before := snapshotSQLiteSchemaSource(t, dir)
+			for _, activeIndex := range []bool{false, true} {
+				name := fmt.Sprintf("revision=%t/legacy-deps=%t/active-index=%t", revision, legacyDeps, activeIndex)
+				t.Run(name, func(t *testing.T) {
+					dir := t.TempDir()
+					var mutate func([]string) []string
+					if activeIndex {
+						mutate = func(statements []string) []string {
+							return append(statements, `CREATE INDEX idx_beads_active_type ON beads(tier, issue_type, status) WHERE status <> 'closed'`)
+						}
+					}
+					createSQLiteSchemaFixture(t, dir, revision, legacyDeps, mutate)
+					before := snapshotSQLiteSchemaSource(t, dir)
 
-				for _, readOnly := range []bool{true, false} {
-					options := []SQLiteStoreOption{WithSQLiteStoreIDPrefix(sqliteGraphPrefix)}
-					if readOnly {
-						options = append(options, WithSQLiteStoreReadOnly())
+					for _, readOnly := range []bool{true, false} {
+						options := []SQLiteStoreOption{WithSQLiteStoreIDPrefix(sqliteGraphPrefix)}
+						if readOnly {
+							options = append(options, WithSQLiteStoreReadOnly())
+						}
+						opened, err := OpenSQLiteStore(dir, options...)
+						if err != nil {
+							t.Fatalf("OpenSQLiteStore(readOnly=%t): %v", readOnly, err)
+						}
+						store := opened.(*SQLiteStore)
+						if store.hasRevisionColumn != revision {
+							_ = store.CloseStore()
+							t.Fatalf("hasRevisionColumn = %t, want %t", store.hasRevisionColumn, revision)
+						}
+						if store.legacyDepsPrimaryKey != legacyDeps {
+							_ = store.CloseStore()
+							t.Fatalf("legacyDepsPrimaryKey = %t, want %t", store.legacyDepsPrimaryKey, legacyDeps)
+						}
+						if err := store.CloseStore(); err != nil {
+							t.Fatalf("CloseStore(readOnly=%t): %v", readOnly, err)
+						}
+						if after := snapshotSQLiteSchemaSource(t, dir); !reflect.DeepEqual(after, before) {
+							t.Fatalf("canonical open(readOnly=%t) rewrote source:\n--- before ---\n%#v\n--- after ---\n%#v", readOnly, before, after)
+						}
 					}
-					opened, err := OpenSQLiteStore(dir, options...)
-					if err != nil {
-						t.Fatalf("OpenSQLiteStore(readOnly=%t): %v", readOnly, err)
-					}
-					store := opened.(*SQLiteStore)
-					if store.hasRevisionColumn != revision {
-						_ = store.CloseStore()
-						t.Fatalf("hasRevisionColumn = %t, want %t", store.hasRevisionColumn, revision)
-					}
-					if store.legacyDepsPrimaryKey != legacyDeps {
-						_ = store.CloseStore()
-						t.Fatalf("legacyDepsPrimaryKey = %t, want %t", store.legacyDepsPrimaryKey, legacyDeps)
-					}
-					if err := store.CloseStore(); err != nil {
-						t.Fatalf("CloseStore(readOnly=%t): %v", readOnly, err)
-					}
-					if after := snapshotSQLiteSchemaSource(t, dir); !reflect.DeepEqual(after, before) {
-						t.Fatalf("canonical open(readOnly=%t) rewrote source:\n--- before ---\n%#v\n--- after ---\n%#v", readOnly, before, after)
-					}
-				}
-			})
+				})
+			}
 		}
 	}
 }
@@ -55,6 +63,48 @@ func TestSQLiteStoreRejectsSchemaDriftBeforeReadOnlyOrWritableMutation(t *testin
 		name   string
 		mutate func([]string) []string
 	}{
+		{
+			name: "active_index_wrong_predicate",
+			mutate: func(statements []string) []string {
+				return append(statements, `CREATE INDEX idx_beads_active_type ON beads(tier, issue_type, status) WHERE status = 'open'`)
+			},
+		},
+		{
+			name: "active_index_wrong_column_order",
+			mutate: func(statements []string) []string {
+				return append(statements, `CREATE INDEX idx_beads_active_type ON beads(tier, status, issue_type) WHERE status <> 'closed'`)
+			},
+		},
+		{
+			name: "active_index_extra_column",
+			mutate: func(statements []string) []string {
+				return append(statements, `CREATE INDEX idx_beads_active_type ON beads(tier, issue_type, status, assignee) WHERE status <> 'closed'`)
+			},
+		},
+		{
+			name: "active_index_unique",
+			mutate: func(statements []string) []string {
+				return append(statements, `CREATE UNIQUE INDEX idx_beads_active_type ON beads(tier, issue_type, status) WHERE status <> 'closed'`)
+			},
+		},
+		{
+			name: "active_index_full",
+			mutate: func(statements []string) []string {
+				return append(statements, `CREATE INDEX idx_beads_active_type ON beads(tier, issue_type, status)`)
+			},
+		},
+		{
+			name: "active_index_wrong_name",
+			mutate: func(statements []string) []string {
+				return append(statements, `CREATE INDEX idx_research_active_type ON beads(tier, issue_type, status) WHERE status <> 'closed'`)
+			},
+		},
+		{
+			name: "analyze_statistics",
+			mutate: func(statements []string) []string {
+				return append(statements, `ANALYZE`)
+			},
+		},
 		{
 			name: "user_version",
 			mutate: func(statements []string) []string {

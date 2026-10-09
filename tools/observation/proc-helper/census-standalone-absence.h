@@ -52,6 +52,23 @@ static inline bool census_standalone_prior(const struct census_history *h,uint32
   }
   return true;
 }
+/* Direct known-start retirement binds the original environ fault to an
+ * unchanged, fully verified NONMANAGED incarnation. Nullable pairs retain
+ * their separate grammar below. */
+static inline bool census_standalone_knownstart_valid(const struct census_global_source *s,
+    const struct census_global_fault *e,const struct census_owned_identity **known) {
+  if(!census_absence_raw_eligible(e) || !e->raw.start || !e->raw.operation ||
+      strcmp(e->raw.operation,"environ") || e->raw.error!=ESRCH ||
+      e->scan_index<2 || e->scan_index>s->history->n ||
+      !census_standalone_prior(s->history,e->raw.pid,e->scan_index-1,known) ||
+      !*known || (*known)->start!=e->raw.start) return false;
+  for(unsigned scan=0;scan<s->history->n;scan++) {
+    const struct census_history_row *row=census_history_find(&s->history->scans[scan],e->raw.pid);
+    if(!census_row_verified(row)) continue;
+    if(scan>=e->scan_index-1 || !census_same_owned(*known,&row->identity)) return false;
+  }
+  return true;
+}
 static inline bool census_standalone_history_valid(const struct census_global_source *s,
     const struct census_resolution_ledger *r) {
   for(unsigned i=0;i<r->proofs_n;i++) {
@@ -127,7 +144,22 @@ static inline bool census_standalone_history_valid(const struct census_global_so
         if(q->source.kind==CENSUS_ENUMERATED_ABSENT && q->source.pid==v->pid &&
             q->source.scan_index==v->scan_index && q->source.offset_ms==v->offset_ms) matching++;
       }
-      if(matching!=1) return false;
+      if(!matching) {
+        unsigned links=0;
+        if(v->kind!=CENSUS_INCARNATION_RETIRED || strcmp(v->method,"pidfd_no_pid")) return false;
+        for(unsigned k=0;k<r->resolutions_n;k++) {
+          const struct census_typed_resolution *link=&r->resolutions[k];
+          if(link->proof_index!=i+1) continue;
+          if(link->kind!=CENSUS_RESOLUTION_ABSENCE || link->classified_scan || link->selected_seal ||
+              !link->error_index || link->error_index>s->errors_n) return false;
+          const struct census_global_fault *e=&s->errors[link->error_index-1];
+          const struct census_owned_identity *prior=NULL;
+          if(!census_standalone_knownstart_valid(s,e,&prior) || !census_absence_proof_matches(e,v) ||
+              v->offset_ms<s->history->scans[e->scan_index-1].receipt.offset_ms) return false;
+          links++;
+        }
+        if(links!=1) return false;
+      } else if(matching!=1) return false;
       for(unsigned scan=(unsigned)v->scan_index-1;scan<s->history->n;scan++) {
         const struct census_history_row *later=census_history_find(&s->history->scans[scan],v->pid);
         if(census_row_verified(later) && later->identity.start==v->start) return false;
@@ -144,13 +176,16 @@ static inline bool census_resolve_standalone(struct census_global_source *s,
   const struct census_global_fault *e=&s->errors[error_index-1];
   bool zombie_fault=e->raw.operation && !strcmp(e->raw.operation,"pidfd_poll") &&
     e->raw.error==ESTALE && !e->raw.start;
+  bool knownstart_fault=e->raw.start && e->raw.operation && !strcmp(e->raw.operation,"environ") &&
+    e->raw.error==ESRCH;
   if(!census_absence_raw_eligible(e) || !e->scan_index || e->scan_index>s->history->n ||
-      (!zombie_fault && (e->raw.start || strcmp(e->raw.operation,"pidfd_open") ||
+      (!zombie_fault && !knownstart_fault && (e->raw.start || strcmp(e->raw.operation,"pidfd_open") ||
         (e->raw.error!=ESRCH && e->raw.error!=EINVAL)))) return false;
   for(unsigned i=0;i<r->resolutions_n;i++) if(r->resolutions[i].error_index==error_index) return false;
   const struct census_owned_identity *known=NULL;
   if(!census_standalone_prior(s->history,e->raw.pid,e->scan_index-1,&known) ||
-      r->proofs_n>128-(known?2u:1u)) return false;
+      r->proofs_n>128-((known && !knownstart_fault)?2u:1u)) return false;
+  if(knownstart_fault && !census_standalone_knownstart_valid(s,e,&known)) return false;
   if(zombie_fault) {
     uint64_t zombie_start=0;
     if(known || !census_terminal_zombie(e->raw.pid,s->budget,&zombie_start)) return false;
@@ -169,16 +204,17 @@ static inline bool census_resolve_standalone(struct census_global_source *s,
   /* ORIGerrno only selects this guarded path; this separate syscall is proof. */
   int fd=(int)syscall(SYS_pidfd_open,e->raw.pid,0),error=errno;
   if(fd>=0) {census_fd_take(s->budget,fd);census_fd_close(s->budget,fd);return false;}
-  struct census_probe probe={.pid=e->raw.pid,.syscall_errno=error,
+  struct census_probe probe={.pid=e->raw.pid,.start=knownstart_fault?e->raw.start:0,.syscall_errno=error,
     .trusted_kernel=ev.trusted_kernel,.same_namespace=true};
-  if(census_absence(&probe)!=CENSUS_ENUMERATED_ABSENT || expired() || s->budget->fd_failed) return false;
+  if(census_absence(&probe)!=(knownstart_fault?CENSUS_INCARNATION_RETIRED:CENSUS_ENUMERATED_ABSENT) || expired() || s->budget->fd_failed) return false;
   uint64_t start=(uint64_t)ev.monotonic_start.tv_sec*1000u+(uint64_t)ev.monotonic_start.tv_nsec/1000000u;
   uint64_t now=mono_ms();if(now<start || now-start>=10000) return false;
-  struct proof_item absence={.kind=CENSUS_ENUMERATED_ABSENT,.method="pidfd_no_pid",.pid=e->raw.pid,
+  struct proof_item absence={.kind=knownstart_fault?CENSUS_INCARNATION_RETIRED:CENSUS_ENUMERATED_ABSENT,
+    .method="pidfd_no_pid",.pid=e->raw.pid,.start=knownstart_fault?e->raw.start:0,
     .scan_index=(int)s->history->n,.offset_ms=now-start};
   unsigned index=r->proofs_n+1;
   r->proofs[r->proofs_n++]=(struct census_typed_proof){.source=absence};
-  if(known) {
+  if(known && !knownstart_fault) {
     struct proof_item retirement=absence;retirement.kind=CENSUS_INCARNATION_RETIRED;retirement.start=known->start;
     r->proofs[r->proofs_n++]=(struct census_typed_proof){.source=retirement};
   }

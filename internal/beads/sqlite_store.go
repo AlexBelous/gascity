@@ -213,6 +213,8 @@ func sqliteBusyBackoff(attempt int) time.Duration {
 // Concurrency model: a single write connection serializes mutations; a pool
 // of 8 read connections allows concurrent reads in WAL mode.
 type SQLiteStore struct {
+	// Validated on open; index rollouts must reopen existing handles.
+	hasActiveTypeIndex         bool
 	db                         *sql.DB // write connection (MaxOpenConns=1)
 	readDB                     *sql.DB // read pool (MaxOpenConns=8)
 	path                       string
@@ -347,6 +349,7 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 	}
 	s.hasRevisionColumn = layout.hasRevisionColumn
 	s.legacyDepsPrimaryKey = layout.legacyDepsPrimaryKey
+	s.hasActiveTypeIndex = layout.hasActiveTypeIndex
 	if err := s.recoverSequence(context.Background()); err != nil {
 		db.Close() //nolint:errcheck
 		return nil, err
@@ -1404,7 +1407,7 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	sqlText, args := sqliteListSQL(query, s.sqliteBeadProjection())
+	sqlText, args := sqliteActiveSessionListSQL(query, s.sqliteBeadProjection(), s.hasActiveTypeIndex)
 	rows, err := s.readDB.QueryContext(context.Background(), sqlText, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing sqlite beads: %w", err)
@@ -2150,4 +2153,13 @@ func numericIDSuffix(id string) int {
 	}
 	n, _ := strconv.Atoi(id)
 	return n
+}
+
+// sqliteActiveSessionListSQL keeps selective and ordered queries on their original plans.
+func sqliteActiveSessionListSQL(query ListQuery, projection string, hasActiveIndex bool) (string, []any) {
+	sqlText, args := sqliteListSQL(query, projection)
+	if hasActiveIndex && query.Type == "session" && query.TierMode == TierBoth && query.Status == "" && !query.IncludeClosed && len(query.Metadata) == 0 && len(query.IDs) == 0 && query.ParentID == "" && len(query.ParentIDs) == 0 && query.Assignee == "" && len(query.Assignees) == 0 && query.Label == "" && query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero() && query.SeekAfter == nil && query.Limit == 0 && query.Sort == "" {
+		sqlText = strings.Replace(sqlText, " FROM beads b", " FROM beads b INDEXED BY idx_beads_active_type", 1)
+	}
+	return sqlText, args
 }

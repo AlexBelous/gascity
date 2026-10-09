@@ -157,7 +157,11 @@ func TestSQLiteActiveSessionHintDropIndexRequiresReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := opened.(*SQLiteStore)
-	defer store.CloseStore()
+	t.Cleanup(func() {
+		if err := store.CloseStore(); err != nil {
+			t.Error(err)
+		}
+	})
 	if _, err := store.Create(Bead{ID: "gcg-drop-fixture", Title: "fixture", Type: "session", Status: "open"}); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +184,11 @@ func TestSQLiteActiveSessionHintDropIndexRequiresReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := nextOpened.(*SQLiteStore)
-	defer next.CloseStore()
+	t.Cleanup(func() {
+		if err := next.CloseStore(); err != nil {
+			t.Error(err)
+		}
+	})
 	if next.hasActiveTypeIndex {
 		t.Fatal("dropped index still cached after reopen")
 	}

@@ -41,6 +41,9 @@ func TestSQLiteActiveSessionHintSelectorContract(t *testing.T) {
 			tc.change(&q)
 			want, args := sqliteListSQL(q, "b.bead_json")
 			got, gotArgs := sqliteActiveSessionListSQL(q, "b.bead_json", tc.hasIndex)
+			if strings.Contains(got, "INDEXED BY idx_beads_active_type") != tc.hint {
+				t.Fatalf("active index hint presence does not match contract: %q", got)
+			}
 			if tc.hint {
 				want = strings.Replace(want, " FROM beads b", " FROM beads b INDEXED BY idx_beads_active_type", 1)
 			}
@@ -143,5 +146,49 @@ func TestSQLiteActiveSessionHintRequiresReopenAfterDDL(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, final) {
 		t.Fatal("reopen changed full rows")
+	}
+}
+
+func TestSQLiteActiveSessionHintDropIndexRequiresReopen(t *testing.T) {
+	dir := t.TempDir()
+	createSQLiteSchemaFixture(t, dir, true, false, func(sql []string) []string { return append(sql, sqliteSchemaActiveTypeIndex) })
+	opened, err := OpenSQLiteStore(dir, WithSQLiteStoreIDPrefix(sqliteGraphPrefix), WithSQLiteStoreRetention(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := opened.(*SQLiteStore)
+	defer store.CloseStore()
+	if _, err := store.Create(Bead{ID: "gcg-drop-fixture", Title: "fixture", Type: "session", Status: "open"}); err != nil {
+		t.Fatal(err)
+	}
+	query := ListQuery{Type: "session", TierMode: TierBoth}
+	before, err := store.List(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec("DROP INDEX idx_beads_active_type"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.List(query); err == nil || !strings.Contains(err.Error(), "no such index") {
+		t.Fatalf("expected stale hinted handle failure; got %v", err)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+	nextOpened, err := OpenSQLiteStore(dir, WithSQLiteStoreIDPrefix(sqliteGraphPrefix), WithSQLiteStoreReadOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := nextOpened.(*SQLiteStore)
+	defer next.CloseStore()
+	if next.hasActiveTypeIndex {
+		t.Fatal("dropped index still cached after reopen")
+	}
+	after, err := next.List(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("drop/reopen changed rows")
 	}
 }

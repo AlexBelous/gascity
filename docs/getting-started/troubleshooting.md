@@ -651,17 +651,44 @@ defaults is reached:
 - `GC_JSONL_GC_LOOSE_KB=262144` (256 MiB)
 
 Packing is deliberately single-threaded and uses
-`GC_JSONL_GC_WINDOW_MEMORY=256m` to avoid competing with the Dolt server and
-worker sessions for memory. These values can be lowered for small hosts. An
-invalid count/size value or failed maintenance run fails the order visibly;
-the exporter does not continue creating loose objects after maintenance has
-failed.
+`GC_JSONL_GC_WINDOW_MEMORY=256m` (a positive byte count, without leading
+zeros, with an optional `k`, `m`, or `g` suffix in either case) to avoid
+competing with the Dolt server and worker sessions for memory. These values
+can be lowered for small hosts.
 
-To inspect an archive manually without changing it:
+Packing writes a new copy of the archive's objects before it deletes the old
+ones. It starts only when the archive's filesystem can hold that copy and
+still keep `GC_JSONL_GC_MIN_FREE_KB=512000` (500 MiB) free; otherwise the
+order fails with a message giving the free space. The check counts loose
+objects at their full size, though snapshots usually pack to a small fraction
+of it: one archive's 9.01 GiB of loose objects packed to 67.40 MiB. So an
+archive with a large backlog of loose objects can be refused on every run
+even when packing it would fit. To recover, pack it once by hand with the
+command the failure message prints (or the lower-memory one below), free disk
+space, or set `GC_JSONL_GC_MIN_FREE_KB=0` to disable the check. If `df`
+cannot report the free space, packing goes ahead with a warning.
+
+An invalid setting fails the order before it exports anything. A refused
+free-space check or a failed `git gc` fails the order visibly, and later runs
+export no new snapshots until packing succeeds. Snapshots already committed
+still reach `origin`: a run packs only after its push, and a run that finds
+the archive cannot be packed pushes any waiting snapshot before it stops. A
+spike halt sends its alert, or saves it for retry, before it packs.
+
+To inspect the archive without changing it:
 
 ```bash
+# The default location. GC_JSONL_ARCHIVE_REPO overrides it, and cities
+# migrated from the gastown maintenance pack keep their legacy path.
+ARCHIVE="$(gc status --json | jq -r '.city_path')/.gc/runtime/packs/core/jsonl-archive"
 git -C "$ARCHIVE" count-objects -vH
 git -C "$ARCHIVE" fsck --connectivity-only
+```
+
+To pack it once by hand with less memory:
+
+```bash
+git -C "$ARCHIVE" -c pack.windowMemory=64m -c pack.threads=1 gc
 ```
 
 ### Enabling off-box backup

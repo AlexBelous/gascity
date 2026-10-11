@@ -51,6 +51,68 @@ static inline bool census_same_classified(const struct census_history_row *a,
   return census_same_owned(&a->identity,&b->identity);
 }
 #include "census-closing-reconcile.h"
+/* No new witness: link a FULL NONMANAGED seal birth to its indexed kernel pair. */
+static inline bool census_retired_birth_link_valid(const struct census_global_source *s,
+    const struct census_resolution_ledger *r,const struct census_typed_resolution *v,
+    const struct census_round_journal *j) {
+  if(v->kind!=CENSUS_RESOLUTION_RETIRED_BIRTH || !v->error_index || v->error_index>s->errors_n ||
+      !v->proof_index || v->proof_index>r->proofs_n || v->selected_seal!=j->selected_seal ||
+      j->selected_seal!=s->history->n || j->selected_first+1!=j->selected_second ||
+      j->selected_second+1!=j->selected_seal || !ev.trusted_kernel || fixture ||
+      !ev.ns[0] || strcmp(ev.ns,ev.binding.ns) || r->denied || expired() || s->budget->fd_failed ||
+      !census_typed_proofs_valid(r) || !census_standalone_history_valid(s,r)) return false;
+  const struct census_global_fault *e=&s->errors[v->error_index-1];
+  if(!census_positive_birth(s,e) || !e->raw.start || e->scan_index>=j->selected_first ||
+      s->history->scans[e->scan_index-1].receipt.kind!=CENSUS_SEAL ||
+      census_history_find(&s->history->scans[e->scan_index-2],e->raw.pid)) return false;
+  const struct census_typed_proof *typed=&r->proofs[v->proof_index-1];const struct proof_item *p=&typed->source;
+  if(p->kind!=CENSUS_INCARNATION_RETIRED || strcmp(p->method,"pidfd_no_pid") ||
+      p->pid!=e->raw.pid || p->start!=e->raw.start || typed->protected_identity || typed->certificate_id ||
+      p->scan_index<=(int)e->scan_index || p->scan_index>(int)j->selected_seal ||
+      v->classified_scan<=e->scan_index || v->classified_scan>=(unsigned)p->scan_index) return false;
+  unsigned pairs=0;
+  for(unsigned k=0;k<v->proof_index-1;k++) {
+    const struct census_typed_proof *q=&r->proofs[k];
+    if(q->source.kind==CENSUS_ENUMERATED_ABSENT && !q->source.start &&
+        !strcmp(q->source.method,"pidfd_no_pid") && q->source.pid==p->pid &&
+        q->source.scan_index==p->scan_index && q->source.offset_ms==p->offset_ms &&
+        !q->protected_identity && !q->certificate_id) pairs++;
+  }
+  if(pairs!=1) return false;
+  const struct census_history_row *original=census_history_find(&s->history->scans[e->scan_index-1],p->pid);
+  const struct census_history_row *prior=census_history_find(&s->history->scans[v->classified_scan-1],p->pid);
+  if(!census_same_classified(original,prior) || original->classification!=CENSUS_CLASS_NONMANAGED ||
+      original->identity.declared_root || infra(original->identity.name)) return false;
+  for(unsigned scan=0;scan<s->history->n;scan++) {
+    const struct census_history_row *row=census_history_find(&s->history->scans[scan],p->pid);
+    if(scan>=(unsigned)p->scan_index-1) {
+      if(census_row_verified(row)) return false;
+    } else if(census_row_verified(row)) {
+      if(row->classification!=CENSUS_CLASS_NONMANAGED || row->identity.declared_root || infra(row->identity.name)) return false;
+      if(scan>=e->scan_index-1 && !census_same_classified(original,row)) return false;
+    }
+  }
+  return census_closing_survivors_equal(s,r,&s->history->scans[j->selected_first-1],&s->history->scans[j->selected_seal-1]) &&
+    census_closing_survivors_equal(s,r,&s->history->scans[j->selected_second-1],&s->history->scans[j->selected_seal-1]);
+}
+static inline bool census_finish_retired_birth(struct census_global_source *s,
+    struct census_resolution_ledger *r,const struct census_round_journal *j,unsigned error_index) {
+  if(r->resolutions_n>=128) return false;
+  const struct census_global_fault *e=&s->errors[error_index-1];unsigned matches=0;
+  struct census_typed_resolution selected={0};
+  for(unsigned k=0;k<r->proofs_n;k++) {
+    const struct proof_item *p=&r->proofs[k].source;unsigned prior=0;
+    if(p->pid!=e->raw.pid || p->start!=e->raw.start || p->scan_index<=1) continue;
+    for(unsigned scan=e->scan_index;scan<(unsigned)p->scan_index-1 && scan<s->history->n;scan++)
+      if(census_row_verified(census_history_find(&s->history->scans[scan],p->pid))) prior=scan+1;
+    struct census_typed_resolution v={.error_index=error_index,.proof_index=k+1,
+      .classified_scan=prior,.selected_seal=j->selected_seal,.kind=CENSUS_RESOLUTION_RETIRED_BIRTH};
+    if(census_retired_birth_link_valid(s,r,&v,j)) {selected=v;matches++;}
+  }
+  if(matches!=1) return false;
+  r->resolutions[r->resolutions_n++]=selected;return true;
+}
+
 static inline bool census_finish_births(struct census_global_source *s,
     struct census_resolution_ledger *r,const struct census_round_journal *j) {
   if(j->selected_seal!=s->history->n || !j->selected_first || !j->selected_second) return false;
@@ -62,7 +124,10 @@ static inline bool census_finish_births(struct census_global_source *s,
     struct census_history_row *b=census_history_find(&s->history->scans[j->selected_second-1],error->raw.pid);
     struct census_history_row *seal=census_history_find(&s->history->scans[j->selected_seal-1],error->raw.pid);
     struct census_history_row *original=census_history_find(&s->history->scans[error->scan_index-1],error->raw.pid);
-    if(!census_same_classified(original,a) || !census_same_classified(a,b) || !census_same_classified(b,seal)) return false;
+    if(!census_same_classified(original,a) || !census_same_classified(a,b) || !census_same_classified(b,seal)) {
+      if(!census_finish_retired_birth(s,r,j,e+1)) return false;
+      continue;
+    }
     r->resolutions[r->resolutions_n++]=(struct census_typed_resolution){.error_index=e+1,
       .kind=CENSUS_RESOLUTION_FRESH,.classified_scan=first,.selected_seal=j->selected_seal};
   }
@@ -78,7 +143,9 @@ static inline bool census_final_resolutions_valid(const struct census_global_sou
     unsigned matches=0;
     for(unsigned k=0;k<r->resolutions_n;k++) {
       const struct census_typed_resolution *v=&r->resolutions[k];if(v->error_index!=e+1) continue;
-      if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
+      if(v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH) {
+        if(!census_retired_birth_link_valid(s,r,v,j)) return false;
+      } else if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
         if(!census_unclassified_link_valid(s,r,v)) return false;
       } else if(v->kind==CENSUS_RESOLUTION_ABSENCE) {
         if(!census_absence_raw_eligible(&s->errors[e]) || !v->proof_index || v->proof_index>r->proofs_n ||

@@ -15,7 +15,7 @@ struct census_typed_certificate {
   struct census_descendant_witness witness;
 };
 enum census_resolution_kind {CENSUS_RESOLUTION_ABSENCE,CENSUS_RESOLUTION_FRESH,
-  CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT};
+  CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT,CENSUS_RESOLUTION_RETIRED_BIRTH};
 struct census_typed_resolution {
   unsigned error_index,proof_index,classified_scan,selected_seal;
   enum census_resolution_kind kind;

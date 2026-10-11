@@ -265,7 +265,92 @@ done:
   return rc;
 }
 
+/* Exact 4/5 full birth -> scan6 genuine no-PID -> selected5/6/7.
+ * Enumerates only this test process and its controlled child; no host census. */
+static unsigned birth_scan;static uint32_t birth_pid;
+static int birth_gate=-1;
+static bool enumerate_retired_birth(void *unused,struct census_budget *b,struct census_pid_list *out) {
+  (void)unused;birth_scan++;
+  if(birth_scan==4) {
+    int gate[2];if(pipe(gate)) return false;
+    owned_child=fork();if(owned_child<0) return false;
+    if(!owned_child) {close(gate[1]);char c;ssize_t n=read(gate[0],&c,1);close(gate[0]);_exit(n==1?0:2);}
+    close(gate[0]);birth_gate=gate[1];birth_pid=(uint32_t)owned_child;
+  }
+  if(!census_pid_append(b,out,(uint32_t)getpid())) return false;
+  if(birth_scan>=4 && birth_scan<=6 && !census_pid_append(b,out,birth_pid)) return false;
+  if(birth_scan==6) {
+    if(write(birth_gate,"x",1)!=1) return false;
+    close(birth_gate);birth_gate=-1;int status;
+    if(waitpid(owned_child,&status,0)!=owned_child || !WIFEXITED(status) || WEXITSTATUS(status)) return false;
+    owned_child=-1;
+  }
+  return true;
+}
+static void reject_retired_birth_guards(struct census_global_source *s,struct census_resolution_ledger *r,
+    const struct census_round_journal *j) {
+  unsigned i=0;while(i<r->resolutions_n && r->resolutions[i].kind!=CENSUS_RESOLUTION_RETIRED_BIRTH) i++;
+  assert(i<r->resolutions_n);struct census_typed_resolution *v=&r->resolutions[i],saved=*v;
+  struct census_typed_proof *p=&r->proofs[v->proof_index-1],proof=*p;
+  struct census_history_row *born=census_history_find(&s->history->scans[3],p->source.pid),birth=*born;
+  struct census_history_row *prior=census_history_find(&s->history->scans[4],p->source.pid),before=*prior;
+  bool trusted=ev.trusted_kernel;ev.trusted_kernel=false;assert(!census_retired_birth_link_valid(s,r,v,j));ev.trusted_kernel=trusted;
+  char ns[80];strcpy(ns,ev.binding.ns);ev.binding.ns[0]=0;assert(!census_retired_birth_link_valid(s,r,v,j));strcpy(ev.binding.ns,ns);
+  p->protected_identity=true;assert(!census_retired_birth_link_valid(s,r,v,j));*p=proof;
+  p->source.pid++;assert(!census_retired_birth_link_valid(s,r,v,j));*p=proof;
+  p->source.start++;assert(!census_retired_birth_link_valid(s,r,v,j));*p=proof;
+  p->source.scan_index=4;assert(!census_retired_birth_link_valid(s,r,v,j));*p=proof;
+  p->source.scan_index=8;assert(!census_retired_birth_link_valid(s,r,v,j));*p=proof;
+  p->source.method="pidfd_exited";assert(!census_retired_birth_link_valid(s,r,v,j));*p=proof;
+  v->proof_index=0;assert(!census_retired_birth_link_valid(s,r,v,j));*v=saved;
+  v->classified_scan=4;assert(!census_retired_birth_link_valid(s,r,v,j));*v=saved;
+  born->classification=CENSUS_CLASS_MANAGED;assert(!census_retired_birth_link_valid(s,r,v,j));*born=birth;
+  born->identity.declared_root=true;assert(!census_retired_birth_link_valid(s,r,v,j));*born=birth;
+  born->identity.name="gc";assert(!census_retired_birth_link_valid(s,r,v,j));*born=birth;
+  prior->failure=CENSUS_ROW_CAPTURE_FAILED;assert(!census_retired_birth_link_valid(s,r,v,j));*prior=before;
+  struct census_history_row *last=&s->history->scans[6].rows[0],old=*last;
+  last->pid=p->source.pid;last->identity.pid=p->source.pid;assert(!census_retired_birth_link_valid(s,r,v,j));*last=old;
+  struct census_history_row *survivor=&s->history->scans[4].rows[0],alive=*survivor;
+  survivor->failure=CENSUS_ROW_CAPTURE_FAILED;assert(!census_retired_birth_link_valid(s,r,v,j));*survivor=alive;
+  s->budget->fd_failed=true;assert(!census_retired_birth_link_valid(s,r,v,j));s->budget->fd_failed=false;
+  assert(census_retired_birth_link_valid(s,r,v,j));
+  puts("retired_birth_negative_guards=17 preserved_raw_and_budget=1");
+}
+static int run_retired_birth(void) {
+  struct census_budget budget={.limit=16777216};int rc=2;
+  struct census_global_source *source=NULL;struct census_resolution_ledger *ledger=NULL;
+  struct census_json *json=NULL;struct census_round_journal rounds={0};
+  memset(&ev,0,sizeof ev);ev.processfd=ev.active_pidfd=-1;
+  ev.procfd=open("/proc",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+  if(ev.procfd<0 || clock_gettime(CLOCK_MONOTONIC,&ev.monotonic_start)) goto done;
+  ev.binding.pid=(uint32_t)getpid();ev.trusted_kernel=true;
+  ssize_t n=readlink("/proc/self/ns/pid",ev.ns,sizeof ev.ns-1);if(n<0) goto done;
+  ev.ns[n]=0;strcpy(ev.binding.ns,ev.ns);
+  source=census_global_new(&budget,NULL,enumerate_retired_birth,census_fixed_capture);
+  ledger=census_resolution_new(&budget);if(!source || !ledger) goto done;
+  int selected=census_choose_proven_continuation(source,ledger,&rounds);
+  printf("retired_birth_selected=%d scans=%u raw_errors=%u proofs=%u resolutions=%u triplet_equal=%d\n",
+    selected,source->history->n,source->errors_n,ledger->proofs_n,ledger->resolutions_n,census_current_closings_equal(source,ledger));
+  if(selected!=CENSUS_ROUNDS_SELECTED_PENDING_PROOF || source->history->n!=7 || source->errors_n!=2 ||
+      ledger->proofs_n!=2 || ledger->resolutions_n!=2 || !census_final_resolutions_valid(source,ledger,&rounds)) goto done;
+  reject_retired_birth_guards(source,ledger,&rounds);
+  json=census_json_new(&budget);if(!json) goto done;ev.complete=true;
+  census_json_printf(json,"{\"scope\":\"fixture_procfs\",\"controller_pid\":%u,\"errors\":",ev.binding.pid);
+  census_json_errors(json,source);census_json_text(json,",\"census\":");census_json_census(json,source,ledger,&rounds);
+  uint64_t origin=(uint64_t)ev.monotonic_start.tv_sec*1000u+(uint64_t)ev.monotonic_start.tv_nsec/1000000u;
+  census_json_printf(json,",\"duration_ms\":%" PRIu64 "}",mono_ms()-origin);
+  if(!census_json_finalize(json) || fwrite(json->data,1,json->n,stdout)!=json->n || putchar('\n')==EOF) goto done;
+  rc=0;
+done:
+  census_json_free(json);census_resolution_free(&budget,ledger);census_global_free(source);
+  if(birth_gate>=0) close(birth_gate);
+  if(owned_child>0) {kill(owned_child,SIGKILL);waitpid(owned_child,NULL,0);}
+  if(ev.procfd>=0) close(ev.procfd);
+  return rc;
+}
+
 int main(int argc,char **argv) {
+  if(argc==2 && !strcmp(argv[1],"retired-birth")) return run_retired_birth();
   if(argc==2 && !strcmp(argv[1],"vector")) return run_vector();
   if(argc==2 && !strcmp(argv[1],"prior")) return run_prior_guard();
   bool second_pass=argc==2 && !strcmp(argv[1],"second-pass");

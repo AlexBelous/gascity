@@ -307,6 +307,10 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 				p.Kind == "enumerated_pid_absent" && e.Operation != "stat" && (e.Operation != "pidfd_open" || (e.Errno != 3 && (e.Errno != 22 || e.StartTicks != nil))) {
 				return bad()
 			}
+		case "retired_positive_birth":
+			if !validRetiredPositiveBirth(c, byScan, errors, r, controllerPID) {
+				return bad()
+			}
 		case "fresh_classification":
 			if r.ProofIndex != 0 || r.SelectedSeal != n || r.ClassifiedScan <= e.ScanIndex || r.ClassifiedScan > first.ScanIndex ||
 				e.Reason != "uninspected_birth" || e.Operation != "census" || e.Errno != 0 || e.PID <= 1 {
@@ -495,4 +499,58 @@ func certificateOwnFault(c CensusV3, errors []EvidenceError, cert DescendantCert
 		}
 	}
 	return count == 1
+}
+
+// A distinct resolution links, but never creates, the existing no-PID pair.
+func validRetiredPositiveBirth(c CensusV3, rows map[int]map[int]CensusIdentity, errors []EvidenceError, r CensusResolution, controller int) bool {
+	n := len(c.Scans)
+	if r.ErrorIndex < 1 || r.ErrorIndex > len(errors) || r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) || r.SelectedSeal != n {
+		return false
+	}
+	e := errors[r.ErrorIndex-1]
+	p := c.Proofs[r.ProofIndex-1]
+	if e.Reason != "uninspected_birth" || e.Operation != "census" || e.Errno != 0 || e.PID <= 1 || e.PID == controller || e.StartTicks == nil ||
+		e.ScanIndex < 4 || e.ScanIndex >= n-2 || c.Scans[e.ScanIndex-1].Kind != "seal" ||
+		p.Kind != "incarnation_retired" || p.Method != "pidfd_no_pid" || p.PID != e.PID || !sameStart(p.StartTicks, e.StartTicks) ||
+		p.ScanIndex <= e.ScanIndex || p.ScanIndex > n || p.ProtectedIdentity || p.DescendantCertificateID != 0 || p.ReplacementStart != "" ||
+		r.ClassifiedScan <= e.ScanIndex || r.ClassifiedScan >= p.ScanIndex {
+		return false
+	}
+	if _, known := rows[e.ScanIndex-1][e.PID]; known {
+		return false
+	}
+	original, ok := rows[e.ScanIndex][e.PID]
+	prior, known := rows[r.ClassifiedScan][e.PID]
+	if !ok || !known || original.StartTicks != *e.StartTicks || original.Classification != "nonmanaged" || original.DeclaredRoot ||
+		infrastructureName(original.Name) || !sameFreshClassification(original, prior) {
+		return false
+	}
+	pairs := 0
+	for _, q := range c.Proofs[:r.ProofIndex-1] {
+		if q.Kind == "enumerated_pid_absent" && q.Method == "pidfd_no_pid" && q.PID == p.PID && q.StartTicks == nil && q.ScanIndex == p.ScanIndex &&
+			q.OffsetMS == p.OffsetMS && !q.ProtectedIdentity && q.DescendantCertificateID == 0 && q.ReplacementStart == "" {
+			pairs++
+		}
+	}
+	if pairs != 1 {
+		return false
+	}
+	for scan := 1; scan <= n; scan++ {
+		row, exists := rows[scan][e.PID]
+		if !exists {
+			continue
+		}
+		if scan >= p.ScanIndex || row.Classification != "nonmanaged" || row.DeclaredRoot || infrastructureName(row.Name) ||
+			(scan >= e.ScanIndex && !sameFreshClassification(original, row)) {
+			return false
+		}
+	}
+	for pid, last := range rows[n] {
+		a, first := rows[n-2][pid]
+		b, second := rows[n-1][pid]
+		if !first || !second || !sameFreshClassification(a, last) || !sameFreshClassification(b, last) {
+			return false
+		}
+	}
+	return true
 }

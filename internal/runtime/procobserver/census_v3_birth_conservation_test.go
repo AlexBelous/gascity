@@ -103,3 +103,63 @@ func TestCensusV3OriginalPositiveBirthIsConserved(t *testing.T) {
 		}
 	}
 }
+
+func TestRetiredPositiveBirthActualContract(t *testing.T) {
+	path := os.Getenv("GC_TEST_RETIRED_POSITIVE_BIRTH_VECTOR")
+	if path == "" {
+		t.Skip("private derived contract vector not supplied")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		ControllerPID   int             `json:"controller_pid"`
+		DurationMS      int64           `json:"duration_ms"`
+		ErrorsTotal     int             `json:"errors_total"`
+		ErrorsTruncated bool            `json:"errors_truncated"`
+		Errors          []EvidenceError `json:"errors"`
+		Census          CensusV3        `json:"census"`
+	}
+	if err = json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	if err = ValidateCensusV3(v.Census, v.Errors, v.ErrorsTotal, v.ErrorsTruncated, v.DurationMS, v.ControllerPID); err != nil {
+		t.Fatalf("indexed retired positive birth refused: %v", err)
+	}
+}
+
+func TestRetiredPositiveBirthNegativeContract(t *testing.T) {
+	path := os.Getenv("GC_TEST_RETIRED_BIRTH_NEGATIVES")
+	if path == "" {
+		t.Skip("private mutation vectors not supplied")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name string `json:"name"`
+		Want bool   `json:"want"`
+		V    struct {
+			ControllerPID   int             `json:"controller_pid"`
+			DurationMS      int64           `json:"duration_ms"`
+			ErrorsTotal     int             `json:"errors_total"`
+			ErrorsTruncated bool            `json:"errors_truncated"`
+			Errors          []EvidenceError `json:"errors"`
+			Census          CensusV3        `json:"census"`
+		} `json:"v"`
+	}
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			v := c.V
+			got := ValidateCensusV3(v.Census, v.Errors, v.ErrorsTotal, v.ErrorsTruncated, v.DurationMS, v.ControllerPID) == nil
+			if got != c.Want {
+				t.Fatalf("accepted=%v want=%v", got, c.Want)
+			}
+		})
+	}
+}

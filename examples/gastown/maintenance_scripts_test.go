@@ -9814,7 +9814,11 @@ func TestJsonlExportArchiveMaintenanceRefusesWithoutFreeSpace(t *testing.T) {
 		t.Fatalf("expected the free-space refusal to give a by-hand pack command:\n%s", out)
 	}
 	recovery, _, _ = strings.Cut(recovery, "\n")
-	if packOut, err := exec.Command("bash", "-c", recovery).CombinedOutput(); err != nil {
+	// bash parses the printed command as an operator's shell would; the
+	// script runs through the shared helper rather than a new exec call site.
+	recoveryScript := filepath.Join(t.TempDir(), "by-hand-pack.sh")
+	writeExecutable(t, recoveryScript, "#!/usr/bin/env bash\n"+recovery+"\n")
+	if packOut, err := runScriptResult(t, recoveryScript, map[string]string{}); err != nil {
 		t.Fatalf("by-hand pack command %q failed: %v\n%s", recovery, err, packOut)
 	}
 	if got := readArchiveObjectStats(t, f.archiveRepo).looseObjects; got != 0 {

@@ -79,15 +79,25 @@ type Root struct {
 	ParentIsProviderInfrastructure bool   `json:"parent_is_provider_infrastructure"`
 }
 
+// CaptureDiagnostic reports a failed bounded read; it never certifies retirement.
+type CaptureDiagnostic struct {
+	FieldsPass           int    `json:"fields_pass"`
+	BoundLive            *bool  `json:"bound_live"`
+	FirstIdentityPresent *bool  `json:"first_identity_present"`
+	ExitPoll             string `json:"exit_poll"`
+	ExitWitness          *bool  `json:"exit_witness"`
+}
+
 // EvidenceError is a bounded diagnostic containing no environment or token contents.
 type EvidenceError struct {
-	Reason     string  `json:"reason"`
-	PID        int     `json:"pid,omitempty"`
-	Operation  string  `json:"operation"`
-	Errno      int     `json:"errno"`
-	StartTicks *string `json:"start_ticks"`
-	ScanIndex  int     `json:"scan_index"`
-	ResolvedBy int     `json:"resolved_by"`
+	Reason            string             `json:"reason"`
+	CaptureDiagnostic *CaptureDiagnostic `json:"capture_diagnostic,omitempty"`
+	PID               int                `json:"pid,omitempty"`
+	Operation         string             `json:"operation"`
+	Errno             int                `json:"errno"`
+	StartTicks        *string            `json:"start_ticks"`
+	ScanIndex         int                `json:"scan_index"`
+	ResolvedBy        int                `json:"resolved_by"`
 }
 
 // Response is the independent process-only evidence, including coverage failures.
@@ -286,6 +296,11 @@ func decodeResponse(data []byte, p Policy, nonce string, now time.Time) (Respons
 	if r.Roots == nil || r.Errors == nil || r.EnumeratedCountBefore < 1 || r.EnumeratedCountBefore > MaxProcesses || r.EnumeratedCountAfter < 1 || r.EnumeratedCountAfter > MaxProcesses || !isHex(r.EnumerationDigestBefore, 64) || !isHex(r.EnumerationDigestAfter, 64) || len(r.Roots) > MaxProcesses || len(r.Roots) > r.EnumeratedCountBefore || len(r.Roots) > r.EnumeratedCountAfter || len(r.Errors) > 256 || r.ErrorsTotal < 0 || r.ErrorsTotal < len(r.Errors) {
 		return Response{}, fmt.Errorf("observer response coverage fields invalid")
 	}
+	for _, e := range r.Errors {
+		if e.CaptureDiagnostic != nil {
+			return Response{}, fmt.Errorf("v3 capture diagnostic on legacy response")
+		}
+	}
 	last := 0
 	for _, v := range r.Roots {
 		if v.PID <= 1 || v.PID <= last || v.PPID < 0 || v.PGID < 1 || !positiveNumber(v.StartTicks) || !safeIdentity(v.SessionID) || !safeIdentity(v.Template) || !filepath.IsAbs(v.City) || !safeIdentity(v.City) || v.Epoch < 1 || !isHex(v.InstanceTokenSHA256, 64) || len(v.Name) > 256 || len(v.ParentName) > 256 || v.ParentIsProviderInfrastructure != infrastructureName(v.ParentName) {
@@ -414,6 +429,11 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 			return nil
 		}
 		if t == reflect.TypeOf((*string)(nil)) {
+			t = t.Elem()
+		}
+		// Only the explicit negative diagnostic object/required booleans add
+		// pointer wire types; null remains forbidden for both.
+		if t == reflect.TypeOf((*CaptureDiagnostic)(nil)) || t == reflect.TypeOf((*bool)(nil)) {
 			t = t.Elem()
 		}
 		if token == nil {

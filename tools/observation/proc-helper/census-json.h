@@ -182,6 +182,18 @@ static inline void census_json_errors(struct census_json *o,const struct census_
     census_json_text(o,",\"operation\":");census_json_string(o,e->raw.operation);
     census_json_printf(o,",\"pid\":%u,\"errno\":%d,\"scan_index\":%u,\"resolved_by\":0,\"start_ticks\":",e->raw.pid,e->raw.error,e->scan_index);
     if(e->raw.start) census_json_printf(o,"\"%" PRIu64 "\"",e->raw.start);else census_json_text(o,"null");
+    if(!ev.complete && e->raw.capture_diagnostic_available &&
+        !strcmp(e->reason,"process_unavailable") && e->raw.operation &&
+        !strcmp(e->raw.operation,"environ") && e->raw.error==ESRCH &&
+        e->raw.fields_pass>=1 && e->raw.fields_pass<=2 &&
+        e->raw.diagnostic_exit_poll>=CENSUS_EXIT_POLL_NOT_PERFORMED &&
+        e->raw.diagnostic_exit_poll<=CENSUS_EXIT_POLL_OTHER) {
+      static const char *const polls[]={"not_performed","failure","zero","valid_pollin","refused_flags","other_events"};
+      census_json_printf(o,",\"capture_diagnostic\":{\"fields_pass\":%u,\"bound_live\":%s,\"first_identity_present\":%s,\"exit_poll\":\"%s\",\"exit_witness\":%s}",
+        e->raw.fields_pass,e->raw.diagnostic_bound_live?"true":"false",
+        e->raw.diagnostic_first_identity_present?"true":"false",polls[e->raw.diagnostic_exit_poll],
+        e->raw.bound_exit_valid?"true":"false");
+    }
     census_json_text(o,"}");
   }
   census_json_text(o,"]");

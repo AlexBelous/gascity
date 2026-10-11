@@ -25,11 +25,19 @@ struct census_owned_identity {
 };
 /* Raw source failure metadata, never a kernel absence certificate. Operation
  * points only to a compiled string literal, not a borrowed file/environment. */
+enum census_exit_poll_diagnostic {
+  CENSUS_EXIT_POLL_NOT_PERFORMED, CENSUS_EXIT_POLL_FAILURE, CENSUS_EXIT_POLL_ZERO,
+  CENSUS_EXIT_POLL_VALID_POLLIN, CENSUS_EXIT_POLL_REFUSED_FLAGS, CENSUS_EXIT_POLL_OTHER
+};
 struct census_capture_fault {
   const char *operation;
   uint32_t pid;
   uint64_t start;
   int error;
+  /* Negative-only categorical evidence. Never consulted by proof/eligibility. */
+  unsigned char fields_pass;
+  bool capture_diagnostic_available, diagnostic_bound_live, diagnostic_first_identity_present;
+  enum census_exit_poll_diagnostic diagnostic_exit_poll;
   /* Internal source witness, never copied into the raw wire error. */
   bool bound_exit_valid;
   uint64_t bound_start, bound_exit_offset_ms;

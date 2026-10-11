@@ -298,6 +298,31 @@ int main(int argc,char **argv) {
   printf("raw_environ_esrch_known_start=%d bound_exit_witness=%d fd_budget_ok=%d\n",
     raw_match,witness,!budget.fd_failed);
   rc=raw_match && hook_ok && !budget.fd_failed && (second_pass?!witness:witness)?0:2;
+  if(!rc) {
+    struct census_global_source *source=census_alloc(&budget,sizeof *source);
+    struct census_json *json=census_json_new(&budget);
+    if(!source || !json) {rc=2;goto done;}
+    source->budget=&budget;census_global_error(source,6,"process_unavailable",fault);
+    struct census_capture_fault preserved=source->errors[0].raw;
+    ev.complete=false;census_json_errors(json,source);
+    const char *pass=second_pass?"\"fields_pass\":2":"\"fields_pass\":1";
+    const char *poll=second_pass?"\"exit_poll\":\"not_performed\"":"\"exit_poll\":\"valid_pollin\"";
+    bool present=memmem(json->data,json->n,pass,strlen(pass)) && memmem(json->data,json->n,poll,strlen(poll));
+    const char *first=second_pass?"\"first_identity_present\":true":"\"first_identity_present\":false";
+    const char *exit=second_pass?"\"exit_witness\":false":"\"exit_witness\":true";
+    present=present && memmem(json->data,json->n,first,strlen(first)) &&
+      memmem(json->data,json->n,exit,strlen(exit)) &&
+      memmem(json->data,json->n,"\"bound_live\":true",17);
+    if(fwrite(json->data,1,json->n,stdout)!=json->n || putchar('\n')==EOF) rc=2;
+    bool unchanged=!memcmp(&preserved,&source->errors[0].raw,sizeof preserved);
+    printf("capture_diagnostic_present=%d raw_fault_unchanged=%d\n",present,unchanged);
+    if(!present || !unchanged) rc=2;
+    json->n=0;ev.complete=true;census_json_errors(json,source);
+    if(memmem(json->data,json->n,"capture_diagnostic",18)) rc=2;
+    ev.complete=false;
+    census_json_free(json);census_release(&budget,source,sizeof *source);
+  }
+
 done:
   census_identity_clear(&budget,&row);
   if(gate[0]>=0) close(gate[0]);

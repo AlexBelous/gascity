@@ -153,6 +153,7 @@ done:
 }
 static inline bool census_bounded_fields(struct census_budget *budget,int dir,uint32_t pid,
     struct census_owned_identity *out,struct census_capture_fault *fault) {
+  fault->fields_pass++;
   fault->operation="stat";
   if(!census_read_bounded_stat(budget,dir,pid,out)) return false;
   fault->start=out->start;fault->operation="status";
@@ -252,11 +253,20 @@ static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_b
   if(!census_bounded_fields(budget,dir,pid,&a,fault) ||
      !census_bounded_fields(budget,dir,pid,&b,fault)) {
     int original_error=errno;
+    fault->capture_diagnostic_available=original_error==ESRCH && fault->operation &&
+      !strcmp(fault->operation,"environ");
+    fault->diagnostic_bound_live=bound_live;
+    fault->diagnostic_first_identity_present=a.name!=NULL;
+    fault->diagnostic_exit_poll=CENSUS_EXIT_POLL_NOT_PERFORMED;
     if(bound_live && !a.name && original_error==ESRCH && fault->operation &&
         !strcmp(fault->operation,"environ") && fault->start==bound_a.start &&
         pid>1 && pid!=ev.binding.pid && ev.trusted_kernel && !fixture &&
         ev.ns[0] && !strcmp(ev.ns,ev.binding.ns) && !budget->fd_failed && !expired()) {
       short exit_events=0;int polled=process_poll(pin,&exit_events);
+      fault->diagnostic_exit_poll=polled<0?CENSUS_EXIT_POLL_FAILURE:
+        (exit_events&(POLLERR|POLLNVAL))?CENSUS_EXIT_POLL_REFUSED_FLAGS:
+        (!polled && !exit_events)?CENSUS_EXIT_POLL_ZERO:
+        (polled==1 && (exit_events&POLLIN))?CENSUS_EXIT_POLL_VALID_POLLIN:CENSUS_EXIT_POLL_OTHER;
       uint64_t origin=(uint64_t)ev.monotonic_start.tv_sec*1000u+
         (uint64_t)ev.monotonic_start.tv_nsec/1000000u;
       uint64_t now=mono_ms();

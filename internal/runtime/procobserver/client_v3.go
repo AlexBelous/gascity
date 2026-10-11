@@ -162,7 +162,7 @@ func DecodeResponseV3(data []byte, p ReleasePolicyV3, nonce string, now time.Tim
 		last = v.PID
 	}
 	for _, e := range r.Errors {
-		if len(e.Reason) < 1 || len(e.Reason) > 64 || len(e.Operation) < 1 || len(e.Operation) > 32 || e.PID < 0 || e.PID > 2147483647 || e.Errno < 0 || e.Errno > 4095 {
+		if !validCaptureDiagnostic(e, r.Complete) || len(e.Reason) < 1 || len(e.Reason) > 64 || len(e.Operation) < 1 || len(e.Operation) > 32 || e.PID < 0 || e.PID > 2147483647 || e.Errno < 0 || e.Errno > 4095 {
 			return ResponseV3{}, fmt.Errorf("observer v3 diagnostic invalid")
 		}
 	}
@@ -228,4 +228,29 @@ func (r ResponseV3) RetirementAnchors() ([]proctable.ObservedRoot, error) {
 		})
 	}
 	return out, nil
+}
+
+// Negative annotations have no role in eligibility or proof validation.
+func validCaptureDiagnostic(e EvidenceError, complete bool) bool {
+	d := e.CaptureDiagnostic
+	if d == nil {
+		return true
+	}
+	if complete || e.Reason != "process_unavailable" || e.Operation != "environ" || e.Errno != 3 || e.StartTicks == nil ||
+		d.FieldsPass < 1 || d.FieldsPass > 2 || d.BoundLive == nil || d.FirstIdentityPresent == nil || d.ExitWitness == nil {
+		return false
+	}
+	if (d.FieldsPass == 2) != *d.FirstIdentityPresent {
+		return false
+	}
+	switch d.ExitPoll {
+	case "not_performed":
+		return !*d.ExitWitness
+	case "failure", "zero", "refused_flags", "other_events":
+		return *d.BoundLive && !*d.FirstIdentityPresent && !*d.ExitWitness
+	case "valid_pollin":
+		return *d.BoundLive && !*d.FirstIdentityPresent
+	default:
+		return false
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -213,5 +214,97 @@ func TestClientV3RootProjectionRequiresDeclaredIdentity(t *testing.T) {
 	anchors, err := got.RetirementAnchors()
 	if err != nil || anchors == nil || len(anchors) != 0 {
 		t.Fatal("empty valid certificate set lost its explicit non-nil contract")
+	}
+}
+
+func TestCaptureDiagnosticNegativeOnly(t *testing.T) {
+	yes, no := true, false
+	start := "123"
+	base := EvidenceError{Reason: "process_unavailable", Operation: "environ", Errno: 3, PID: 42, StartTicks: &start, ScanIndex: 6}
+	cases := []struct {
+		name string
+		d    CaptureDiagnostic
+		want bool
+	}{
+		{"first actual exit", CaptureDiagnostic{1, &yes, &no, "valid_pollin", &yes}, true},
+		{"second read withheld", CaptureDiagnostic{2, &yes, &yes, "not_performed", &no}, true},
+		{"poll failure", CaptureDiagnostic{1, &yes, &no, "failure", &no}, true},
+		{"poll zero", CaptureDiagnostic{1, &yes, &no, "zero", &no}, true},
+		{"refused flags", CaptureDiagnostic{1, &yes, &no, "refused_flags", &no}, true},
+		{"valid poll with refused deadline", CaptureDiagnostic{1, &yes, &no, "valid_pollin", &no}, true},
+		{"missing required bool", CaptureDiagnostic{1, nil, &no, "zero", &no}, false},
+		{"arbitrary value", CaptureDiagnostic{1, &yes, &no, "secret-argv", &no}, false},
+		{"false witness on second", CaptureDiagnostic{2, &yes, &yes, "not_performed", &yes}, false},
+		{"unbound purported exit", CaptureDiagnostic{1, &no, &no, "valid_pollin", &yes}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := base
+			e.CaptureDiagnostic = &c.d
+			if got := validCaptureDiagnostic(e, false); got != c.want {
+				t.Fatalf("valid=%v want=%v", got, c.want)
+			}
+			if validCaptureDiagnostic(e, true) {
+				t.Fatal("negative category accepted on COMPLETE frame")
+			}
+		})
+	}
+}
+
+func TestCaptureDiagnosticOwnedCodec(t *testing.T) {
+	for _, key := range []string{"GC_TEST_CAPTURE_FIRST_VECTOR", "GC_TEST_CAPTURE_SECOND_VECTOR"} {
+		path := os.Getenv(key)
+		if path == "" {
+			t.Skip("owned C diagnostic vectors not supplied")
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var errors []EvidenceError
+		if err := DecodeStrict(raw, &errors); err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range [][]byte{
+			bytes.ReplaceAll(raw, []byte(`"bound_live":true`), []byte(`"bound_live":null`)),
+			bytes.ReplaceAll(raw, []byte(`"exit_poll":`), []byte(`"argv":"forbidden","exit_poll":`)),
+			bytes.ReplaceAll(raw, []byte(`"fields_pass":`), []byte(`"fields_pass":1,"fields_pass":`)),
+		} {
+			var rejected []EvidenceError
+			if DecodeStrict(bad, &rejected) == nil {
+				t.Fatal("invalid/null/duplicate categorical wire accepted")
+			}
+		}
+		if len(errors) != 1 || errors[0].Reason != "process_unavailable" || errors[0].Errno != 3 || errors[0].Operation != "environ" || errors[0].ScanIndex != 6 || errors[0].ResolvedBy != 0 || errors[0].StartTicks == nil {
+			t.Fatal("raw C fault changed")
+		}
+		d := errors[0].CaptureDiagnostic
+		if d == nil || !validCaptureDiagnostic(errors[0], false) || validCaptureDiagnostic(errors[0], true) {
+			t.Fatal("C negative category lost or promoted")
+		}
+		wantPass := 1
+		if key == "GC_TEST_CAPTURE_SECOND_VECTOR" {
+			wantPass = 2
+		}
+		if d.FieldsPass != wantPass {
+			t.Fatal("wrong actual bounded read pass")
+		}
+	}
+}
+
+func TestCaptureDiagnosticDoesNotExpandLegacyResponse(t *testing.T) {
+	p, r, now := fixtureResponse()
+	yes, no := true, false
+	start := "123"
+	r.Complete = false
+	r.ErrorsTotal = 1
+	r.Errors = []EvidenceError{{Reason: "process_unavailable", PID: 42, Operation: "environ", Errno: 3, ScanIndex: 1, StartTicks: &start, CaptureDiagnostic: &CaptureDiagnostic{1, &yes, &no, "zero", &no}}}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeResponse(raw, p, r.RequestNonce, now)
+	if err == nil || decoded.Schema != "" {
+		t.Fatal("V3 diagnostic accepted on legacy envelope")
 	}
 }

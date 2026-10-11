@@ -27,7 +27,7 @@ concurrency:
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: ${{ inputs.force_blacksmith && 'blacksmith-2vcpu-ubuntu-2404' || (github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest') }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -201,15 +201,18 @@ jobs:
             # universal persistence substrate, events the universal observation
             # substrate, config the universal activation mechanism; build,
             # dependency, and CI workflow/composite-action files affect every
-            # job. The setup-gascity-ubuntu composite action and the installer
-            # scripts it invokes are shared by nearly every job, so a change to
-            # them must re-run all path-gated suites.
+            # job. The setup-gascity-ubuntu and go-mod-download composite
+            # actions and the scripts they invoke are shared by nearly every
+            # job, so a change to them must re-run all path-gated suites.
             shared:
               - 'go.mod'
               - 'go.sum'
               - 'Makefile'
               - '.github/workflows/**'
               - '.github/actions/setup-gascity-ubuntu/**'
+              - '.github/actions/go-mod-download/**'
+              - '.github/scripts/go-mod-download-retry.sh'
+              - '.github/scripts/go-mod-verify-cache.sh'
               - '.github/scripts/install-dolt-archive.sh'
               - '.github/scripts/install-bd-archive.sh'
               - '.github/scripts/install-claude-native.sh'
@@ -233,6 +236,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: CI workflow policy
         run: make test-ci-policy
       - name: Classify static-analysis scope
@@ -314,8 +319,8 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.1-rc.2"
+      DOLT_VERSION: "2.2.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -343,8 +348,8 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.1-rc.2"
+      DOLT_VERSION: "2.2.0"
+      BD_VERSION: "v1.3.1"
     strategy:
       fail-fast: false
       matrix:
@@ -382,6 +387,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Acceptance tests (Tier A)
         run: make test-acceptance
 
@@ -397,6 +404,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Install minimum-supported bd
         run: |
           set -euo pipefail
@@ -410,6 +419,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (minimum supported)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (minimum supported)
+        run: make test-bd-cli-contract-home-isolation
 
   # Cross-version contract gate: the "current" cell of the bd matrix. The
   # "prev" cell is contract-acceptance-previous above (the min-supported
@@ -430,6 +441,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Resolve bd current pin
         id: bd
         run: |
@@ -455,6 +468,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (current)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (current)
+        run: make test-bd-cli-contract-home-isolation
       # The conditional-release CAS contract is wired only on this cell, but that
       # is now a choice, not a capability limit: BdStore.ReleaseIfCurrent prefers
       # bd's --if-assignee/--if-status verb (a rejected precondition is exit 13),
@@ -521,7 +536,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 105
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
       # Tier A skips the matrix to stay a smoke tier. This is the job that runs
       # it, so this is the job that opts in.
@@ -558,6 +573,12 @@ jobs:
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
           echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      # A failing test copies its managed Dolt server logs (gc's dolt.log, bd's
+      # proxy and scope-local server logs) and the supervisor log out of its
+      # temp dir before t.Cleanup removes it
+      # (internal/testutil.SaveFailureDiagnostics); the upload below keeps them.
+      - name: Route acceptance failure diagnostics
+        run: echo "GC_TEST_FAILURE_ARTIFACT_DIR=${RUNNER_TEMP}/failure-artifacts" >> "$GITHUB_ENV"
       # Fail here rather than inside a test: a bd that is missing or too old is
       # a broken job, and the tests below would otherwise be asked to decide it
       # one skip at a time.
@@ -580,7 +601,7 @@ jobs:
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 15m -count=1 -v \
-            -run 'TestBeadsProxiedIgnoresUserLevelSharedServer$' ./test/acceptance/ 2>&1 \
+            -run 'TestBeadsProxiedIgnoresUserLevelSharedServer$|TestBlockedRepairOnProxiedCityAndRig$' ./test/acceptance/ 2>&1 \
             | tee "${RUNNER_TEMP}/shared-server.log"
       - name: Migration acceptance (AC-X)
         run: |
@@ -594,6 +615,14 @@ jobs:
           go test -tags acceptance_a -timeout 30m -count=1 -v \
             -run 'TestBeadsInitTopologyMatrix$/^(M1-proxied-local|M5-legacy-gc-managed)$' \
             ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/topology.log"
+      - name: Upload acceptance failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-diagnostics-beads-topology-acceptance-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
       # A skip that nobody reads is the failure mode this whole job exists to
       # fix, so the ones that remain are named in the summary.
       - name: Report remaining skips
@@ -645,7 +674,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 60
     env:
-      DOLT_VERSION: "2.1.7"
+      DOLT_VERSION: "2.2.0"
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -678,6 +707,9 @@ jobs:
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
           echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
           echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      # Same failure-diagnostics routing as the topology job above.
+      - name: Route acceptance failure diagnostics
+        run: echo "GC_TEST_FAILURE_ARTIFACT_DIR=${RUNNER_TEMP}/failure-artifacts" >> "$GITHUB_ENV"
       - name: Verify bd supports proxied-server
         run: |
           set -euo pipefail
@@ -687,12 +719,24 @@ jobs:
             exit 1
           fi
           dolt version
-      - name: Proxied-native lifecycle and safety
+      - name: Proxied-native lifecycle and safety, the proxied idle timeout, and suspension quiescence
+        env:
+          # The idle-timeout and quiescence rows are gated with the topology
+          # matrix's switch so Tier A skips them; this job is where they run.
+          GC_ACCEPTANCE_TOPOLOGY_MATRIX: "1"
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 45m -count=1 -v \
-            -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$' \
+            -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$|TestProxiedIdleTimeoutReapAndTransparentRestart$|TestProxiedSuspensionIsQuiescence$' \
             ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/proxied-native.log"
+      - name: Upload acceptance failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-diagnostics-beads-proxied-native-acceptance-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-artifacts
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report remaining skips
         if: ${{ always() }}
         run: |
@@ -733,6 +777,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Build bd from beads main HEAD
         run: |
           set -euo pipefail
@@ -745,6 +791,8 @@ jobs:
         run: bd version
       - name: bd CLI contract (main HEAD)
         run: make test-bd-cli-contract
+      - name: bd CLI contract HOME isolation (main HEAD)
+        run: make test-bd-cli-contract-home-isolation
 
   preflight-generated:
     name: Preflight / generated artifacts
@@ -760,6 +808,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -861,8 +911,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.1-rc.2"
+      DOLT_VERSION: "2.2.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -936,6 +986,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Ensure timing renderer is available
         run: command -v jq >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends jq)
       - name: Run product metrics testhook profile
@@ -979,6 +1031,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Test credential-provider unit contract
         run: go test -count=1 ./internal/credentialprovider
       - name: Test Windows Job Object descendant cleanup
@@ -1039,8 +1093,8 @@ jobs:
             timeout_minutes: 15
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.1-rc.2"
+      DOLT_VERSION: "2.2.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1066,8 +1120,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.1-rc.2"
+      DOLT_VERSION: "2.2.0"
+      BD_VERSION: "v1.3.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1093,6 +1147,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore transcript/continuation conformance
@@ -1127,6 +1183,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore transcript/continuation conformance
@@ -1161,6 +1219,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore transcript/continuation conformance
@@ -1195,6 +1255,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Prepare worker report dir
         run: mkdir -p "$WORKER_REPORT_DIR"
       - name: WorkerCore transcript/continuation conformance
@@ -1353,6 +1415,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Prepare worker report dir
@@ -1389,6 +1453,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Prepare worker report dir
@@ -1425,6 +1491,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Prepare worker report dir
@@ -1461,6 +1529,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Prepare worker report dir
@@ -1623,6 +1693,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       # The gastown pack ships via the gascity-packs Go module, so a routine
       # go.mod bump can silently desync the embedded pack bytes from the
       # provenance pins in internal/config/public_packs.go and the
@@ -1672,6 +1744,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
@@ -1786,6 +1860,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y jq curl
@@ -1814,6 +1890,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -1839,6 +1917,8 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y jq

@@ -313,8 +313,14 @@ static void reject_retired_birth_guards(struct census_global_source *s,struct ce
   struct census_history_row *survivor=&s->history->scans[4].rows[0],alive=*survivor;
   survivor->failure=CENSUS_ROW_CAPTURE_FAILED;assert(!census_retired_birth_link_valid(s,r,v,j));*survivor=alive;
   s->budget->fd_failed=true;assert(!census_retired_birth_link_valid(s,r,v,j));s->budget->fd_failed=false;
+  struct census_history_row *early=&s->history->scans[0].rows[0],early_saved=*early;
+  early->pid=p->source.pid;early->identity.pid=p->source.pid;early->identity.start=p->source.start-1;
+  assert(!census_retired_birth_link_valid(s,r,v,j));*early=early_saved;
+  struct census_typed_proof *absence=&r->proofs[0],absence_saved=*absence;
+  p->source.offset_ms=s->history->scans[6].receipt.offset_ms+1;absence->source.offset_ms=p->source.offset_ms;
+  assert(!census_retired_birth_link_valid(s,r,v,j));*p=proof;*absence=absence_saved;
   assert(census_retired_birth_link_valid(s,r,v,j));
-  puts("retired_birth_negative_guards=17 preserved_raw_and_budget=1");
+  puts("retired_birth_negative_guards=19 preserved_raw_and_budget=1");
 }
 static int run_retired_birth(void) {
   struct census_budget budget={.limit=16777216};int rc=2;

@@ -513,7 +513,9 @@ func validRetiredPositiveBirth(c CensusV3, rows map[int]map[int]CensusIdentity, 
 		e.ScanIndex < 4 || e.ScanIndex >= n-2 || c.Scans[e.ScanIndex-1].Kind != "seal" ||
 		p.Kind != "incarnation_retired" || p.Method != "pidfd_no_pid" || p.PID != e.PID || !sameStart(p.StartTicks, e.StartTicks) ||
 		p.ScanIndex <= e.ScanIndex || p.ScanIndex > n || p.ProtectedIdentity || p.DescendantCertificateID != 0 || p.ReplacementStart != "" ||
-		r.ClassifiedScan <= e.ScanIndex || r.ClassifiedScan >= p.ScanIndex {
+		r.ClassifiedScan <= e.ScanIndex || r.ClassifiedScan >= p.ScanIndex ||
+		p.OffsetMS < c.Scans[e.ScanIndex-1].OffsetMS || p.OffsetMS < c.Scans[r.ClassifiedScan-1].OffsetMS ||
+		p.OffsetMS > c.Scans[n-1].OffsetMS {
 		return false
 	}
 	if _, known := rows[e.ScanIndex-1][e.PID]; known {
@@ -540,7 +542,7 @@ func validRetiredPositiveBirth(c CensusV3, rows map[int]map[int]CensusIdentity, 
 		if !exists {
 			continue
 		}
-		if scan >= p.ScanIndex || row.Classification != "nonmanaged" || row.DeclaredRoot || infrastructureName(row.Name) ||
+		if scan >= p.ScanIndex || row.StartTicks != *e.StartTicks || row.Classification != "nonmanaged" || row.DeclaredRoot || infrastructureName(row.Name) ||
 			(scan >= e.ScanIndex && !sameFreshClassification(original, row)) {
 			return false
 		}

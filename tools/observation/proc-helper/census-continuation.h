@@ -69,7 +69,10 @@ static inline bool census_retired_birth_link_valid(const struct census_global_so
   if(p->kind!=CENSUS_INCARNATION_RETIRED || strcmp(p->method,"pidfd_no_pid") ||
       p->pid!=e->raw.pid || p->start!=e->raw.start || typed->protected_identity || typed->certificate_id ||
       p->scan_index<=(int)e->scan_index || p->scan_index>(int)j->selected_seal ||
-      v->classified_scan<=e->scan_index || v->classified_scan>=(unsigned)p->scan_index) return false;
+      v->classified_scan<=e->scan_index || v->classified_scan>=(unsigned)p->scan_index ||
+      p->offset_ms<s->history->scans[e->scan_index-1].receipt.offset_ms ||
+      p->offset_ms<s->history->scans[v->classified_scan-1].receipt.offset_ms ||
+      p->offset_ms>s->history->scans[j->selected_seal-1].receipt.offset_ms) return false;
   unsigned pairs=0;
   for(unsigned k=0;k<v->proof_index-1;k++) {
     const struct census_typed_proof *q=&r->proofs[k];
@@ -88,7 +91,8 @@ static inline bool census_retired_birth_link_valid(const struct census_global_so
     if(scan>=(unsigned)p->scan_index-1) {
       if(census_row_verified(row)) return false;
     } else if(census_row_verified(row)) {
-      if(row->classification!=CENSUS_CLASS_NONMANAGED || row->identity.declared_root || infra(row->identity.name)) return false;
+      if(row->identity.start!=e->raw.start || row->classification!=CENSUS_CLASS_NONMANAGED ||
+          row->identity.declared_root || infra(row->identity.name)) return false;
       if(scan>=e->scan_index-1 && !census_same_classified(original,row)) return false;
     }
   }

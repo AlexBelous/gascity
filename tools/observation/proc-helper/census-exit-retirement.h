@@ -19,6 +19,11 @@ static inline bool census_exit_full_prior(const struct census_global_source *s,u
   }
   return *prior!=NULL;
 }
+static inline bool census_birth_companion_diagnostic(const struct census_capture_fault *fault) {
+  return fault->capture_diagnostic_available && fault->diagnostic_bound_live &&
+    !fault->diagnostic_first_identity_present && fault->fields_pass==1 &&
+    fault->diagnostic_exit_poll==CENSUS_EXIT_POLL_ZERO && !fault->bound_exit_valid;
+}
 static inline bool census_exit_error_compatible(const struct census_global_fault *e,
     const struct census_typed_proof *p) {
   const struct census_exit_witness *w=&p->exit_witness;
@@ -27,7 +32,8 @@ static inline bool census_exit_error_compatible(const struct census_global_fault
     return !strcmp(e->raw.operation,"census") && !e->raw.error && e->raw.start==p->source.start;
   if(strcmp(e->reason,"process_unavailable")) return false;
   if(w->stage==2) return !strcmp(e->raw.operation,"pidfd_poll") && e->raw.error==ESTALE && !e->raw.start;
-  return !strcmp(e->raw.operation,"environ") && e->raw.error==ESRCH && e->raw.start==p->source.start;
+  return !strcmp(e->raw.operation,"environ") && e->raw.error==ESRCH && e->raw.start==p->source.start &&
+    (w->stage!=3 || census_birth_companion_diagnostic(&e->raw));
 }
 static inline bool census_new_terminal_link_valid(const struct census_global_source *s,
     const struct census_resolution_ledger *r,const struct census_typed_resolution *link,unsigned seal) {
@@ -155,6 +161,13 @@ static inline bool census_resolve_exit_windows(struct census_global_source *s,
       if(other==slot || f->raw.pid!=e->raw.pid) continue;
       if(strcmp(f->reason,"process_unavailable") || !f->raw.operation || strcmp(f->raw.operation,"environ") ||
           f->raw.error!=ESRCH || f->raw.start!=prior->start || f->scan_index<=e->scan_index) {compatible=129;break;}
+      const struct census_capture_fault *companion=&f->raw;
+      uint32_t companion_uids[4]={0};
+      if(!census_birth_companion_diagnostic(companion) || companion->retained_stage!=1 ||
+          companion->retained_start!=prior->start || !companion->retained_pidfd_plus_one ||
+          !companion->retained_procdir_plus_one || memcmp(companion->retained_uids,prior->uids,sizeof prior->uids) ||
+          !census_exit_original_full_zombie(s->budget,(int)companion->retained_pidfd_plus_one-1,
+            (int)companion->retained_procdir_plus_one-1,prior,companion_uids)) {compatible=129;break;}
       compatible++;
     }
     if(compatible>1 || r->proofs_n>=128 || r->resolutions_n+1+compatible>128) continue;

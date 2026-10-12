@@ -79,6 +79,16 @@ func TestExitMixedStrictNegatives(t *testing.T) {
 		"C missing full identity":  func(x *exitFixture) { x.Census.Proofs[3].ExitWitness.FullIdentityRevalidated = false },
 		"C direct reaped":          func(x *exitFixture) { x.Census.Proofs[3].ExitWitness.CaptureStage = "direct_reaped_birth" },
 		"C no original birth link": func(x *exitFixture) { x.Census.Resolutions[1].Kind = "known_nonmanaged_terminal" },
+		"C companion missing original diagnostic": func(x *exitFixture) {
+			x.Errors[2].CaptureDiagnostic = nil
+		},
+		"C companion coherent second ENV pass": func(x *exitFixture) {
+			d := x.Errors[2].CaptureDiagnostic
+			d.FieldsPass = 2
+			*d.FirstIdentityPresent = true
+			d.ExitPoll = "not_performed"
+			*d.ExitWitness = false
+		},
 		"C additional compatible ENV duplicate": func(x *exitFixture) {
 			x.Census.Resolutions = append(x.Census.Resolutions, x.Census.Resolutions[2])
 			x.Errors = append(x.Errors, x.Errors[2])

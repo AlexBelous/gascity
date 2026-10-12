@@ -183,6 +183,11 @@ func validateExitExtensions(c CensusV3, errors []EvidenceError, rows map[int]map
 						e.Errno != 3 || !sameStart(e.StartTicks, p.StartTicks) {
 						return false
 					}
+					d := e.CaptureDiagnostic
+					if d == nil || !validCaptureDiagnostic(e, false) || d.FieldsPass != 1 || !*d.BoundLive ||
+						*d.FirstIdentityPresent || d.ExitPoll != "zero" || *d.ExitWitness {
+						return false
+					}
 					envs++
 				}
 			default:

@@ -46,7 +46,70 @@ static void schedule_after_error(uint32_t pid) {
  if(!automatic || pid!=(uint32_t)child[4]) return;
  for(unsigned i=0;i<3;i+=2) if(injected[i] && !released[i]) {terminal(i,false);released[i]=true;}
 }
+
+static const char *review_case;
+static int review_companion_kernel(struct census_global_source *s,struct census_resolution_ledger *r,
+    struct census_budget *budget) {
+ unsigned at=s->errors_n;
+ for(unsigned i=0;i<s->errors_n;i++) if(s->errors[i].raw.pid==(uint32_t)child[2] &&
+     s->errors[i].raw.operation && !strcmp(s->errors[i].raw.operation,"environ")) at=i;
+ assert(at<s->errors_n);
+ struct census_capture_fault *companion=&s->errors[at].raw;
+ struct census_capture_fault original=*companion;
+ assert(original.retained_stage==1 && original.retained_pidfd_plus_one && original.retained_procdir_plus_one);
+ int extra=-1;bool swap_fd=false,swap_dir=false;
+ if(!strcmp(review_case,"missingdiag")) companion->capture_diagnostic_available=false;
+ else if(!strcmp(review_case,"secondpass")) {
+  companion->fields_pass=2;companion->diagnostic_first_identity_present=true;
+  companion->diagnostic_exit_poll=CENSUS_EXIT_POLL_NOT_PERFORMED;
+ } else if(!strcmp(review_case,"wrongpidfd")) {
+  extra=process_pidfd(child[4]);assert(extra>=0 && census_fd_take(budget,extra));
+  companion->retained_pidfd_plus_one=(unsigned)extra+1;swap_fd=true;
+ } else if(!strcmp(review_case,"wrongprocdir")) {
+  char name[32];snprintf(name,sizeof name,"%u",(unsigned)child[4]);
+  extra=openat(ev.procfd,name,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+  assert(extra>=0 && census_fd_take(budget,extra));
+  companion->retained_procdir_plus_one=(unsigned)extra+1;swap_dir=true;
+ } else assert(!strcmp(review_case,"positive"));
+ bool producer_return=census_resolve_exit_windows(s,r),admitted=false;
+ for(unsigned i=0;i<r->proofs_n;i++) if(r->proofs[i].exit_witness.stage==3 &&
+    r->proofs[i].source.pid==(uint32_t)child[2]) admitted=true;
+ /* A mutated descriptor is owned by this test and temporarily borrowed by the
+  * source custody slot. Restore/close exactly once whichever branch consumed it. */
+ if(swap_fd) {
+  if(!companion->retained_pidfd_plus_one) census_fd_close(budget,(int)original.retained_pidfd_plus_one-1);
+  else {assert(companion->retained_pidfd_plus_one==(unsigned)extra+1);
+   companion->retained_pidfd_plus_one=original.retained_pidfd_plus_one;census_fd_close(budget,extra);}
+ }
+ if(swap_dir) {
+  if(!companion->retained_procdir_plus_one) census_fd_close(budget,(int)original.retained_procdir_plus_one-1);
+  else {assert(companion->retained_procdir_plus_one==(unsigned)extra+1);
+   companion->retained_procdir_plus_one=original.retained_procdir_plus_one;census_fd_close(budget,extra);}
+ }
+ terminal(1,true);reap(2);terminal(4,true);
+ census_resolution_free(budget,r);census_global_free(s);
+ assert(!budget->used && !budget->fd_failed);close(ev.procfd);
+ bool expected=!strcmp(review_case,"positive");
+ printf("case=%s C_group_admitted=%d expected=%d producer_return=%d original_FULL_FD_Z_kernel=TRUE synthetic_ENV_error=TRUE owned_children_only=TRUE teardown_once_zero_bytes=PASS peakFD=%u\n",
+   review_case,admitted,expected,producer_return,budget->fd_peak);
+ return admitted==expected?0:1;
+}
+
 int main(int argc,char **argv) {
+ if(argc==2 && !strncmp(argv[1],"review-",7)) review_case=argv[1]+7;
+ /* Persist actual producer-custody regressions in ordinary fixture execution.
+  * Each fresh owned-child frame keeps its own 32FD/10slot/10s bounds; only test
+  * output moves to stderr so the original census JSON stdout stays immutable. */
+ if(!review_case) {
+  const char *cases[]={"review-missingdiag","review-secondpass","review-wrongpidfd","review-wrongprocdir"};
+  for(unsigned i=0;i<sizeof cases/sizeof cases[0];i++) {
+   pid_t check=fork();assert(check>=0);
+   if(!check) {assert(dup2(STDERR_FILENO,STDOUT_FILENO)>=0);execl(argv[0],argv[0],cases[i],(char *)NULL);_exit(127);}
+   int status;assert(waitpid(check,&status,0)==check);
+   if(!WIFEXITED(status) || WEXITSTATUS(status)) return 1;
+  }
+ }
+
  normalization=argc==2 && !strcmp(argv[1],"normalization");
  automatic=normalization || (argc==2 && !strcmp(argv[1],"automatic"));
  struct rlimit limit={32,32};assert(!setrlimit(RLIMIT_NOFILE,&limit));
@@ -81,6 +144,7 @@ int main(int argc,char **argv) {
   journal.scans[journal.n++]=receipt;
   if(scanning==2) terminal(0,false);
   if(scanning==5) terminal(2,false);
+  if(scanning==5 && review_case) return review_companion_kernel(s,r,&budget);
   if(scanning==2 || scanning==7) {
     struct census_resolution_ledger before={0};unsigned target=0;
     for(unsigned i=0;i<s->errors_n;i++) if(s->errors[i].raw.pid==(uint32_t)child[scanning==2?0:1]) target=i+1;

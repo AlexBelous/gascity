@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -23,11 +24,24 @@ type fakeRunner struct {
 	code    int
 	err     error
 	respond func(remoteArgv []string) ([]byte, int, error)
+	// panes answers the agent-pane list-panes lookups ("<mark>\t@W.%P"
+	// rows); empty means one marked agent pane, @1.%1. rawPanes sends the
+	// lookups to respond/out like any other call.
+	panes    string
+	rawPanes bool
 }
 
 func (f *fakeRunner) run(_ context.Context, _ Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
 	f.calls = append(f.calls, remoteArgv)
 	f.stdins = append(f.stdins, stdin)
+	if !f.rawPanes && isAgentPaneLookup(remoteArgv) {
+		// Answer as tmux does: the format's separator, a space.
+		rows := f.panes
+		if rows == "" {
+			rows = "agent\t@1.%1"
+		}
+		return []byte(strings.ReplaceAll(rows, "\t", " ") + "\n"), 0, nil
+	}
 	if f.respond != nil {
 		return f.respond(remoteArgv)
 	}
@@ -233,4 +247,10 @@ func TestConn_ExecOverRealLocalhost(t *testing.T) {
 	if string(out) != "ok" {
 		t.Errorf("out = %q, want %q", out, "ok")
 	}
+}
+
+// isAgentPaneLookup matches the provider's agent-pane list-panes calls.
+func isAgentPaneLookup(argv []string) bool {
+	return len(argv) >= 2 && argv[0] == "tmux" && argv[1] == "list-panes" &&
+		argv[len(argv)-1] == agentPaneRowFormat
 }

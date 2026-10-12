@@ -13,11 +13,11 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 static pid_t child[5];static int gates[5];static bool visible[5];static unsigned scanning;
-static bool automatic;static bool injected[5],released[5];
+static bool automatic,normalization;static bool injected[5],released[5];
 static void terminal(unsigned,bool);static void reap(unsigned);
 static int inject_env(uint32_t pid) {
  if(scanning==2 && pid==(uint32_t)child[0]) {injected[0]=true;return ESRCH;}
- if(scanning==5 && pid==(uint32_t)child[2]) {injected[2]=true;return ESRCH;}
+ if(scanning==(normalization?6u:5u) && pid==(uint32_t)child[2]) {injected[2]=true;return ESRCH;}
  return 0;
 }
 static bool enumerate_fixture(void *unused,struct census_budget *budget,struct census_pid_list *out) {
@@ -25,10 +25,10 @@ static bool enumerate_fixture(void *unused,struct census_budget *budget,struct c
  if(automatic) {
   scanning++;
   if(scanning==3) reap(0);
-  if(scanning==4) {terminal(3,true);visible[2]=true;}
-  if(scanning==6) reap(2);
-  if(scanning==7) terminal(1,false);
-  if(scanning==8) reap(1);
+  if(scanning==4) {terminal(3,true);visible[2]=true;if(normalization) terminal(1,false);}
+  if(scanning==(normalization?7u:6u)) reap(2);
+  if(!normalization && scanning==7) terminal(1,false);
+  if(scanning==(normalization?5u:8u)) reap(1);
  }
  uint32_t pids[6];size_t n=0;pids[n++]=getpid();
  for(unsigned i=0;i<5;i++) if(visible[i]) pids[n++]=child[i];
@@ -47,7 +47,8 @@ static void schedule_after_error(uint32_t pid) {
  for(unsigned i=0;i<3;i+=2) if(injected[i] && !released[i]) {terminal(i,false);released[i]=true;}
 }
 int main(int argc,char **argv) {
- automatic=argc==2 && !strcmp(argv[1],"automatic");
+ normalization=argc==2 && !strcmp(argv[1],"normalization");
+ automatic=normalization || (argc==2 && !strcmp(argv[1],"automatic"));
  struct rlimit limit={32,32};assert(!setrlimit(RLIMIT_NOFILE,&limit));
  struct census_budget budget={.limit=16*1024*1024};memset(&ev,0,sizeof ev);
  ev.procfd=open("/proc",O_RDONLY|O_DIRECTORY|O_CLOEXEC);assert(ev.procfd>=0);
@@ -68,8 +69,9 @@ int main(int argc,char **argv) {
  if(automatic) {
   census_test_before_status=schedule_after_error;
   assert(census_choose_proven_continuation(s,r,&journal)==CENSUS_ROUNDS_SELECTED_PENDING_PROOF);
-  assert(journal.n==10 && journal.selected_first==8 && journal.selected_second==9 && journal.selected_seal==10);
-  fprintf(stderr,"actual_production_selector_mixed_ABCD_8_9_10_BOTH_live_survivor=PASS\n");
+  assert(journal.n==(normalization?7u:10u) && journal.selected_first==journal.n-2 && journal.selected_second==journal.n-1 && journal.selected_seal==journal.n);
+  if(normalization) assert(s->history->scans[4].receipt.classified==s->history->scans[6].receipt.classified+1);
+  fprintf(stderr,"actual_production_selector_mixed_ABCD_BOTH_live_survivor_and_exact_count=PASS\n");
  } else for(scanning=1;scanning<=10;scanning++) {
   if(scanning==4) {terminal(3,true);visible[2]=true;}
   if(scanning==7) terminal(1,false);
@@ -102,11 +104,12 @@ int main(int argc,char **argv) {
   if(scanning==4 || scanning==7) assert(!census_current_closings_equal(s,r));
  }
  assert(census_current_closings_equal(s,r));
- journal.selected_first=8;journal.selected_second=9;journal.selected_seal=10;
- for(unsigned i=0;i<r->resolutions_n;i++) if(r->resolutions[i].kind==CENSUS_RESOLUTION_KNOWN_TERMINAL || r->resolutions[i].kind==CENSUS_RESOLUTION_BOUND_BIRTH) r->resolutions[i].selected_seal=10;
- for(unsigned i=0;i<r->coverage_n;i++) r->coverage[i].selected_seal=10;
+ journal.selected_first=s->history->n-2;journal.selected_second=s->history->n-1;journal.selected_seal=s->history->n;
+ for(unsigned i=0;i<r->resolutions_n;i++) if(r->resolutions[i].kind==CENSUS_RESOLUTION_KNOWN_TERMINAL || r->resolutions[i].kind==CENSUS_RESOLUTION_BOUND_BIRTH) r->resolutions[i].selected_seal=journal.selected_seal;
+ for(unsigned i=0;i<r->coverage_n;i++) r->coverage[i].selected_seal=journal.selected_seal;
  assert(census_finish_births(s,r,&journal));assert(census_final_resolutions_valid(s,r,&journal));
- assert(!census_finish_retired_birth(s,r,&journal,2));
+ unsigned birth_error=0;for(unsigned i=0;i<s->errors_n;i++) if(!strcmp(s->errors[i].reason,"uninspected_birth")) birth_error=i+1;
+ assert(birth_error && !census_finish_retired_birth(s,r,&journal,birth_error));
  fprintf(stderr,"legacy_C_laterFULL_pair_not_waived=RED distinct_bound_birth_branch=GREEN\n");
  assert(s->errors_n==4 && r->resolutions_n==4 && r->coverage_n==1 && r->proofs_n==5);
  /* Same immutable whole ledger: meaningful authority/time/group mutations. */
@@ -121,7 +124,7 @@ int main(int argc,char **argv) {
  r->proofs[0].source.offset_ms=10000;assert(!census_final_resolutions_valid(s,r,&journal));r->proofs[0]=saved_proof;
  struct census_typed_resolution saved_link=r->resolutions[0];r->resolutions[0].error_index=0;
  assert(!census_final_resolutions_valid(s,r,&journal));r->resolutions[0]=saved_link;
- r->resolutions[0].selected_seal=7;assert(!census_final_resolutions_valid(s,r,&journal));r->resolutions[0]=saved_link;
+ r->resolutions[0].selected_seal=journal.selected_seal==7?10:7;assert(!census_final_resolutions_valid(s,r,&journal));r->resolutions[0]=saved_link;
  uint32_t pid=r->coverage[0].pid;r->coverage[0].pid++;
  assert(!census_final_resolutions_valid(s,r,&journal));r->coverage[0].pid=pid;
  char digest=s->history->scans[3].receipt.raw_digest[0];s->history->scans[3].receipt.raw_digest[0]=digest=='0'?'1':'0';

@@ -137,9 +137,11 @@ static inline bool census_global_scan_record(void *context,unsigned scan_id,unsi
   }
   /* New positively read seal PID still requires TWO later independent closings.
    * Raw birth remains in the ledger until a separate typed resolution assembler. */
-  if(captured && kind==CENSUS_SEAL && s->history->n>1) {
+  if(kind==CENSUS_SEAL && s->history->n>1 && scan->numeric_enumeration_complete &&
+      s->history->scans[s->history->n-2].numeric_enumeration_complete) {
     struct census_history_scan *previous=&s->history->scans[s->history->n-2];size_t at=0;
     for(size_t i=0;i<scan->allocated_rows;i++) {
+      if(scan->rows[i].failure!=CENSUS_ROW_OK || scan->rows[i].classification==CENSUS_CLASS_INVALID) continue;
       uint32_t pid=scan->rows[i].pid;
       while(at<previous->allocated_rows && previous->rows[at].pid<pid) at++;
       if(at<previous->allocated_rows && previous->rows[at].pid==pid) continue;
@@ -147,7 +149,7 @@ static inline bool census_global_scan_record(void *context,unsigned scan_id,unsi
       census_global_error(s,scan_id,"uninspected_birth",
         (struct census_capture_fault){.pid=pid,.start=scan->rows[i].identity.start,.operation="census"});
     }
-    scan->receipt.seal_revalidated=true; /* Full source capture, not stat-only. */
+    scan->receipt.seal_revalidated=captured; /* Never regrade a partial seal. */
   }
   *out=scan->receipt;
   if(!captured || s->truncated) s->fatal=true;

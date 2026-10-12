@@ -29328,5 +29328,783 @@
       "duration_ms": 12,
       "controller_pid": 3725303
     }
+  },
+  {
+    "name": "actual-selector-C-group-one-retirement-5_6_7",
+    "want": true,
+    "case": {
+      "census": {
+        "schema": "bounded-process-census/v3",
+        "scans": [
+          {
+            "scan_index": 1,
+            "enumerated_count": 5,
+            "enumeration_digest": "e8160f4cd81af53775bb73f5588e8c184477bb9bfeb022cc4669828ad55a5dc4",
+            "live_count": 5,
+            "live_digest": "241e6bb9f64b76d3cb68aeceb280bdb6c1fbfc5731c633de66b10a4d212cf9fd",
+            "round": 0,
+            "kind": "initial",
+            "offset_ms": 3,
+            "verified": [
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112684,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112685,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "gc",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112687,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112688,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              }
+            ],
+            "numeric_pids": [
+              4112683,
+              4112684,
+              4112685,
+              4112687,
+              4112688
+            ]
+          },
+          {
+            "scan_index": 2,
+            "enumerated_count": 5,
+            "enumeration_digest": "e8160f4cd81af53775bb73f5588e8c184477bb9bfeb022cc4669828ad55a5dc4",
+            "live_count": 4,
+            "live_digest": "237414c5c4a69c0fa897fecae828f01dd510491ef025941339ff534754624466",
+            "round": 1,
+            "kind": "closing",
+            "offset_ms": 4,
+            "verified": [
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112685,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "gc",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112687,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112688,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              }
+            ],
+            "numeric_pids": [
+              4112683,
+              4112684,
+              4112685,
+              4112687,
+              4112688
+            ]
+          },
+          {
+            "scan_index": 3,
+            "enumerated_count": 4,
+            "enumeration_digest": "f2ea1bca878a034b795ddbe3144e9977ba6be0f4c37c718178f5725fa3c8b1f9",
+            "live_count": 4,
+            "live_digest": "237414c5c4a69c0fa897fecae828f01dd510491ef025941339ff534754624466",
+            "round": 1,
+            "kind": "closing",
+            "offset_ms": 5,
+            "verified": [
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112685,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "gc",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112687,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112688,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              }
+            ],
+            "numeric_pids": [
+              4112683,
+              4112685,
+              4112687,
+              4112688
+            ]
+          },
+          {
+            "scan_index": 4,
+            "enumerated_count": 4,
+            "enumeration_digest": "605ec7caf1dbbe0c82713e06849c4682aca81fc92419a3865bc48f22e6aa47d0",
+            "live_count": 3,
+            "live_digest": "a73fd6d12ad6106be44d8c52f33539981a58a6a1388d31117788e1c6e8c5683f",
+            "round": 1,
+            "kind": "seal",
+            "offset_ms": 6,
+            "verified": [
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112686,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112688,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              }
+            ],
+            "numeric_pids": [
+              4112683,
+              4112685,
+              4112686,
+              4112688
+            ]
+          },
+          {
+            "scan_index": 5,
+            "enumerated_count": 3,
+            "enumeration_digest": "ee64f03ebd9afbc4e51d6960ef09544740fa465c8292232d1432fe4b1288abe1",
+            "live_count": 3,
+            "live_digest": "a73fd6d12ad6106be44d8c52f33539981a58a6a1388d31117788e1c6e8c5683f",
+            "round": 2,
+            "kind": "closing",
+            "offset_ms": 7,
+            "verified": [
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112686,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              },
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112688,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              }
+            ],
+            "numeric_pids": [
+              4112683,
+              4112686,
+              4112688
+            ]
+          },
+          {
+            "scan_index": 6,
+            "enumerated_count": 3,
+            "enumeration_digest": "ee64f03ebd9afbc4e51d6960ef09544740fa465c8292232d1432fe4b1288abe1",
+            "live_count": 2,
+            "live_digest": "c697d9336edee94bae5f00a5f8383dd78813bc5eab950ad06401c6ce158a228d",
+            "round": 2,
+            "kind": "closing",
+            "offset_ms": 8,
+            "verified": [
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112688,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              }
+            ],
+            "numeric_pids": [
+              4112683,
+              4112686,
+              4112688
+            ]
+          },
+          {
+            "scan_index": 7,
+            "enumerated_count": 2,
+            "enumeration_digest": "9082c632456eb19f99f4f47662daa1dff3a5844b7853c3cfa871931ff98630fc",
+            "live_count": 2,
+            "live_digest": "c697d9336edee94bae5f00a5f8383dd78813bc5eab950ad06401c6ce158a228d",
+            "round": 2,
+            "kind": "seal",
+            "offset_ms": 9,
+            "verified": [
+              {
+                "classification": "nonmanaged",
+                "kernel_flags": 0,
+                "no_gc_environment": true,
+                "environment_revalidated": true,
+                "pid": 4112688,
+                "ppid": 4112683,
+                "pgid": 4112670,
+                "uids": [
+                  1000,
+                  1000,
+                  1000,
+                  1000
+                ],
+                "start_ticks": "375636774",
+                "epoch": 0,
+                "session_id": "",
+                "city": "",
+                "template": "",
+                "instance_token_sha256": "",
+                "name": "bd",
+                "declared_root": false,
+                "stat_revalidated": true,
+                "pidfd_bound": true,
+                "uids_revalidated": true
+              }
+            ],
+            "numeric_pids": [
+              4112683,
+              4112688
+            ]
+          }
+        ],
+        "selected_closings": [
+          5,
+          6
+        ],
+        "seal": {
+          "scan_index": 7,
+          "enumerated_count": 2,
+          "pid_digest": "9082c632456eb19f99f4f47662daa1dff3a5844b7853c3cfa871931ff98630fc",
+          "classified_count": 2,
+          "classified_digest": "c697d9336edee94bae5f00a5f8383dd78813bc5eab950ad06401c6ce158a228d"
+        },
+        "reconciled_count": 2,
+        "reconciled_digest": "c697d9336edee94bae5f00a5f8383dd78813bc5eab950ad06401c6ce158a228d",
+        "proofs": [
+          {
+            "kind": "terminal_zombie",
+            "method": "pidfd_zombie_stat",
+            "pid": 4112684,
+            "start_ticks": "375636774",
+            "replacement_start": "",
+            "scan_index": 2,
+            "offset_ms": 4,
+            "protected_identity": false,
+            "descendant_certificate_id": 0,
+            "exit_witness": {
+              "capture_stage": "bound_first_environ",
+              "initial_poll": "zero",
+              "bound_start_ticks": "375636774",
+              "terminal_uids_before": [
+                1000,
+                1000,
+                1000,
+                1000
+              ],
+              "terminal_uids_after": [
+                1000,
+                1000,
+                1000,
+                1000
+              ],
+              "terminal_poll": "valid_pollin",
+              "full_identity_revalidated": false
+            }
+          },
+          {
+            "kind": "terminal_zombie",
+            "method": "pidfd_zombie_stat",
+            "pid": 4112685,
+            "start_ticks": "375636774",
+            "replacement_start": "",
+            "scan_index": 4,
+            "offset_ms": 6,
+            "protected_identity": false,
+            "descendant_certificate_id": 0,
+            "exit_witness": {
+              "capture_stage": "initial_pidfd_poll",
+              "initial_poll": "valid_pollin",
+              "bound_start_ticks": "375636774",
+              "terminal_uids_before": [
+                1000,
+                1000,
+                1000,
+                1000
+              ],
+              "terminal_uids_after": [
+                1000,
+                1000,
+                1000,
+                1000
+              ],
+              "terminal_poll": "valid_pollin",
+              "full_identity_revalidated": false
+            }
+          },
+          {
+            "kind": "enumerated_pid_absent",
+            "method": "pidfd_no_pid",
+            "pid": 4112687,
+            "start_ticks": null,
+            "replacement_start": "",
+            "scan_index": 4,
+            "offset_ms": 6,
+            "protected_identity": false,
+            "descendant_certificate_id": 0
+          },
+          {
+            "kind": "incarnation_retired",
+            "method": "pidfd_no_pid",
+            "pid": 4112687,
+            "start_ticks": "375636774",
+            "replacement_start": "",
+            "scan_index": 4,
+            "offset_ms": 6,
+            "protected_identity": false,
+            "descendant_certificate_id": 0
+          },
+          {
+            "kind": "terminal_zombie",
+            "method": "pidfd_zombie_stat",
+            "pid": 4112686,
+            "start_ticks": "375636774",
+            "replacement_start": "",
+            "scan_index": 6,
+            "offset_ms": 8,
+            "protected_identity": false,
+            "descendant_certificate_id": 0,
+            "exit_witness": {
+              "capture_stage": "bound_seal_birth_terminal",
+              "initial_poll": "zero",
+              "bound_start_ticks": "375636774",
+              "terminal_uids_before": [
+                1000,
+                1000,
+                1000,
+                1000
+              ],
+              "terminal_uids_after": [
+                1000,
+                1000,
+                1000,
+                1000
+              ],
+              "terminal_poll": "valid_pollin",
+              "full_identity_revalidated": true
+            }
+          }
+        ],
+        "certificates": [],
+        "resolutions": [
+          {
+            "error_index": 1,
+            "kind": "known_nonmanaged_terminal",
+            "proof_index": 1,
+            "classified_scan": 1,
+            "selected_seal": 7
+          },
+          {
+            "error_index": 2,
+            "kind": "known_nonmanaged_terminal",
+            "proof_index": 2,
+            "classified_scan": 3,
+            "selected_seal": 7
+          },
+          {
+            "error_index": 3,
+            "kind": "bound_seal_birth_terminal",
+            "proof_index": 5,
+            "classified_scan": 4,
+            "selected_seal": 7
+          },
+          {
+            "error_index": 4,
+            "kind": "known_nonmanaged_terminal",
+            "proof_index": 5,
+            "classified_scan": 4,
+            "selected_seal": 7
+          }
+        ],
+        "coverage_retirements": [
+          {
+            "pid": 4112687,
+            "start_ticks": "375636774",
+            "prior_scan": 3,
+            "missing_scan": 4,
+            "absence_proof": 3,
+            "retirement_proof": 4,
+            "selected_seal": 7
+          }
+        ],
+        "peak_fd": 18,
+        "retained_bytes": 82597
+      },
+      "errors": [
+        {
+          "reason": "process_unavailable",
+          "operation": "environ",
+          "pid": 4112684,
+          "errno": 3,
+          "scan_index": 2,
+          "resolved_by": 0,
+          "start_ticks": "375636774",
+          "capture_diagnostic": {
+            "fields_pass": 1,
+            "bound_live": true,
+            "first_identity_present": false,
+            "exit_poll": "zero",
+            "exit_witness": false
+          }
+        },
+        {
+          "reason": "process_unavailable",
+          "operation": "pidfd_poll",
+          "pid": 4112685,
+          "errno": 116,
+          "scan_index": 4,
+          "resolved_by": 0,
+          "start_ticks": null
+        },
+        {
+          "reason": "uninspected_birth",
+          "operation": "census",
+          "pid": 4112686,
+          "errno": 0,
+          "scan_index": 4,
+          "resolved_by": 0,
+          "start_ticks": "375636774"
+        },
+        {
+          "reason": "process_unavailable",
+          "operation": "environ",
+          "pid": 4112686,
+          "errno": 3,
+          "scan_index": 6,
+          "resolved_by": 0,
+          "start_ticks": "375636774",
+          "capture_diagnostic": {
+            "fields_pass": 1,
+            "bound_live": true,
+            "first_identity_present": false,
+            "exit_poll": "zero",
+            "exit_witness": false
+          }
+        }
+      ],
+      "errors_total": 4,
+      "errors_truncated": false,
+      "duration_ms": 9,
+      "controller_pid": 4112683
+    }
   }
 ]

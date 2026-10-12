@@ -72,14 +72,40 @@ type CensusProofV3 struct {
 	ExitWitness             *CensusExitWitness `json:"exit_witness,omitempty"`
 }
 
+// CensusOriginalCapture retains original descriptor provenance separately from
+// the immutable raw fault and the legacy protected-certificate source relation.
+type CensusOriginalCapture struct {
+	CaptureHandle                  uint64    `json:"capture_handle"`
+	OriginalPIDFDGeneration        uint64    `json:"original_pidfd_generation"`
+	OriginalProcdirGeneration      uint64    `json:"original_procdir_generation"`
+	CommVerifiedBeforeFirstEnviron bool      `json:"comm_verified_before_first_environ"`
+	CaptureScan                    int       `json:"capture_scan"`
+	MissingScan                    int       `json:"missing_scan"`
+	BindingOffsetMS                int64     `json:"binding_offset_ms"`
+	TerminalOffsetMS               int64     `json:"terminal_offset_ms"`
+	PID                            int       `json:"pid"`
+	BoundStartTicks                string    `json:"bound_start_ticks"`
+	OriginalPIDFDDevice            uint64    `json:"original_pidfd_device"`
+	OriginalPIDFDInode             uint64    `json:"original_pidfd_inode"`
+	OriginalProcdirDevice          uint64    `json:"original_procdir_device"`
+	OriginalProcdirInode           uint64    `json:"original_procdir_inode"`
+	TerminalFDInfoPID              int       `json:"terminal_fdinfo_pid"`
+	TerminalPoll                   string    `json:"terminal_poll"`
+	SameOriginalDescriptors        bool      `json:"same_original_descriptors"`
+	OriginalUIDs                   [4]uint32 `json:"original_uids"`
+	AbsenceProof                   int       `json:"absence_proof"`
+	CertificateID                  int       `json:"certificate_id"`
+}
+
 // CensusResolution records a positive discharge without overwriting raw errors.
 // Exactly one typed resolution is allowed per raw error; error indices are 1-based.
 type CensusResolution struct {
-	ErrorIndex     int    `json:"error_index"`
-	Kind           string `json:"kind"`
-	ProofIndex     int    `json:"proof_index"`
-	ClassifiedScan int    `json:"classified_scan"`
-	SelectedSeal   int    `json:"selected_seal"`
+	OriginalCapture *CensusOriginalCapture `json:"original_capture,omitempty"`
+	ErrorIndex      int                    `json:"error_index"`
+	Kind            string                 `json:"kind"`
+	ProofIndex      int                    `json:"proof_index"`
+	ClassifiedScan  int                    `json:"classified_scan"`
+	SelectedSeal    int                    `json:"selected_seal"`
 }
 
 // CensusCoverageRetirement links numeric absence without fabricating a raw fault.
@@ -161,7 +187,7 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 		c.ReconciledCount > first.LiveCount || c.ReconciledCount > second.LiveCount {
 		return bad()
 	}
-	if !validateExitExtensions(c, errors, byScan, controllerPID) {
+	if !validateOriginalExtensions(c, errors, byScan, controllerPID) || !validateExitExtensions(c, errors, byScan, controllerPID) {
 		return bad()
 	}
 	seenProof := map[string]bool{}
@@ -329,6 +355,10 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 			return bad()
 		}
 		switch r.Kind {
+		case "deferred_managed_retirement", "managed_birth_retirement", "direct_reaped_birth":
+			if r.OriginalCapture == nil {
+				return bad()
+			}
 		case "known_nonmanaged_terminal", "bound_seal_birth_terminal":
 			// The coherent extension validator has checked exact group/time/prior.
 			if r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) || c.Proofs[r.ProofIndex-1].ExitWitness == nil {
@@ -534,6 +564,16 @@ func certificateOwnFault(c CensusV3, errors []EvidenceError, cert DescendantCert
 		return false
 	}
 	retirement, leaf := c.Proofs[cert.RetirementProof-1], cert.Chain[0]
+	deferred := 0
+	for _, r := range c.Resolutions {
+		if r.Kind == "deferred_managed_retirement" && r.ProofIndex == cert.RetirementProof && r.OriginalCapture != nil && r.OriginalCapture.CertificateID == cert.ID {
+			deferred++
+		}
+	}
+	if deferred > 0 {
+		return deferred == 1
+	}
+
 	count := 0
 	for _, r := range c.Resolutions {
 		if r.ErrorIndex < 1 || r.ErrorIndex > len(errors) || r.Kind != "kernel_absence" || r.ClassifiedScan != 0 || r.SelectedSeal != 0 {

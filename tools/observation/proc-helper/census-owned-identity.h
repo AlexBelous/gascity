@@ -9,10 +9,18 @@
 #include <limits.h>
 #include <errno.h>
 
+struct census_fd_owner {int fd;uint64_t generation;bool active,owned;};
+struct census_capture_owner {
+  uint64_t handle,pidfd_generation,procdir_generation,start;
+  uint32_t pid;int pidfd,procdir;bool released;
+};
 struct census_budget {
   size_t used, limit, peak;
   unsigned fd_live,fd_peak;
   bool fd_tracking,fd_failed;
+  uint64_t fd_generation,capture_generation;
+  struct census_fd_owner fd_owners[32];
+  struct census_capture_owner capture_owners[32];
 };
 struct census_owned_identity {
 	uint32_t kernel_flags;
@@ -47,6 +55,13 @@ struct census_capture_fault {
   unsigned retained_stage;
   uint64_t retained_start;
   uint32_t retained_uids[4];
+  /* M/R provenance is captured while the ORIGINAL descriptors are live.
+   * A later fd number alone is never a custody witness. */
+  uint64_t retained_pidfd_dev,retained_pidfd_ino,retained_dir_dev,retained_dir_ino;
+  uint64_t retained_binding_offset_ms;
+  bool retained_binding_verified;
+  uint64_t retained_capture_handle;
+  bool retained_comm_verified;
 };
 
 static inline void *census_alloc(struct census_budget *budget,size_t n) {

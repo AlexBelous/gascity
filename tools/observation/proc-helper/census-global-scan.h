@@ -68,18 +68,38 @@ static inline bool census_global_capture_owned(void *context,uint32_t pid,struct
       const struct census_history_row *row=&h->rows[i];
       if(row->pid!=pid || row->failure!=CENSUS_ROW_OK || row->classification==CENSUS_CLASS_INVALID) continue;
       const struct census_owned_identity *v=&row->identity;
-      if(row->classification!=CENSUS_CLASS_NONMANAGED ||
-          census_classify_owned(v)!=CENSUS_CLASS_NONMANAGED || v->declared_root || infra(v->name)) eligible=false;
+      if((row->classification!=CENSUS_CLASS_NONMANAGED && row->classification!=CENSUS_CLASS_MANAGED) ||
+          census_classify_owned(v)!=row->classification || v->declared_root || infra(v->name)) eligible=false;
       for(unsigned uid=0;uid<4;uid++) if(!v->uids[uid]) eligible=false;
       if(prior && !census_equal_bounded(prior,v)) eligible=false;
       prior=v;
     }
   }
-  return census_capture_bounded_custodied(pid,b,out,fault,
+  /* Managed retention is provisional custody ONLY after an exact prior full,
+   * acyclic inherited chain reaches its declared root. */
+  if(eligible && prior && census_classify_owned(prior)==CENSUS_CLASS_MANAGED) {
+    const struct census_history_scan *h=&s->history->scans[s->history->n-2];
+    const struct census_owned_identity *at=prior;uint32_t seen[128];unsigned n=0;
+    while(eligible) {
+      if(n==128 || !census_managed_identity(at) || at->epoch!=prior->epoch ||
+          memcmp(at->uids,prior->uids,sizeof at->uids) || strcmp(at->sid,prior->sid) ||
+          strcmp(at->city,prior->city) || strcmp(at->template,prior->template) ||
+          strcmp(at->token,prior->token)) {eligible=false;break;}
+      for(unsigned k=0;k<n;k++) if(seen[k]==at->pid) eligible=false;
+      seen[n++]=at->pid;if(!eligible || at->declared_root) break;
+      const struct census_owned_identity *next=NULL;
+      for(size_t k=0;k<h->allocated_rows;k++) if(h->rows[k].pid==at->ppid &&
+          h->rows[k].failure==CENSUS_ROW_OK && h->rows[k].classification==CENSUS_CLASS_MANAGED)
+        next=&h->rows[k].identity;
+      if(!next) {eligible=false;break;}at=next;
+    }
+    if(n<2 || !at->declared_root) eligible=false;
+  }
+  return census_capture_bounded_custodied_prior(pid,b,out,fault,
     eligible && prior?prior->start:0,eligible && prior?prior->uids:NULL,
     eligible && !prior && s->history->n>1 &&
       s->history->scans[s->history->n-1].receipt.kind==CENSUS_SEAL &&
-      census_numeric_enumeration_absent(&s->history->scans[s->history->n-2],pid));
+      census_numeric_enumeration_absent(&s->history->scans[s->history->n-2],pid),eligible?prior:NULL);
 }
 static inline bool census_global_scan_record(void *context,unsigned scan_id,unsigned round,
     enum census_scan_kind kind,struct census_round_scan *out) {

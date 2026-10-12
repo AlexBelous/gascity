@@ -284,6 +284,10 @@ func validCompleteCaptureDiagnosticLinks(c CensusV3, errors []EvidenceError) boo
 					(p.ExitWitness.CaptureStage == "bound_first_environ" || p.ExitWitness.CaptureStage == "bound_seal_birth_terminal") {
 					matches++
 				}
+			case "deferred_managed_retirement":
+				if r.OriginalCapture != nil && p.ProtectedIdentity && p.Kind == "incarnation_retired" && p.Method == "pidfd_no_pid" && d.FieldsPass == 1 && *d.BoundLive && !*d.FirstIdentityPresent && d.ExitPoll == "zero" && !*d.ExitWitness {
+					matches++
+				}
 			case "kernel_absence":
 				if p.Kind == "incarnation_retired" && p.Method == "pidfd_no_pid" {
 					matches++

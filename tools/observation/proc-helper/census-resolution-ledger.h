@@ -25,10 +25,21 @@ struct census_typed_certificate {
 };
 enum census_resolution_kind {CENSUS_RESOLUTION_ABSENCE,CENSUS_RESOLUTION_FRESH,
   CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT,CENSUS_RESOLUTION_RETIRED_BIRTH,
-  CENSUS_RESOLUTION_KNOWN_TERMINAL,CENSUS_RESOLUTION_BOUND_BIRTH};
+  CENSUS_RESOLUTION_KNOWN_TERMINAL,CENSUS_RESOLUTION_BOUND_BIRTH,
+  CENSUS_RESOLUTION_DEFERRED_MANAGED,CENSUS_RESOLUTION_MANAGED_BIRTH,
+  CENSUS_RESOLUTION_REAPED_BIRTH};
+struct census_original_capture {
+  uint64_t binding_offset_ms,terminal_offset_ms;
+  uint64_t pidfd_dev,pidfd_ino,procdir_dev,procdir_ino;
+  uint32_t pid,uids[4];uint64_t start;
+  unsigned capture_scan,missing_scan,absence_proof,certificate_id;
+  uint64_t capture_handle,pidfd_generation,procdir_generation;
+  bool present,comm_verified;
+};
 struct census_typed_resolution {
   unsigned error_index,proof_index,classified_scan,selected_seal;
   enum census_resolution_kind kind;
+  struct census_original_capture original;
 };
 struct census_coverage_retirement {
   unsigned prior_scan,missing_scan,absence_proof,retirement_proof,selected_seal;
@@ -150,6 +161,12 @@ static inline bool census_exit_history_valid(const struct census_global_source *
     const struct census_resolution_ledger *);
 static inline bool census_new_terminal_link_valid(const struct census_global_source *,
     const struct census_resolution_ledger *,const struct census_typed_resolution *,unsigned);
+static inline bool census_original_link_valid(const struct census_global_source *,
+    const struct census_resolution_ledger *,const struct census_typed_resolution *,unsigned);
+static inline bool census_original_kind(enum census_resolution_kind k) {
+  return k==CENSUS_RESOLUTION_DEFERRED_MANAGED || k==CENSUS_RESOLUTION_MANAGED_BIRTH ||
+    k==CENSUS_RESOLUTION_REAPED_BIRTH;
+}
 static inline bool census_absence_raw_eligible(const struct census_global_fault *e) {
   if(strcmp(e->reason,"process_unavailable") || !e->raw.operation || e->raw.pid<=1 ||
       e->raw.pid==ev.binding.pid) return false;
@@ -213,6 +230,15 @@ static inline bool census_certificate_source_link_valid(const struct census_glob
       a->pid!=p->pid || a->scan_index!=p->scan_index ||
       a->offset_ms!=p->offset_ms || !p->start) return false;
   unsigned matches=0;
+  for(unsigned k=0;k<r->resolutions_n;k++) {
+    const struct census_typed_resolution *v=&r->resolutions[k];
+    if(v->kind==CENSUS_RESOLUTION_DEFERRED_MANAGED && v->proof_index==c->retirement_proof &&
+        v->original.certificate_id==c->id) {
+      if(!census_original_link_valid(s,r,v,v->selected_seal)) return false;
+      matches++;
+    }
+  }
+  if(matches) return matches==1;
   for(unsigned e=0;e<s->errors_n;e++) {
     if(expired()) return false;
     const struct census_global_fault *fault=&s->errors[e];
@@ -260,6 +286,9 @@ static inline bool census_certificates_history_valid(const struct census_global_
         n<2 || n>128 || !c->witness.chain ||
         !census_certificate_source_link_valid(s,r,ci)) return false;
     const struct proof_item *ret=&r->proofs[c->retirement_proof-1].source;
+    const struct census_typed_resolution *deferred=NULL;
+    for(unsigned k=0;k<r->resolutions_n;k++) if(r->resolutions[k].kind==CENSUS_RESOLUTION_DEFERRED_MANAGED &&
+        r->resolutions[k].proof_index==c->retirement_proof) deferred=&r->resolutions[k];
     const unsigned terminal=(unsigned)ret->scan_index;
     if(terminal<=c->prior_scan || terminal>h->n ||
         c->witness.chain[0].pid!=ret->pid || c->witness.chain[0].start!=ret->start) return false;
@@ -276,6 +305,10 @@ static inline bool census_certificates_history_valid(const struct census_global_
       for(unsigned scan=c->prior_scan+1;scan<=h->n;scan++) {
         if(expired()) return false;
         const struct census_history_row *fresh=census_history_find(&h->scans[scan-1],v->pid);
+        if(deferred && i==0 && scan>=s->errors[deferred->error_index-1].scan_index) {
+          if(fresh && (census_row_verified(fresh) || scan!=(unsigned)s->errors[deferred->error_index-1].scan_index)) return false;
+          continue;
+        }
         if(scan<terminal || i==n-1) {
           if(!census_row_verified(fresh) || !census_same_owned(v,&fresh->identity)) return false;
           continue;

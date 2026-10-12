@@ -15,6 +15,10 @@ static inline bool census_closing_absence_link(const struct census_global_source
     for(unsigned i=0;i<r->resolutions_n;i++) {
       const struct census_typed_resolution *v=&r->resolutions[i];
       if(v->error_index!=e+1) continue;
+      if(census_original_kind(v->kind)) {
+        if(!census_original_link_valid(s,r,v,v->selected_seal)) return false;
+        matches++;continue;
+      }
       if(v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL) {
         if(!census_new_terminal_link_valid(s,r,v,v->selected_seal)) return false;
         matches++;continue;
@@ -98,7 +102,9 @@ static inline bool census_current_closings_equal(const struct census_global_sour
     for(unsigned i=0;i<r->resolutions_n;i++) {
       const struct census_typed_resolution *v=&r->resolutions[i];
       if(v->error_index!=e+1) continue;
-      if(v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL) {
+      if(census_original_kind(v->kind)) {
+        if(!census_original_link_valid(s,r,v,v->selected_seal)) return false;
+      } else if(v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL) {
         if(!census_new_terminal_link_valid(s,r,v,v->selected_seal)) return false;
       } else if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
         if(!census_unclassified_link_valid(s,r,v)) return false;
@@ -115,6 +121,8 @@ static inline bool census_current_closings_equal(const struct census_global_sour
   for(unsigned k=0;k<r->proofs_n;k++)
     if((r->proofs[k].exit_witness.stage || r->proofs[k].coverage_member) &&
         r->proofs[k].source.scan_index>=(int)n) return false;
+  for(unsigned k=0;k<r->resolutions_n;k++) if(census_original_kind(r->resolutions[k].kind) &&
+      r->resolutions[k].original.missing_scan>=n) return false;
   const struct census_history_scan *a=&s->history->scans[n-3],*b=&s->history->scans[n-2],
     *seal=&s->history->scans[n-1];
   if(a->receipt.kind!=CENSUS_CLOSING || b->receipt.kind!=CENSUS_CLOSING ||

@@ -74,6 +74,10 @@ static inline bool census_standalone_history_valid(const struct census_global_so
   for(unsigned i=0;i<r->proofs_n;i++) {
     const struct census_typed_proof *p=&r->proofs[i];
     if(p->exit_witness.stage || p->coverage_member) continue;
+    bool original_member=false;
+    for(unsigned k=0;k<r->resolutions_n;k++) if(census_original_kind(r->resolutions[k].kind) &&
+        (r->resolutions[k].proof_index==i+1 || r->resolutions[k].original.absence_proof==i+1)) original_member=true;
+    if(original_member) continue;
     bool certificate_member=false;
     for(unsigned k=0;k<r->certificates_n;k++) if(r->certificates[k].absence_proof==i+1 ||
         r->certificates[k].retirement_proof==i+1) certificate_member=true;

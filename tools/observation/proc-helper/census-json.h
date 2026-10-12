@@ -80,13 +80,21 @@ static inline void census_json_exit_witness(struct census_json *o,const struct c
     w->uids_before[0],w->uids_before[1],w->uids_before[2],w->uids_before[3],
     w->uids_after[0],w->uids_after[1],w->uids_after[2],w->uids_after[3],w->full_identity_revalidated?"true":"false");
 }
+static inline void census_json_original_capture(struct census_json *o,const struct census_typed_resolution *v) {
+  const struct census_original_capture *c=&v->original;if(!c->present) return;
+  census_json_printf(o,",\"original_capture\":{\"capture_scan\":%u,\"missing_scan\":%u,\"binding_offset_ms\":%" PRIu64 ",\"terminal_offset_ms\":%" PRIu64 ",\"pid\":%u,\"bound_start_ticks\":\"%" PRIu64 "\",\"original_pidfd_device\":%" PRIu64 ",\"original_pidfd_inode\":%" PRIu64 ",\"original_procdir_device\":%" PRIu64 ",\"original_procdir_inode\":%" PRIu64 ",\"terminal_fdinfo_pid\":-1,\"terminal_poll\":\"valid_pollin\",\"same_original_descriptors\":true,\"original_uids\":[%u,%u,%u,%u],\"absence_proof\":%u,\"certificate_id\":%u",
+    c->capture_scan,c->missing_scan,c->binding_offset_ms,c->terminal_offset_ms,c->pid,c->start,
+    c->pidfd_dev,c->pidfd_ino,c->procdir_dev,c->procdir_ino,c->uids[0],c->uids[1],c->uids[2],c->uids[3],c->absence_proof,c->certificate_id);
+  census_json_printf(o,",\"capture_handle\":%" PRIu64 ",\"original_pidfd_generation\":%" PRIu64 ",\"original_procdir_generation\":%" PRIu64 ",\"comm_verified_before_first_environ\":%s}",c->capture_handle,c->pidfd_generation,c->procdir_generation,c->comm_verified?"true":"false");
+}
 static inline void census_json_coverage(struct census_json *o,const struct census_resolution_ledger *r) {
   if(!r->coverage_n) return;
   census_json_text(o,",\"coverage_retirements\":[");
   for(unsigned i=0;i<r->coverage_n;i++) {
     const struct census_coverage_retirement *v=&r->coverage[i];if(i) census_json_text(o,",");
-    census_json_printf(o,"{\"pid\":%u,\"start_ticks\":\"%" PRIu64 "\",\"prior_scan\":%u,\"missing_scan\":%u,\"absence_proof\":%u,\"retirement_proof\":%u,\"selected_seal\":%u}",
+    census_json_printf(o,"{\"pid\":%u,\"start_ticks\":\"%" PRIu64 "\",\"prior_scan\":%u,\"missing_scan\":%u,\"absence_proof\":%u,\"retirement_proof\":%u,\"selected_seal\":%u",
       v->pid,v->start,v->prior_scan,v->missing_scan,v->absence_proof,v->retirement_proof,v->selected_seal);
+    census_json_text(o,"}");
   }
   census_json_text(o,"]");
 }
@@ -131,13 +139,17 @@ static inline void census_json_census(struct census_json *o,const struct census_
   census_json_text(o,"],\"resolutions\":[");
   for(unsigned i=0;i<r->resolutions_n;i++) {
     const struct census_typed_resolution *v=&r->resolutions[i];if(i) census_json_text(o,",");
-    census_json_printf(o,"{\"error_index\":%u,\"kind\":\"%s\",\"proof_index\":%u,\"classified_scan\":%u,\"selected_seal\":%u}",
+    census_json_printf(o,"{\"error_index\":%u,\"kind\":\"%s\",\"proof_index\":%u,\"classified_scan\":%u,\"selected_seal\":%u",
       v->error_index,v->kind==CENSUS_RESOLUTION_ABSENCE?"kernel_absence":
         v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT?"unclassified_retirement":
         v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH?"retired_positive_birth":
         v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL?"known_nonmanaged_terminal":
-        v->kind==CENSUS_RESOLUTION_BOUND_BIRTH?"bound_seal_birth_terminal":"fresh_classification",
+        v->kind==CENSUS_RESOLUTION_BOUND_BIRTH?"bound_seal_birth_terminal":
+        v->kind==CENSUS_RESOLUTION_DEFERRED_MANAGED?"deferred_managed_retirement":
+        v->kind==CENSUS_RESOLUTION_MANAGED_BIRTH?"managed_birth_retirement":
+        v->kind==CENSUS_RESOLUTION_REAPED_BIRTH?"direct_reaped_birth":"fresh_classification",
       v->proof_index,v->classified_scan,v->selected_seal);
+    census_json_original_capture(o,v);census_json_text(o,"}");
   }
   census_json_text(o,"]");census_json_coverage(o,r);
   census_json_printf(o,",\"peak_fd\":%u,\"retained_bytes\":",s->budget->fd_peak);
@@ -185,13 +197,17 @@ static inline void census_json_unknown_census(struct census_json *o,const struct
   census_json_text(o,"],\"resolutions\":[");
   for(unsigned i=0;i<r->resolutions_n;i++) {
     const struct census_typed_resolution *v=&r->resolutions[i];if(i) census_json_text(o,",");
-    census_json_printf(o,"{\"error_index\":%u,\"kind\":\"%s\",\"proof_index\":%u,\"classified_scan\":%u,\"selected_seal\":%u}",
+    census_json_printf(o,"{\"error_index\":%u,\"kind\":\"%s\",\"proof_index\":%u,\"classified_scan\":%u,\"selected_seal\":%u",
       v->error_index,v->kind==CENSUS_RESOLUTION_ABSENCE?"kernel_absence":
         v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT?"unclassified_retirement":
         v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH?"retired_positive_birth":
         v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL?"known_nonmanaged_terminal":
-        v->kind==CENSUS_RESOLUTION_BOUND_BIRTH?"bound_seal_birth_terminal":"fresh_classification",
+        v->kind==CENSUS_RESOLUTION_BOUND_BIRTH?"bound_seal_birth_terminal":
+        v->kind==CENSUS_RESOLUTION_DEFERRED_MANAGED?"deferred_managed_retirement":
+        v->kind==CENSUS_RESOLUTION_MANAGED_BIRTH?"managed_birth_retirement":
+        v->kind==CENSUS_RESOLUTION_REAPED_BIRTH?"direct_reaped_birth":"fresh_classification",
       v->proof_index,v->classified_scan,v->selected_seal);
+    census_json_original_capture(o,v);census_json_text(o,"}");
   }
   census_json_text(o,"]");census_json_coverage(o,r);
   census_json_printf(o,",\"peak_fd\":%u,\"retained_bytes\":",s->budget->fd_peak);

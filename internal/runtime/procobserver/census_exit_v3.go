@@ -73,6 +73,11 @@ func exitPrior(c CensusV3, rows map[int]map[int]CensusIdentity, pid, through, co
 func validateExitExtensions(c CensusV3, errors []EvidenceError, rows map[int]map[int]CensusIdentity, controller int) bool {
 	n := len(c.Scans)
 	active := len(c.CoverageRetirements) > 0
+	for _, r := range c.Resolutions {
+		if r.OriginalCapture != nil {
+			active = true
+		}
+	}
 	if len(c.CoverageRetirements) > 128 {
 		return false
 	}

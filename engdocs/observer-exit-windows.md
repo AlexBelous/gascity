@@ -51,3 +51,56 @@ FULL nonmanaged child in BOTH closings/seal. Controlled legacy-rule RED checks,
 whole-ledger negative guards, original-FD live/reap/custody negatives and exact
 shared Go/Python matrices accompany its receipt. These are semantic/kernel tests,
 not host FULL-capability or production admission receipts.
+
+## M/R original-capture extension (Source27/32)
+
+`deferred_managed_retirement` retains the immutable first-ENV fault and its
+first-pass, bound-live, initial-zero, no-first-identity, no-exit-witness diagnostic.
+The producer reads and compares current comm before this ENV attempt without
+marking the identity FULL or altering `fields_pass`. It derives the exact prior
+acyclic inherited managed chain to a declared root, retaining PID/start, UID4,
+comm, PPID/PGID and ownership tuple. Continuing ancestors/root must remain FULL.
+Genuine later retirement creates a protected ENUM/retirement pair and certificate;
+the distinct typed relation names the original error, prior, certificate and
+actual later selected seal. Legacy certificate own-fault same-scan rules remain.
+
+`managed_birth_retirement` is a separate original FULL birth→protected certificate
+relation. It uses the birth's own original custody, leaving the certificate's
+actual second-pass ENV or nullable fault and index unchanged. Exactly one birth
+and one independently valid certificate-source fault may share a retirement.
+
+`direct_reaped_birth` is distinct from unreaped-Z C. Historical FULL metadata
+binds the original incarnation; no post-reap comm/stat/UID read is claimed. It
+requires actual same-original pidfd terminal flags, fdinfo PID=-1, completed
+positive numeric absence and a fresh independent flags0 pidfd_open ESRCH. Ever
+managed/protected/root/controller/tmux identities remain ineligible.
+
+Original capture carries a source-owned immutable handle. The helper meter tracks
+all newly owned descriptor generations, not merely counts or pidfd dev/inode.
+A handle records the exact original descriptor numbers and generations before
+fault/FULL completion. Mutable raw-fault aliases cannot replace them. Proof checks
+both owned generations; release closes only those original generations, once.
+OTHER-REAPED substitution and close/reopen numeric-FD ABA are rejected even when
+both pidfds share inode2083 and return PID=-1/POLLIN. Initial inherited descriptors
+are inventoried as borrowed and cannot form capture handles. All captures and
+checks retain existing FD32/time/memory/slot limits; any failed take still closes
+the already opened own descriptor and refuses.
+
+Timing is not repaired retroactively. A witness after a completed SEAL cannot
+select that same seal. The historical first-ENV scan9 / first numeric absence10 /
+positive proof after SEAL10 has no later seal under ten slots and remains UNKNOWN.
+Direct-reaped births with enough remaining closings/seal can resolve; late exits,
+missing original custody, unstable surviving sets, incomplete authority or budget
+exhaustion can still legitimately refuse. This extension is not universal host
+admission and does not regrade the installed67 ordinary history.
+
+Persistent controlled Linux tests: `census-mr-kernel-test.c`,
+`census-original-custody-kernel-test.c`, `mr-selftest.py` and shared reader matrix.
+They inspect only owned identities, actual kernel FD/exit/UID witnesses and numeric
+membership; the whole census uses an explicitly owned fixture enumeration, with
+independent genuine getdents verification of target presence/absence. ENV failures
+and ordinary provider/release metadata are synthetic; two root frames are captured
+independently. These are code-mechanism proofs, not live FULLcaps/RPC, release or
+business acceptance. Root alone reviews the final source/consumer freeze before
+any runtime build or publication. References: gascity-kb#27/#32 and Root6123281786,
+pre-freeze correction6123470386.

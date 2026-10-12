@@ -433,7 +433,7 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 		}
 		// Only the explicit negative diagnostic object/required booleans add
 		// pointer wire types; null remains forbidden for both.
-		if t == reflect.TypeOf((*CaptureDiagnostic)(nil)) || t == reflect.TypeOf((*CensusExitWitness)(nil)) || t == reflect.TypeOf((*bool)(nil)) {
+		if t == reflect.TypeOf((*CaptureDiagnostic)(nil)) || t == reflect.TypeOf((*CensusExitWitness)(nil)) || t == reflect.TypeOf((*CensusOriginalCapture)(nil)) || t == reflect.TypeOf((*bool)(nil)) {
 			t = t.Elem()
 		}
 		if token == nil {
@@ -525,7 +525,7 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 			if _, ok := token.(bool); !ok {
 				return fmt.Errorf("wire boolean type invalid")
 			}
-		case reflect.Int, reflect.Int64, reflect.Uint32:
+		case reflect.Int, reflect.Int64, reflect.Uint32, reflect.Uint64:
 			if _, ok := token.(json.Number); !ok {
 				return fmt.Errorf("wire numeric type invalid")
 			}

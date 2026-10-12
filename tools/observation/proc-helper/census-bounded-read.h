@@ -156,8 +156,8 @@ done:
   if(ok) errno=0;
   return ok;
 }
-static inline bool census_bounded_fields(struct census_budget *budget,int dir,uint32_t pid,
-    struct census_owned_identity *out,struct census_capture_fault *fault) {
+static inline bool census_bounded_fields_prior(struct census_budget *budget,int dir,uint32_t pid,
+    struct census_owned_identity *out,struct census_capture_fault *fault,const struct census_owned_identity *prior) {
   fault->fields_pass++;
   fault->operation="stat";
   if(!census_read_bounded_stat(budget,dir,pid,out)) return false;
@@ -169,6 +169,18 @@ static inline bool census_bounded_fields(struct census_budget *budget,int dir,ui
   fault->operation="environ";
 #ifdef GC_HELPER_TEST
   if(census_test_before_environ) census_test_before_environ(pid);
+#endif
+  if(prior && !prior->no_gc_environment && fault->fields_pass==1) {
+    fault->operation="comm";struct census_buffer checked={0};
+    if(!prior->name || !census_buffer_read(budget,dir,"comm",MAX_FIELD+1,&checked)) return false;
+    if(checked.n && checked.data[checked.n-1]=='\n') checked.data[--checked.n]=0;
+    bool same=!memchr(checked.data,0,checked.n) && utf8(checked.data,checked.n) &&
+      strlen(prior->name)==checked.n && !memcmp(prior->name,checked.data,checked.n);
+    census_buffer_clear(budget,&checked);
+    if(!same) {errno=ESTALE;return false;}
+    fault->retained_comm_verified=true;fault->operation="environ";
+  }
+#ifdef GC_HELPER_TEST
   if(census_test_environ_error) {
     int injected=census_test_environ_error(pid);
     if(injected) {errno=injected;return false;}
@@ -190,6 +202,10 @@ static inline bool census_bounded_fields(struct census_budget *budget,int dir,ui
   else if(!out->name) errno=comm.n>MAX_FIELD?EFBIG:ENOMEM;
   census_buffer_clear(budget,&comm);return ok && out->name;
 }
+static inline bool census_bounded_fields(struct census_budget *budget,int dir,uint32_t pid,
+    struct census_owned_identity *out,struct census_capture_fault *fault) {
+  return census_bounded_fields_prior(budget,dir,pid,out,fault,NULL);
+}
 static inline bool census_equal_bounded(const struct census_owned_identity *a,
     const struct census_owned_identity *b) {
   return a->pid==b->pid && a->ppid==b->ppid && a->pgid==b->pgid && a->start==b->start &&
@@ -204,9 +220,10 @@ static inline bool census_same_bound_stat(const struct census_owned_identity *a,
     a->pgid==b->pgid && a->kernel_flags==b->kernel_flags;
 }
 #include "census-exit-observation.h"
-static inline bool census_capture_bounded_custodied(uint32_t pid,struct census_budget *budget,
+static inline bool census_capture_bounded_custodied_prior(uint32_t pid,struct census_budget *budget,
     struct census_owned_identity *out,struct census_capture_fault *fault,
-    uint64_t prior_start,const uint32_t prior_uids[4],bool retain_full_birth) {
+    uint64_t prior_start,const uint32_t prior_uids[4],bool retain_full_birth,
+    const struct census_owned_identity *prior_identity) {
   *fault=(struct census_capture_fault){.pid=pid,.operation="deadline"};
   if(expired()) {fault->error=errno=ETIMEDOUT;return false;}
   fault->operation="fd_inventory";
@@ -267,8 +284,13 @@ static inline bool census_capture_bounded_custodied(uint32_t pid,struct census_b
     census_fd_close(budget,pin);pin=bound_pin;bound_pin=-1;
     if(budget->fd_failed) {errno=EBADF;goto done;}
     bound_live=true;
+    if(prior_start || retain_full_birth) {
+      int saved=errno;
+      (void)census_capture_original_binding(budget,pin,dir,pid,fault);
+      errno=saved;
+    }
   }
-  if(!census_bounded_fields(budget,dir,pid,&a,fault) ||
+  if(!census_bounded_fields_prior(budget,dir,pid,&a,fault,prior_identity) ||
      !census_bounded_fields(budget,dir,pid,&b,fault)) {
     int original_error=errno;
     fault->capture_diagnostic_available=original_error==ESRCH && fault->operation &&
@@ -317,9 +339,8 @@ static inline bool census_capture_bounded_custodied(uint32_t pid,struct census_b
    * This is candidate custody only; root/history/proof checks still follow. */
   if(retain_full_birth && pid>1 && pid!=ev.binding.pid && !out->kernel_flags &&
       out->start && out->pgid && out->name && !infra(out->name) &&
-      out->sid && !*out->sid && out->template && !*out->template &&
-      !out->epoch && !*out->token && !out->declared_root &&
-      out->environment_revalidated && out->no_gc_environment &&
+      out->sid && out->template && !out->declared_root &&
+      out->environment_revalidated &&
       out->uids[0] && out->uids[1] && out->uids[2] && out->uids[3] &&
       ev.trusted_kernel && !fixture && ev.ns[0] && !strcmp(ev.ns,ev.binding.ns)) {
     fault->retained_pidfd_plus_one=(unsigned)pin+1;
@@ -346,6 +367,8 @@ done:
       (events&POLLIN) && !(events&~(POLLIN|POLLHUP));
     uint32_t observed[4]={0};
     if(first_poll) first_poll=census_exit_original_zombie(budget,pin,dir,pid,prior_start,prior_uids,observed);
+    if(env_pending && prior_identity && (!census_same_bound_stat(prior_identity,&bound_a) ||
+        !census_same_bound_stat(prior_identity,&a))) env_pending=false;
     if(env_pending) for(unsigned i=0;i<4;i++) if(!prior_uids[i] || a.uids[i]!=prior_uids[i]) env_pending=false;
     if((env_pending || first_poll) && !budget->fd_failed && !expired()) {
       fault->retained_pidfd_plus_one=(unsigned)pin+1;
@@ -363,16 +386,31 @@ done:
       census_identity_clear(budget,out);memset(out,0,sizeof *out);ok=false;error=EBADF;fault->operation="close";
     }
     errno=ok?0:(error?error:ESTALE);}
+  if(!fault->retained_stage && fault->retained_capture_handle) {
+    census_capture_owner_release(budget,fault->retained_capture_handle);
+    fault->retained_capture_handle=0;
+  }
   if(ok && !fault->retained_stage) memset(fault,0,sizeof *fault);
   else if(!ok) fault->error=errno;
   else {fault->pid=fault->start=0;fault->operation=NULL;fault->error=0;}
   return ok;
+}
+static inline bool census_capture_bounded_custodied(uint32_t pid,struct census_budget *budget,
+    struct census_owned_identity *out,struct census_capture_fault *fault,
+    uint64_t prior_start,const uint32_t prior_uids[4],bool retain_full_birth) {
+  return census_capture_bounded_custodied_prior(pid,budget,out,fault,prior_start,prior_uids,retain_full_birth,NULL);
 }
 static inline bool census_capture_bounded_evidenced(uint32_t pid,struct census_budget *budget,
     struct census_owned_identity *out,struct census_capture_fault *fault) {
   return census_capture_bounded_custodied(pid,budget,out,fault,0,NULL,false);
 }
 static inline void census_capture_custody_close(struct census_budget *budget,struct census_capture_fault *fault) {
+  if(fault->retained_capture_handle) {
+    census_capture_owner_release(budget,fault->retained_capture_handle);
+    fault->retained_capture_handle=0;
+    fault->retained_pidfd_plus_one=fault->retained_procdir_plus_one=0;
+    return;
+  }
   if(fault->retained_pidfd_plus_one) census_fd_close(budget,(int)(fault->retained_pidfd_plus_one-1));
   if(fault->retained_procdir_plus_one) census_fd_close(budget,(int)(fault->retained_procdir_plus_one-1));
   fault->retained_pidfd_plus_one=fault->retained_procdir_plus_one=0;

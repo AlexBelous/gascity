@@ -5,26 +5,42 @@
 #define GC_CENSUS_RESOLUTION_LEDGER_H
 #include "census-descendant-witness.h"
 
+struct census_exit_witness {
+  unsigned stage; /* 1 original ENV, 2 original first poll, 3 original FULL birth. */
+  enum census_exit_poll_diagnostic initial_poll;
+  uint64_t bound_start;
+  uint32_t uids_before[4],uids_after[4];
+  bool full_identity_revalidated;
+};
 struct census_typed_proof {
   struct proof_item source;
   bool protected_identity;
   unsigned certificate_id;
+  struct census_exit_witness exit_witness;
+  bool coverage_member;
 };
 struct census_typed_certificate {
   unsigned id,prior_scan,absence_proof,retirement_proof;
   struct census_descendant_witness witness;
 };
 enum census_resolution_kind {CENSUS_RESOLUTION_ABSENCE,CENSUS_RESOLUTION_FRESH,
-  CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT,CENSUS_RESOLUTION_RETIRED_BIRTH};
+  CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT,CENSUS_RESOLUTION_RETIRED_BIRTH,
+  CENSUS_RESOLUTION_KNOWN_TERMINAL,CENSUS_RESOLUTION_BOUND_BIRTH};
 struct census_typed_resolution {
   unsigned error_index,proof_index,classified_scan,selected_seal;
   enum census_resolution_kind kind;
+};
+struct census_coverage_retirement {
+  unsigned prior_scan,missing_scan,absence_proof,retirement_proof,selected_seal;
+  uint32_t pid;
+  uint64_t start;
 };
 struct census_resolution_ledger {
   struct census_typed_proof proofs[128];
   struct census_typed_certificate certificates[64];
   struct census_typed_resolution resolutions[128];
-  unsigned proofs_n,certificates_n,resolutions_n;
+  struct census_coverage_retirement coverage[128];
+  unsigned proofs_n,certificates_n,resolutions_n,coverage_n;
   bool denied;
 };
 static inline struct census_history_row *census_history_find(
@@ -72,7 +88,7 @@ static inline bool census_same_proof_source(const struct proof_item *a,const str
 }
 /* The serializer must use this typed carrier, never proof_item verbatim. */
 static inline bool census_typed_proofs_valid(const struct census_resolution_ledger *r) {
-  if(r->certificates_n>64 || r->proofs_n>128 || r->resolutions_n>128) return false;
+  if(r->coverage_n>128 || r->certificates_n>64 || r->proofs_n>128 || r->resolutions_n>128) return false;
   bool protected_used[128]={0};
   for(unsigned i=0;i<r->proofs_n;i++) {
     const struct census_typed_proof *p=&r->proofs[i];const struct proof_item *v=&p->source;
@@ -89,13 +105,26 @@ static inline bool census_typed_proofs_valid(const struct census_resolution_ledg
       if(!v->start || p->protected_identity || p->certificate_id ||
           strcmp(v->method,"bound_pidfd_exited")) return false;
     } else return false;
+    const struct census_exit_witness *w=&p->exit_witness;
+    if(w->stage) {
+      if(w->stage>3 || v->kind!=CENSUS_TERMINAL_ZOMBIE || p->coverage_member ||
+          p->protected_identity || p->certificate_id || w->bound_start!=v->start ||
+          (w->stage==3)!=w->full_identity_revalidated ||
+          (w->initial_poll!=CENSUS_EXIT_POLL_ZERO && w->initial_poll!=CENSUS_EXIT_POLL_VALID_POLLIN) ||
+          (w->stage==2 && w->initial_poll!=CENSUS_EXIT_POLL_VALID_POLLIN)) return false;
+      for(unsigned uid=0;uid<4;uid++)
+        if(!w->uids_before[uid] || w->uids_before[uid]!=w->uids_after[uid]) return false;
+    } else if(w->bound_start || w->full_identity_revalidated) return false;
+    if(p->coverage_member && (p->protected_identity || p->certificate_id ||
+        (v->kind!=CENSUS_ENUMERATED_ABSENT && v->kind!=CENSUS_INCARNATION_RETIRED))) return false;
     for(unsigned k=0;k<i;k++) {
       const struct proof_item *old=&r->proofs[k].source;
       if(old->pid==v->pid && old->start==v->start &&
           (old->scan_index==v->scan_index || v->kind==CENSUS_INCARNATION_RETIRED ||
            v->kind==CENSUS_UNCLASSIFIED_INCARNATION_RETIRED ||
            old->kind==CENSUS_INCARNATION_RETIRED ||
-           old->kind==CENSUS_UNCLASSIFIED_INCARNATION_RETIRED)) return false;
+           old->kind==CENSUS_UNCLASSIFIED_INCARNATION_RETIRED ||
+           w->stage || r->proofs[k].exit_witness.stage)) return false;
     }
   }
   for(unsigned i=0;i<r->certificates_n;i++) {
@@ -117,6 +146,10 @@ static inline bool census_typed_proofs_valid(const struct census_resolution_ledg
   for(unsigned i=0;i<r->proofs_n;i++) if(r->proofs[i].protected_identity!=protected_used[i]) return false;
   return true;
 }
+static inline bool census_exit_history_valid(const struct census_global_source *,
+    const struct census_resolution_ledger *);
+static inline bool census_new_terminal_link_valid(const struct census_global_source *,
+    const struct census_resolution_ledger *,const struct census_typed_resolution *,unsigned);
 static inline bool census_absence_raw_eligible(const struct census_global_fault *e) {
   if(strcmp(e->reason,"process_unavailable") || !e->raw.operation || e->raw.pid<=1 ||
       e->raw.pid==ev.binding.pid) return false;

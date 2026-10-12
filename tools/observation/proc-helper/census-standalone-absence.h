@@ -72,7 +72,9 @@ static inline bool census_standalone_knownstart_valid(const struct census_global
 static inline bool census_standalone_history_valid(const struct census_global_source *s,
     const struct census_resolution_ledger *r) {
   for(unsigned i=0;i<r->proofs_n;i++) {
-    const struct census_typed_proof *p=&r->proofs[i];bool certificate_member=false;
+    const struct census_typed_proof *p=&r->proofs[i];
+    if(p->exit_witness.stage || p->coverage_member) continue;
+    bool certificate_member=false;
     for(unsigned k=0;k<r->certificates_n;k++) if(r->certificates[k].absence_proof==i+1 ||
         r->certificates[k].retirement_proof==i+1) certificate_member=true;
     if(certificate_member) continue;
@@ -166,7 +168,7 @@ static inline bool census_standalone_history_valid(const struct census_global_so
       }
     }
   }
-  return true;
+  return census_exit_history_valid(s,r);
 }
 static inline bool census_resolve_standalone(struct census_global_source *s,
     struct census_resolution_ledger *r,unsigned error_index) {

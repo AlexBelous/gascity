@@ -32,7 +32,7 @@ static inline bool census_fixed_capture(void *unused,uint32_t pid,struct census_
 static inline void census_global_error(struct census_global_source *s,unsigned scan,
     const char *reason,struct census_capture_fault raw) {
   s->errors_total++;
-  if(s->errors_n==128) {s->truncated=s->fatal=true;return;}
+  if(s->errors_n==128) {s->truncated=s->fatal=true;census_capture_custody_close(s->budget,&raw);return;}
   s->errors[s->errors_n++]=(struct census_global_fault){.scan_index=scan,.reason=reason,.raw=raw};
 }
 static inline struct census_global_source *census_global_new(struct census_budget *budget,
@@ -47,7 +47,39 @@ static inline struct census_global_source *census_global_new(struct census_budge
 }
 static inline void census_global_free(struct census_global_source *s) {
   if(!s) return;
-  struct census_budget *b=s->budget;census_history_free(b,s->history);census_release(b,s,sizeof *s);
+  struct census_budget *b=s->budget;
+  for(unsigned i=0;i<s->errors_n;i++) census_capture_custody_close(b,&s->errors[i].raw);
+  for(unsigned scan=0;scan<s->history->n;scan++)
+    for(size_t row=0;row<s->history->scans[scan].allocated_rows;row++)
+      census_capture_custody_close(b,&s->history->scans[scan].rows[row].raw_fault);
+  census_history_free(b,s->history);census_release(b,s,sizeof *s);
+}
+/* Only immutable FULL prior identities may request internal fd retention.
+ * This is not permission to resolve or continue an incomplete frame. */
+static inline bool census_global_capture_owned(void *context,uint32_t pid,struct census_budget *b,
+    struct census_owned_identity *out,struct census_capture_fault *fault) {
+  struct census_global_source *s=context;
+  if(s->capture!=census_fixed_capture || pid<=1 || pid==ev.binding.pid)
+    return s->capture(s->source_context,pid,b,out,fault);
+  const struct census_owned_identity *prior=NULL;bool eligible=true;
+  for(unsigned scan=0;scan+1<s->history->n;scan++) {
+    const struct census_history_scan *h=&s->history->scans[scan];
+    for(size_t i=0;i<h->allocated_rows;i++) {
+      const struct census_history_row *row=&h->rows[i];
+      if(row->pid!=pid || row->failure!=CENSUS_ROW_OK || row->classification==CENSUS_CLASS_INVALID) continue;
+      const struct census_owned_identity *v=&row->identity;
+      if(row->classification!=CENSUS_CLASS_NONMANAGED ||
+          census_classify_owned(v)!=CENSUS_CLASS_NONMANAGED || v->declared_root || infra(v->name)) eligible=false;
+      for(unsigned uid=0;uid<4;uid++) if(!v->uids[uid]) eligible=false;
+      if(prior && !census_equal_bounded(prior,v)) eligible=false;
+      prior=v;
+    }
+  }
+  return census_capture_bounded_custodied(pid,b,out,fault,
+    eligible && prior?prior->start:0,eligible && prior?prior->uids:NULL,
+    eligible && !prior && s->history->n>1 &&
+      s->history->scans[s->history->n-1].receipt.kind==CENSUS_SEAL &&
+      census_numeric_enumeration_absent(&s->history->scans[s->history->n-2],pid));
 }
 static inline bool census_global_scan_record(void *context,unsigned scan_id,unsigned round,
     enum census_scan_kind kind,struct census_round_scan *out) {
@@ -79,7 +111,7 @@ static inline bool census_global_scan_record(void *context,unsigned scan_id,unsi
     census_pid_clear(s->budget,&pids);return false;
   }
   bool captured=census_history_append_record(s->history,s->budget,pids.p,pids.n,round,kind,
-    mono_ms()-start,s->source_context,s->capture);
+    mono_ms()-start,s,census_global_capture_owned);
   census_pid_clear(s->budget,&pids);
   if(!s->history->n) {s->fatal=true;return false;}
   struct census_history_scan *scan=&s->history->scans[s->history->n-1];
@@ -93,6 +125,8 @@ static inline bool census_global_scan_record(void *context,unsigned scan_id,unsi
     if(row->failure==CENSUS_ROW_CLASSIFICATION_FAILED && !raw.operation) raw=(struct census_capture_fault){
       .pid=row->pid,.start=row->identity.start,.operation="classification",.error=EINVAL};
     census_global_error(s,scan_id,"process_unavailable",raw);
+    row->raw_fault.retained_pidfd_plus_one=row->raw_fault.retained_procdir_plus_one=0;
+    /* Error ledger is now sole owner; history keeps original raw wire fields. */
   }
   if(expired() || s->budget->fd_failed) {
     captured=false;s->history->failed=true;

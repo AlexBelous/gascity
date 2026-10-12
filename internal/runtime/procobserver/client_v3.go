@@ -162,13 +162,16 @@ func DecodeResponseV3(data []byte, p ReleasePolicyV3, nonce string, now time.Tim
 		last = v.PID
 	}
 	for _, e := range r.Errors {
-		if !validCaptureDiagnostic(e, r.Complete) || len(e.Reason) < 1 || len(e.Reason) > 64 || len(e.Operation) < 1 || len(e.Operation) > 32 || e.PID < 0 || e.PID > 2147483647 || e.Errno < 0 || e.Errno > 4095 {
+		if !validCaptureDiagnostic(e, false) || len(e.Reason) < 1 || len(e.Reason) > 64 || len(e.Operation) < 1 || len(e.Operation) > 32 || e.PID < 0 || e.PID > 2147483647 || e.Errno < 0 || e.Errno > 4095 {
 			return ResponseV3{}, fmt.Errorf("observer v3 diagnostic invalid")
 		}
 	}
 	if !r.Complete || r.KernelProofProfile != KernelProofProfile || !strings.HasPrefix(r.KernelRelease, "6.8.") ||
 		ValidateCensusV3(r.Census, r.Errors, r.ErrorsTotal, r.ErrorsTruncated, r.DurationMS, p.CallerBinding.PID) != nil {
 		return r, fmt.Errorf("observer v3 process coverage incomplete")
+	}
+	if !validCompleteCaptureDiagnosticLinks(r.Census, r.Errors) {
+		return ResponseV3{}, fmt.Errorf("observer v3 resolved diagnostic link invalid")
 	}
 	initial := r.Census.Scans[0]
 	closing := r.Census.Scans[r.Census.SelectedClosings[1]-1]
@@ -253,4 +256,49 @@ func validCaptureDiagnostic(e EvidenceError, complete bool) bool {
 	default:
 		return false
 	}
+}
+
+// The annotation remains the original failed-read observation. It authorizes
+// nothing; COMPLETE requires an independently validated compatible resolution.
+func validCompleteCaptureDiagnosticLinks(c CensusV3, errors []EvidenceError) bool {
+	for i, e := range errors {
+		d := e.CaptureDiagnostic
+		if d == nil {
+			continue
+		}
+		if !validCaptureDiagnostic(e, false) {
+			return false
+		}
+		matches := 0
+		for _, r := range c.Resolutions {
+			if r.ErrorIndex != i+1 || r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) {
+				continue
+			}
+			p := c.Proofs[r.ProofIndex-1]
+			if p.PID != e.PID || !sameStart(p.StartTicks, e.StartTicks) || p.ScanIndex < e.ScanIndex {
+				continue
+			}
+			switch r.Kind {
+			case "known_nonmanaged_terminal":
+				if p.Kind == "terminal_zombie" && p.Method == "pidfd_zombie_stat" && p.ExitWitness != nil &&
+					(p.ExitWitness.CaptureStage == "bound_first_environ" || p.ExitWitness.CaptureStage == "bound_seal_birth_terminal") {
+					matches++
+				}
+			case "kernel_absence":
+				if p.Kind == "incarnation_retired" && p.Method == "pidfd_no_pid" {
+					matches++
+				}
+			case "unclassified_retirement":
+				if p.Kind == "unclassified_incarnation_retired" && p.Method == "bound_pidfd_exited" &&
+					d.FieldsPass == 1 && *d.BoundLive && !*d.FirstIdentityPresent &&
+					*d.ExitWitness && d.ExitPoll == "valid_pollin" {
+					matches++
+				}
+			}
+		}
+		if matches != 1 {
+			return false
+		}
+	}
+	return true
 }

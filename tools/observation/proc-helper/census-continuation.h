@@ -6,6 +6,7 @@
 #include "census-resolution-ledger.h"
 #include "census-standalone-absence.h"
 #include "census-unclassified-retirement.h"
+#include "census-exit-retirement.h"
 
 static inline bool census_positive_birth(const struct census_global_source *s,
     const struct census_global_fault *e) {
@@ -17,6 +18,8 @@ static inline bool census_positive_birth(const struct census_global_source *s,
 }
 static inline bool census_continuation_gate(struct census_global_source *s,
     struct census_resolution_ledger *r) {
+  if(r->denied || !census_recorded_prefix_valid(s)) return false;
+  if(!census_resolve_exit_windows(s,r) || !census_collect_coverage_retirements(s,r)) return false;
   if(r->denied || !census_typed_proofs_valid(r) || !census_recorded_prefix_valid(s) ||
       !census_standalone_history_valid(s,r)) return false;
   if(!census_certificates_history_valid(s,r)) return false;
@@ -30,11 +33,13 @@ static inline bool census_continuation_gate(struct census_global_source *s,
       if(census_positive_birth(s,&s->errors[e])) continue;
       bool resolved=false;
       for(unsigned k=0;k<r->resolutions_n;k++) if(r->resolutions[k].error_index==e+1) resolved=true;
-      if(resolved) continue;
+      if(resolved) {census_capture_custody_close(s->budget,&s->errors[e].raw);continue;}
       if(census_resolve_descendant(s,r,e+1) ||
           census_resolve_unclassified_retirement(s,r,e+1) ||
-          census_resolve_standalone(s,r,e+1)) progress=true;
-      else pending++;
+          census_resolve_standalone(s,r,e+1)) {
+        census_capture_custody_close(s->budget,&s->errors[e].raw);progress=true;
+      }
+      else if(!census_exit_pending(s,e+1)) pending++;
     }
     if(!pending) return true;
     if(!progress) return false;
@@ -122,6 +127,8 @@ static inline bool census_finish_births(struct census_global_source *s,
   if(j->selected_seal!=s->history->n || !j->selected_first || !j->selected_second) return false;
   for(unsigned e=0;e<s->errors_n;e++) {
     if(!census_positive_birth(s,&s->errors[e])) continue;
+    bool already=false;for(unsigned k=0;k<r->resolutions_n;k++) if(r->resolutions[k].error_index==e+1) already=true;
+    if(already) continue;
     const struct census_global_fault *error=&s->errors[e];unsigned first=j->selected_first;
     if(first<=error->scan_index || r->resolutions_n>=128) return false;
     struct census_history_row *a=census_history_find(&s->history->scans[first-1],error->raw.pid);
@@ -147,7 +154,9 @@ static inline bool census_final_resolutions_valid(const struct census_global_sou
     unsigned matches=0;
     for(unsigned k=0;k<r->resolutions_n;k++) {
       const struct census_typed_resolution *v=&r->resolutions[k];if(v->error_index!=e+1) continue;
-      if(v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH) {
+      if(v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL || v->kind==CENSUS_RESOLUTION_BOUND_BIRTH) {
+        if(!census_new_terminal_link_valid(s,r,v,j->selected_seal)) return false;
+      } else if(v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH) {
         if(!census_retired_birth_link_valid(s,r,v,j)) return false;
       } else if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
         if(!census_unclassified_link_valid(s,r,v)) return false;
@@ -198,6 +207,10 @@ static inline enum census_round_result census_choose_proven_continuation(
     const struct census_round_scan *a=&j->scans[first],*b=&j->scans[first+1],*seal=&j->scans[first+2];
     if(!census_current_closings_equal(s,r)) continue;
     j->selected_first=a->scan_id;j->selected_second=b->scan_id;j->selected_seal=seal->scan_id;
+    for(unsigned k=0;k<r->resolutions_n;k++)
+      if(r->resolutions[k].kind==CENSUS_RESOLUTION_KNOWN_TERMINAL || r->resolutions[k].kind==CENSUS_RESOLUTION_BOUND_BIRTH)
+        r->resolutions[k].selected_seal=j->selected_seal;
+    for(unsigned k=0;k<r->coverage_n;k++) r->coverage[k].selected_seal=j->selected_seal;
     if(!census_finish_births(s,r,j) || !census_final_resolutions_valid(s,r,j)) return CENSUS_ROUNDS_UNKNOWN;
     return CENSUS_ROUNDS_SELECTED_PENDING_PROOF;
   }

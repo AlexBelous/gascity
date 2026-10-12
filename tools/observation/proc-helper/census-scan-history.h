@@ -39,6 +39,7 @@ struct census_history_scan {
   struct census_history_row *rows;
   size_t allocated_rows;
   bool allocation_failed;
+  bool numeric_enumeration_complete; /* Independent of per-PID capture success. */
 };
 struct census_history {
   struct census_history_scan scans[10];
@@ -134,13 +135,15 @@ static inline bool census_history_append_record(struct census_history *h,struct 
     h->failed=true;scan->allocation_failed=true;scan->receipt.hard_unresolved=1;return false;
   }
   scan->allocated_rows=n;
+  bool numeric_valid=true;
   sha256_ctx raw,live;sha256_init(&raw);sha256_init(&live);
   census_history_field(&raw,CENSUS_V3_RAW_HASH_DOMAIN);
   census_history_field(&live,CENSUS_V3_LIVE_HASH_DOMAIN);
   for(size_t i=0;i<n;i++) {
     struct census_history_row *row=&scan->rows[i];row->pid=pids[i];
     char pid[16];snprintf(pid,sizeof pid,"%u",pids[i]);census_history_field(&raw,pid);
-    if(!pids[i] || (i && pids[i]<=pids[i-1])) {
+    if(!pids[i] || pids[i]>INT32_MAX || (i && pids[i]<=pids[i-1])) {
+      numeric_valid=false;
       row->failure=CENSUS_ROW_CLASSIFICATION_FAILED;
     } else if(!source(context,pids[i],b,&row->identity,&row->raw_fault)) {
       row->failure=CENSUS_ROW_CAPTURE_FAILED;
@@ -157,6 +160,7 @@ static inline bool census_history_append_record(struct census_history *h,struct 
     }
   }
   sha256_hex(&raw,scan->receipt.raw_digest);sha256_hex(&live,scan->receipt.live_digest);
+  scan->numeric_enumeration_complete=numeric_valid;
   scan->receipt.classified_all=!scan->receipt.hard_unresolved && !h->truncated;
   h->failed=h->failed || !scan->receipt.classified_all;
   /* No kernel absence/resolution, seal or certificate authority is manufactured. */
@@ -169,5 +173,28 @@ static inline bool census_history_append(struct census_history *h,struct census_
     uint64_t offset_ms,void *context,census_identity_source source) {
   if(h->failed) return false;
   return census_history_append_record(h,b,pids,n,round,kind,offset_ms,context,source);
+}
+/* D membership derives from every actual numeric PID, including failed
+ * capture rows. Verified-row absence is never sufficient. The serializer must
+ * carry this list and consumers must independently recompute the same digest. */
+static inline bool census_numeric_enumeration_valid(const struct census_history_scan *scan) {
+  if(!scan || !scan->numeric_enumeration_complete || scan->allocation_failed || !scan->rows ||
+      !scan->allocated_rows || scan->allocated_rows>65536 || scan->allocated_rows!=scan->receipt.enumerated ||
+      !scan->receipt.scan_id || scan->receipt.scan_id>10 || scan->receipt.offset_ms>=10000) return false;
+  sha256_ctx hash;sha256_init(&hash);census_history_field(&hash,CENSUS_V3_RAW_HASH_DOMAIN);
+  for(size_t i=0;i<scan->allocated_rows;i++) {
+    uint32_t actual=scan->rows[i].pid;
+    if(!actual || actual>INT32_MAX || (i && actual<=scan->rows[i-1].pid)) return false;
+    char text[16];snprintf(text,sizeof text,"%u",actual);census_history_field(&hash,text);
+  }
+  char digest[65];sha256_hex(&hash,digest);return !strcmp(digest,scan->receipt.raw_digest);
+}
+static inline bool census_numeric_enumeration_absent(const struct census_history_scan *scan,uint32_t pid) {
+  if(!pid || pid>INT32_MAX || !census_numeric_enumeration_valid(scan)) return false;
+  size_t lo=0,hi=scan->allocated_rows;
+  while(lo<hi) {size_t mid=lo+(hi-lo)/2;
+    if(scan->rows[mid].pid<pid) lo=mid+1;else hi=mid;
+  }
+  return lo==scan->allocated_rows || scan->rows[lo].pid!=pid;
 }
 #endif

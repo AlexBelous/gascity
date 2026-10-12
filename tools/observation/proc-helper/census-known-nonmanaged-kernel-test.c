@@ -409,7 +409,8 @@ int main(int argc,char **argv) {
     printf("capture_diagnostic_present=%d raw_fault_unchanged=%d\n",present,unchanged);
     if(!present || !unchanged) rc=2;
     json->n=0;ev.complete=true;census_json_errors(json,source);
-    if(memmem(json->data,json->n,"capture_diagnostic",18)) rc=2;
+    if(!memmem(json->data,json->n,"capture_diagnostic",18) ||
+       memcmp(&preserved,&source->errors[0].raw,sizeof preserved)) rc=2;
     ev.complete=false;
     census_json_free(json);census_release(&budget,source,sizeof *source);
   }

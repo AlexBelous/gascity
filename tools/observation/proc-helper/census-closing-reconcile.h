@@ -15,6 +15,10 @@ static inline bool census_closing_absence_link(const struct census_global_source
     for(unsigned i=0;i<r->resolutions_n;i++) {
       const struct census_typed_resolution *v=&r->resolutions[i];
       if(v->error_index!=e+1) continue;
+      if(v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL) {
+        if(!census_new_terminal_link_valid(s,r,v,v->selected_seal)) return false;
+        matches++;continue;
+      }
       if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
         if(!census_unclassified_link_valid(s,r,v)) return false;
         matches++;continue;
@@ -38,7 +42,7 @@ static inline bool census_closing_retired(const struct census_global_source *s,
   unsigned matches=0;
   for(unsigned i=0;i<r->proofs_n;i++) {
     const struct census_typed_proof *p=&r->proofs[i];
-    if(p->source.kind!=CENSUS_INCARNATION_RETIRED || p->source.pid!=v->pid ||
+    if((p->source.kind!=CENSUS_INCARNATION_RETIRED && !p->exit_witness.stage) || p->source.pid!=v->pid ||
         p->source.start!=v->start || p->source.scan_index<=(int)scan->receipt.scan_id ||
         p->source.scan_index>(int)s->history->n) continue;
     if(p->protected_identity!=(row->classification==CENSUS_CLASS_MANAGED)) return false;
@@ -94,7 +98,9 @@ static inline bool census_current_closings_equal(const struct census_global_sour
     for(unsigned i=0;i<r->resolutions_n;i++) {
       const struct census_typed_resolution *v=&r->resolutions[i];
       if(v->error_index!=e+1) continue;
-      if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
+      if(v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL) {
+        if(!census_new_terminal_link_valid(s,r,v,v->selected_seal)) return false;
+      } else if(v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT) {
         if(!census_unclassified_link_valid(s,r,v)) return false;
       } else {
         if(v->kind!=CENSUS_RESOLUTION_ABSENCE || !census_absence_raw_eligible(&s->errors[e]) ||
@@ -106,6 +112,9 @@ static inline bool census_current_closings_equal(const struct census_global_sour
     }
     if(matches!=1) return false;
   }
+  for(unsigned k=0;k<r->proofs_n;k++)
+    if((r->proofs[k].exit_witness.stage || r->proofs[k].coverage_member) &&
+        r->proofs[k].source.scan_index>=(int)n) return false;
   const struct census_history_scan *a=&s->history->scans[n-3],*b=&s->history->scans[n-2],
     *seal=&s->history->scans[n-1];
   if(a->receipt.kind!=CENSUS_CLOSING || b->receipt.kind!=CENSUS_CLOSING ||

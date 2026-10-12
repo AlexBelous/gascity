@@ -37,10 +37,11 @@ type CensusIdentity struct {
 // check certificates. Records are chronological and share one global budget.
 type CensusScanV3 struct {
 	CensusClosing
-	Round    int              `json:"round"`
-	Kind     string           `json:"kind"`
-	OffsetMS int64            `json:"offset_ms"`
-	Verified []CensusIdentity `json:"verified"`
+	Round       int              `json:"round"`
+	Kind        string           `json:"kind"`
+	OffsetMS    int64            `json:"offset_ms"`
+	Verified    []CensusIdentity `json:"verified"`
+	NumericPIDs []int            `json:"numeric_pids,omitempty"`
 }
 
 // DescendantCertificate links a fully read prior inherited chain to an exact
@@ -53,10 +54,22 @@ type DescendantCertificate struct {
 	RetirementProof int              `json:"retirement_proof"`
 }
 
+// CensusExitWitness binds a new terminal branch to original descriptor custody.
+type CensusExitWitness struct {
+	CaptureStage            string    `json:"capture_stage"`
+	InitialPoll             string    `json:"initial_poll"`
+	BoundStartTicks         string    `json:"bound_start_ticks"`
+	TerminalUIDsBefore      [4]uint32 `json:"terminal_uids_before"`
+	TerminalUIDsAfter       [4]uint32 `json:"terminal_uids_after"`
+	TerminalPoll            string    `json:"terminal_poll"`
+	FullIdentityRevalidated bool      `json:"full_identity_revalidated"`
+}
+
 // CensusProofV3 couples a kernel witness to its provisional descendant chain.
 type CensusProofV3 struct {
 	CensusProof
-	DescendantCertificateID int `json:"descendant_certificate_id"`
+	DescendantCertificateID int                `json:"descendant_certificate_id"`
+	ExitWitness             *CensusExitWitness `json:"exit_witness,omitempty"`
 }
 
 // CensusResolution records a positive discharge without overwriting raw errors.
@@ -69,19 +82,31 @@ type CensusResolution struct {
 	SelectedSeal   int    `json:"selected_seal"`
 }
 
+// CensusCoverageRetirement links numeric absence without fabricating a raw fault.
+type CensusCoverageRetirement struct {
+	PID             int    `json:"pid"`
+	StartTicks      string `json:"start_ticks"`
+	PriorScan       int    `json:"prior_scan"`
+	MissingScan     int    `json:"missing_scan"`
+	AbsenceProof    int    `json:"absence_proof"`
+	RetirementProof int    `json:"retirement_proof"`
+	SelectedSeal    int    `json:"selected_seal"`
+}
+
 // CensusV3 retains the original scans and typed bounded-closing evidence.
 type CensusV3 struct {
-	Schema           string                  `json:"schema"`
-	Scans            []CensusScanV3          `json:"scans"`
-	SelectedClosings [2]int                  `json:"selected_closings"`
-	Seal             CensusSeal              `json:"seal"`
-	ReconciledCount  int                     `json:"reconciled_count"`
-	ReconciledDigest string                  `json:"reconciled_digest"`
-	Proofs           []CensusProofV3         `json:"proofs"`
-	Certificates     []DescendantCertificate `json:"certificates"`
-	Resolutions      []CensusResolution      `json:"resolutions"`
-	PeakFD           int                     `json:"peak_fd"`
-	RetainedBytes    int64                   `json:"retained_bytes"`
+	Schema              string                     `json:"schema"`
+	Scans               []CensusScanV3             `json:"scans"`
+	SelectedClosings    [2]int                     `json:"selected_closings"`
+	Seal                CensusSeal                 `json:"seal"`
+	ReconciledCount     int                        `json:"reconciled_count"`
+	ReconciledDigest    string                     `json:"reconciled_digest"`
+	Proofs              []CensusProofV3            `json:"proofs"`
+	Certificates        []DescendantCertificate    `json:"certificates"`
+	Resolutions         []CensusResolution         `json:"resolutions"`
+	CoverageRetirements []CensusCoverageRetirement `json:"coverage_retirements,omitempty"`
+	PeakFD              int                        `json:"peak_fd"`
+	RetainedBytes       int64                      `json:"retained_bytes"`
 }
 
 // ValidateCensusV3 validates process evidence only. It never grants provider
@@ -130,10 +155,13 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 	first, second := c.Scans[n-3], c.Scans[n-2]
 	last := c.Scans[n-1]
 	if c.SelectedClosings != [2]int{first.ScanIndex, second.ScanIndex} || c.Seal.ScanIndex != last.ScanIndex ||
-		c.Seal.EnumeratedCount != last.EnumeratedCount || !isHex(c.Seal.PIDDigest, 64) ||
+		c.Seal.EnumeratedCount != last.EnumeratedCount || !isHex(c.Seal.PIDDigest, 64) || c.Seal.PIDDigest != last.EnumerationDigest ||
 		c.Seal.ClassifiedCount != last.LiveCount || c.Seal.ClassifiedDigest != last.LiveDigest ||
 		c.ReconciledCount != last.LiveCount || c.ReconciledDigest != last.LiveDigest ||
 		c.ReconciledCount > first.LiveCount || c.ReconciledCount > second.LiveCount {
+		return bad()
+	}
+	if !validateExitExtensions(c, errors, byScan, controllerPID) {
 		return bad()
 	}
 	seenProof := map[string]bool{}
@@ -182,9 +210,22 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 			}
 			// No prior positive identity may be retired through a numeric zombie
 			// witness; managed descendants still require their protected chain.
-			for scan := 1; scan < p.ScanIndex; scan++ {
+			for scan := 1; p.ExitWitness == nil && scan < p.ScanIndex; scan++ {
 				if _, ok := byScan[scan][p.PID]; ok {
 					return bad()
+				}
+			}
+			if p.ExitWitness != nil {
+				incarnation := fmt.Sprintf("%d/%s", p.PID, start)
+				if seenRetirement[incarnation] {
+					return bad()
+				}
+				seenRetirement[incarnation] = true
+				if v, ok := byScan[first.ScanIndex][p.PID]; ok && v.StartTicks == start && p.ScanIndex > first.ScanIndex {
+					retireFirst++
+				}
+				if v, ok := byScan[second.ScanIndex][p.PID]; ok && v.StartTicks == start && p.ScanIndex > second.ScanIndex {
+					retireSecond++
 				}
 			}
 		case "unclassified_incarnation_retired":
@@ -257,7 +298,17 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 		for _, s := range c.Scans {
 			if s.ScanIndex >= p.ScanIndex {
 				if v, exists := byScan[s.ScanIndex][p.PID]; exists && v.StartTicks == start {
-					return bad()
+					original := false
+					if p.ExitWitness != nil && p.ExitWitness.CaptureStage == "bound_seal_birth_terminal" && s.ScanIndex == p.ScanIndex {
+						for _, r := range c.Resolutions {
+							if r.ProofIndex == index+1 && r.Kind == "bound_seal_birth_terminal" && r.ClassifiedScan == s.ScanIndex {
+								original = true
+							}
+						}
+					}
+					if !original {
+						return bad()
+					}
 				}
 			}
 		}
@@ -278,6 +329,11 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 			return bad()
 		}
 		switch r.Kind {
+		case "known_nonmanaged_terminal", "bound_seal_birth_terminal":
+			// The coherent extension validator has checked exact group/time/prior.
+			if r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) || c.Proofs[r.ProofIndex-1].ExitWitness == nil {
+				return bad()
+			}
 		case "unclassified_retirement":
 			if r.ClassifiedScan != 0 || r.SelectedSeal != 0 || r.ProofIndex < 1 || r.ProofIndex > len(c.Proofs) ||
 				e.Reason != "process_unavailable" || e.Operation != "environ" || e.Errno != 3 || e.StartTicks == nil {

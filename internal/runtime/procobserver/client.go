@@ -433,7 +433,7 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 		}
 		// Only the explicit negative diagnostic object/required booleans add
 		// pointer wire types; null remains forbidden for both.
-		if t == reflect.TypeOf((*CaptureDiagnostic)(nil)) || t == reflect.TypeOf((*bool)(nil)) {
+		if t == reflect.TypeOf((*CaptureDiagnostic)(nil)) || t == reflect.TypeOf((*CensusExitWitness)(nil)) || t == reflect.TypeOf((*bool)(nil)) {
 			t = t.Elem()
 		}
 		if token == nil {

@@ -37,7 +37,11 @@ static inline void census_json_printf(struct census_json *o,const char *format,.
   census_json_bytes(o,o->scratch,(size_t)n);
 }
 static inline void census_json_string(struct census_json *o,const char *text) {
-  if(!text || strnlen(text,4097)>4096) {o->failed=true;return;}
+  if(!text) {o->failed=true;return;}
+  /* Owned strings are terminated; preserve the 4096-byte bound without a
+   * compiler object-size overread annotation on fixed 65-byte token arrays. */
+  size_t length=0;
+  while(text[length]) {if(length==4096) {o->failed=true;return;}length++;}
   census_json_text(o,"\"");
   for(const unsigned char *p=(const unsigned char *)text;*p;p++) {
     if(*p=='"' || *p=='\\') census_json_printf(o,"\\%c",*p);
@@ -59,6 +63,33 @@ static inline void census_json_identity(struct census_json *o,const struct censu
   census_json_printf(o,",\"declared_root\":%s,\"stat_revalidated\":%s,\"pidfd_bound\":%s,\"uids_revalidated\":%s}",
     v->declared_root?"true":"false",v->stat_revalidated?"true":"false",v->pidfd_bound?"true":"false",v->uids_revalidated?"true":"false");
 }
+static inline void census_json_numeric(struct census_json *o,const struct census_history_scan *scan) {
+  if(!scan->numeric_enumeration_complete) return;
+  census_json_text(o,",\"numeric_pids\":[");
+  for(size_t i=0;i<scan->allocated_rows;i++) {
+    if(i) census_json_text(o,",");
+    census_json_printf(o,"%u",scan->rows[i].pid);
+  }
+  census_json_text(o,"]");
+}
+static inline void census_json_exit_witness(struct census_json *o,const struct census_typed_proof *p) {
+  const struct census_exit_witness *w=&p->exit_witness;if(!w->stage) return;
+  census_json_printf(o,",\"exit_witness\":{\"capture_stage\":\"%s\",\"initial_poll\":\"%s\",\"bound_start_ticks\":\"%" PRIu64 "\",\"terminal_uids_before\":[%u,%u,%u,%u],\"terminal_uids_after\":[%u,%u,%u,%u],\"terminal_poll\":\"valid_pollin\",\"full_identity_revalidated\":%s}",
+    w->stage==1?"bound_first_environ":w->stage==2?"initial_pidfd_poll":"bound_seal_birth_terminal",
+    w->initial_poll==CENSUS_EXIT_POLL_ZERO?"zero":"valid_pollin",w->bound_start,
+    w->uids_before[0],w->uids_before[1],w->uids_before[2],w->uids_before[3],
+    w->uids_after[0],w->uids_after[1],w->uids_after[2],w->uids_after[3],w->full_identity_revalidated?"true":"false");
+}
+static inline void census_json_coverage(struct census_json *o,const struct census_resolution_ledger *r) {
+  if(!r->coverage_n) return;
+  census_json_text(o,",\"coverage_retirements\":[");
+  for(unsigned i=0;i<r->coverage_n;i++) {
+    const struct census_coverage_retirement *v=&r->coverage[i];if(i) census_json_text(o,",");
+    census_json_printf(o,"{\"pid\":%u,\"start_ticks\":\"%" PRIu64 "\",\"prior_scan\":%u,\"missing_scan\":%u,\"absence_proof\":%u,\"retirement_proof\":%u,\"selected_seal\":%u}",
+      v->pid,v->start,v->prior_scan,v->missing_scan,v->absence_proof,v->retirement_proof,v->selected_seal);
+  }
+  census_json_text(o,"]");
+}
 static inline void census_json_census(struct census_json *o,const struct census_global_source *s,
     const struct census_resolution_ledger *r,const struct census_round_journal *j) {
   if(!census_final_resolutions_valid(s,r,j)) {o->failed=true;return;}
@@ -77,7 +108,7 @@ static inline void census_json_census(struct census_json *o,const struct census_
       comma=true;
       census_json_identity(o,&row->identity,row->classification);
     }
-    census_json_text(o,"]}");
+    census_json_text(o,"]");census_json_numeric(o,scan);census_json_text(o,"}");
   }
   const struct census_round_scan *seal=&s->history->scans[j->selected_seal-1].receipt;
   census_json_printf(o,"],\"selected_closings\":[%u,%u],\"seal\":{\"scan_index\":%u,\"enumerated_count\":%zu,\"pid_digest\":\"%s\",\"classified_count\":%zu,\"classified_digest\":\"%s\"},\"reconciled_count\":%zu,\"reconciled_digest\":\"%s\",\"proofs\":[",
@@ -87,7 +118,8 @@ static inline void census_json_census(struct census_json *o,const struct census_
     if(i) census_json_text(o,",");
     census_json_printf(o,"{\"kind\":\"%s\",\"method\":\"%s\",\"pid\":%u,\"start_ticks\":",census_proof_kind_name(p->kind),p->method,p->pid);
     if(p->start) census_json_printf(o,"\"%" PRIu64 "\"",p->start);else census_json_text(o,"null");
-    census_json_printf(o,",\"replacement_start\":\"\",\"scan_index\":%d,\"offset_ms\":%" PRIu64 ",\"protected_identity\":%s,\"descendant_certificate_id\":%u}",p->scan_index,p->offset_ms,v->protected_identity?"true":"false",v->certificate_id);
+    census_json_printf(o,",\"replacement_start\":\"\",\"scan_index\":%d,\"offset_ms\":%" PRIu64 ",\"protected_identity\":%s,\"descendant_certificate_id\":%u",p->scan_index,p->offset_ms,v->protected_identity?"true":"false",v->certificate_id);
+    census_json_exit_witness(o,v);census_json_text(o,"}");
   }
   census_json_text(o,"],\"certificates\":[");
   for(unsigned i=0;i<r->certificates_n;i++) {
@@ -102,10 +134,13 @@ static inline void census_json_census(struct census_json *o,const struct census_
     census_json_printf(o,"{\"error_index\":%u,\"kind\":\"%s\",\"proof_index\":%u,\"classified_scan\":%u,\"selected_seal\":%u}",
       v->error_index,v->kind==CENSUS_RESOLUTION_ABSENCE?"kernel_absence":
         v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT?"unclassified_retirement":
-        v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH?"retired_positive_birth":"fresh_classification",
+        v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH?"retired_positive_birth":
+        v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL?"known_nonmanaged_terminal":
+        v->kind==CENSUS_RESOLUTION_BOUND_BIRTH?"bound_seal_birth_terminal":"fresh_classification",
       v->proof_index,v->classified_scan,v->selected_seal);
   }
-  census_json_printf(o,"],\"peak_fd\":%u,\"retained_bytes\":",s->budget->fd_peak);
+  census_json_text(o,"]");census_json_coverage(o,r);
+  census_json_printf(o,",\"peak_fd\":%u,\"retained_bytes\":",s->budget->fd_peak);
   o->retained_offset=o->n;o->retained_set=true;
   census_json_printf(o,"%16zu}",s->budget->peak);
 }
@@ -129,7 +164,7 @@ static inline void census_json_unknown_census(struct census_json *o,const struct
       if(comma) census_json_text(o,",");
       comma=true;census_json_identity(o,&row->identity,row->classification);
     }
-    census_json_text(o,"]}");
+    census_json_text(o,"]");census_json_numeric(o,scan);census_json_text(o,"}");
   }
   census_json_text(o,"],\"selected_closings\":[0,0],\"seal\":{\"scan_index\":0,\"enumerated_count\":0,\"pid_digest\":\"\",\"classified_count\":0,\"classified_digest\":\"\"},\"reconciled_count\":0,\"reconciled_digest\":\"\",\"proofs\":[");
   for(unsigned i=0;i<r->proofs_n;i++) {
@@ -137,7 +172,8 @@ static inline void census_json_unknown_census(struct census_json *o,const struct
     if(i) census_json_text(o,",");
     census_json_printf(o,"{\"kind\":\"%s\",\"method\":\"%s\",\"pid\":%u,\"start_ticks\":",census_proof_kind_name(p->kind),p->method,p->pid);
     if(p->start) census_json_printf(o,"\"%" PRIu64 "\"",p->start);else census_json_text(o,"null");
-    census_json_printf(o,",\"replacement_start\":\"\",\"scan_index\":%d,\"offset_ms\":%" PRIu64 ",\"protected_identity\":%s,\"descendant_certificate_id\":%u}",p->scan_index,p->offset_ms,v->protected_identity?"true":"false",v->certificate_id);
+    census_json_printf(o,",\"replacement_start\":\"\",\"scan_index\":%d,\"offset_ms\":%" PRIu64 ",\"protected_identity\":%s,\"descendant_certificate_id\":%u",p->scan_index,p->offset_ms,v->protected_identity?"true":"false",v->certificate_id);
+    census_json_exit_witness(o,v);census_json_text(o,"}");
   }
   census_json_text(o,"],\"certificates\":[");
   for(unsigned i=0;i<r->certificates_n;i++) {
@@ -152,10 +188,13 @@ static inline void census_json_unknown_census(struct census_json *o,const struct
     census_json_printf(o,"{\"error_index\":%u,\"kind\":\"%s\",\"proof_index\":%u,\"classified_scan\":%u,\"selected_seal\":%u}",
       v->error_index,v->kind==CENSUS_RESOLUTION_ABSENCE?"kernel_absence":
         v->kind==CENSUS_RESOLUTION_UNCLASSIFIED_RETIREMENT?"unclassified_retirement":
-        v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH?"retired_positive_birth":"fresh_classification",
+        v->kind==CENSUS_RESOLUTION_RETIRED_BIRTH?"retired_positive_birth":
+        v->kind==CENSUS_RESOLUTION_KNOWN_TERMINAL?"known_nonmanaged_terminal":
+        v->kind==CENSUS_RESOLUTION_BOUND_BIRTH?"bound_seal_birth_terminal":"fresh_classification",
       v->proof_index,v->classified_scan,v->selected_seal);
   }
-  census_json_printf(o,"],\"peak_fd\":%u,\"retained_bytes\":",s->budget->fd_peak);
+  census_json_text(o,"]");census_json_coverage(o,r);
+  census_json_printf(o,",\"peak_fd\":%u,\"retained_bytes\":",s->budget->fd_peak);
   o->retained_offset=o->n;o->retained_set=true;census_json_printf(o,"%16zu}",s->budget->peak);
 }
 static inline void census_json_errors(struct census_json *o,const struct census_global_source *s) {
@@ -184,7 +223,7 @@ static inline void census_json_errors(struct census_json *o,const struct census_
     census_json_text(o,",\"operation\":");census_json_string(o,e->raw.operation);
     census_json_printf(o,",\"pid\":%u,\"errno\":%d,\"scan_index\":%u,\"resolved_by\":0,\"start_ticks\":",e->raw.pid,e->raw.error,e->scan_index);
     if(e->raw.start) census_json_printf(o,"\"%" PRIu64 "\"",e->raw.start);else census_json_text(o,"null");
-    if(!ev.complete && e->raw.capture_diagnostic_available &&
+    if(e->raw.capture_diagnostic_available &&
         !strcmp(e->reason,"process_unavailable") && e->raw.operation &&
         !strcmp(e->raw.operation,"environ") && e->raw.error==ESRCH &&
         e->raw.fields_pass>=1 && e->raw.fields_pass<=2 &&

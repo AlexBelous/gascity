@@ -41,6 +41,12 @@ struct census_capture_fault {
   /* Internal source witness, never copied into the raw wire error. */
   bool bound_exit_valid;
   uint64_t bound_start, bound_exit_offset_ms;
+  /* Internal owned custody, never serialized as raw evidence or authority.
+   * Zero means absent; source cleanup owns descriptors only after transfer. */
+  unsigned retained_pidfd_plus_one, retained_procdir_plus_one;
+  unsigned retained_stage;
+  uint64_t retained_start;
+  uint32_t retained_uids[4];
 };
 
 static inline void *census_alloc(struct census_budget *budget,size_t n) {

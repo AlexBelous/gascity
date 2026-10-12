@@ -88,8 +88,8 @@ func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp run
 		GeneratedAt string `json:"generated_at"`
 		Zone        string `json:"zone"`
 		Hysteresis  struct {
-			GreenStreak   int    `json:"green_streak"`
-			CooldownUntil string `json:"cooldown_until"`
+			GreenStreak   int             `json:"green_streak"`
+			CooldownUntil json.RawMessage `json:"cooldown_until"`
 		} `json:"hysteresis"`
 		Capacity struct {
 			ActiveCount int `json:"managed_active_count"`
@@ -133,8 +133,25 @@ func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp run
 	if err != nil || now.Sub(generated) < 0 || now.Sub(generated) > 60*time.Second {
 		return false, "capacity_snapshot_stale"
 	}
-	cooldown, err := time.Parse(time.RFC3339Nano, snap.Hysteresis.CooldownUntil)
-	if err != nil || snap.Zone != "green" || snap.Hysteresis.GreenStreak < 2 || now.Before(cooldown) || snap.Capacity.OverCap != 0 || snap.Capacity.ActiveCount < 0 || snap.Capacity.Cap > 2 || snap.Capacity.Cap <= snap.Capacity.ActiveCount || len(snap.Capacity.Active) != snap.Capacity.ActiveCount {
+	// Explicit null is the scheduler's evidence that no cooldown is active.
+	// Keep missing, empty, malformed and non-string evidence fail-closed.
+	cooldownRaw := strings.TrimSpace(string(snap.Hysteresis.CooldownUntil))
+	if cooldownRaw == "" {
+		return false, "capacity_snapshot_invalid"
+	}
+	cooldownActive := false
+	if cooldownRaw != "null" {
+		var value string
+		if json.Unmarshal(snap.Hysteresis.CooldownUntil, &value) != nil {
+			return false, "capacity_snapshot_invalid"
+		}
+		cooldown, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			return false, "capacity_not_admissible"
+		}
+		cooldownActive = now.Before(cooldown)
+	}
+	if snap.Zone != "green" || snap.Hysteresis.GreenStreak < 2 || cooldownActive || snap.Capacity.OverCap != 0 || snap.Capacity.ActiveCount < 0 || snap.Capacity.Cap > 2 || snap.Capacity.Cap <= snap.Capacity.ActiveCount || len(snap.Capacity.Active) != snap.Capacity.ActiveCount {
 		return false, "capacity_not_admissible"
 	}
 	seenActive := make(map[string]bool, len(snap.Capacity.Active))

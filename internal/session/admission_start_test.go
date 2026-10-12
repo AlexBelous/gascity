@@ -184,7 +184,7 @@ func TestManagedAdmissionRefusalPrecedesOrphanCleanup(t *testing.T) {
 func writeAdmissionGrant(t *testing.T, city string, now time.Time) string {
 	t.Helper()
 	capacity := map[string]any{"managed_active_count": 0, "managed_worker_cap": 2, "over_cap_by": 0, "active": []any{}}
-	snapshot := map[string]any{"schema_version": 5, "generated_at": now.Format(time.RFC3339), "zone": "green", "hysteresis": map[string]any{"green_streak": 3, "cooldown_until": now.Add(-time.Hour).Format(time.RFC3339)}, "capacity": capacity, "live_census": map[string]any{"contract": "managed-live-census/v1", "complete": true, "count": 0, "observed_at": now.Format(time.RFC3339), "evidence_at": now.Format(time.RFC3339), "active": []any{}}}
+	snapshot := map[string]any{"schema_version": 5, "generated_at": now.Format(time.RFC3339), "zone": "green", "hysteresis": map[string]any{"green_streak": 3, "cooldown_until": nil}, "capacity": capacity, "live_census": map[string]any{"contract": "managed-live-census/v1", "complete": true, "count": 0, "observed_at": now.Format(time.RFC3339), "evidence_at": now.Format(time.RFC3339), "active": []any{}}}
 	ledger := map[string]any{"schema": 1, "reservations": map[string]any{"worker": map[string]any{"slots": 1, "active_at_reservation": 0, "created_at": now.Format(time.RFC3339)}}}
 	ledgerPath := filepath.Join(city, ".gc/runtime/pool-capacity-admission/reservations.json")
 	for path, value := range map[string]any{filepath.Join(city, ".gc/runtime/capacity-scheduler-v2/snapshot.json"): snapshot, ledgerPath: ledger} {
@@ -273,6 +273,76 @@ func TestCapacityAdmissionProofIsBoundedAndOneShot(t *testing.T) {
 			}
 			if string(before) != string(after) {
 				t.Fatal("proof reuse rewrote or spent a second ledger claim")
+			}
+		})
+	}
+}
+
+// The scheduler emits explicit null when no cooldown is active. Missing or
+// malformed cooldown evidence must still refuse without spending the grant.
+func TestCapacityAdmissionCooldownContract(t *testing.T) {
+	now := time.Date(2026, 10, 4, 8, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		value   any
+		missing bool
+		allowed bool
+	}{
+		{name: "explicit-null", value: nil, allowed: true},
+		{name: "expired", value: now.Add(-time.Hour).Format(time.RFC3339), allowed: true},
+		{name: "deadline-now", value: now.Format(time.RFC3339), allowed: true},
+		{name: "future", value: now.Add(time.Minute).Format(time.RFC3339)},
+		{name: "missing", missing: true},
+		{name: "empty", value: ""},
+		{name: "malformed", value: "no-cooldown"},
+		{name: "nonstring", value: 123},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			city := admissionTestCity(t)
+			ledger := writeAdmissionGrant(t, city, now)
+			path := filepath.Join(city, ".gc/runtime/capacity-scheduler-v2/snapshot.json")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot map[string]any
+			if err := json.Unmarshal(data, &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			hysteresis := snapshot["hysteresis"].(map[string]any)
+			if tc.missing {
+				delete(hysteresis, "cooldown_until")
+			} else {
+				hysteresis["cooldown_until"] = tc.value
+			}
+			data, err = json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			allowed, reason := ClaimCapacityStart(city, "worker", "SID-a", now, runtime.NewFake(), beads.NewMemStore())
+			if allowed != tc.allowed {
+				t.Fatalf("admitted=%v want=%v reason=%s", allowed, tc.allowed, reason)
+			}
+			after, err := os.ReadFile(ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !allowed && string(before) != string(after) {
+				t.Fatal("refusal spent or rewrote reservation")
+			}
+			if allowed {
+				duplicate, why := ClaimCapacityStart(city, "worker", "SID-b", now, runtime.NewFake(), beads.NewMemStore())
+				if duplicate {
+					t.Fatalf("second SID reused capacity grant: %s", why)
+				}
 			}
 		})
 	}

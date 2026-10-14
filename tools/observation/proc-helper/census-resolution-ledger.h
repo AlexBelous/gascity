@@ -103,7 +103,7 @@ static inline bool census_typed_proofs_valid(const struct census_resolution_ledg
   bool protected_used[128]={0};
   for(unsigned i=0;i<r->proofs_n;i++) {
     const struct census_typed_proof *p=&r->proofs[i];const struct proof_item *v=&p->source;
-    if(v->pid<=1 || v->pid>INT32_MAX || v->scan_index<1 || v->scan_index>10 ||
+    if(v->pid<=1 || v->pid>INT32_MAX || v->scan_index<1 || (unsigned)v->scan_index>CENSUS_MAX_SCANS ||
         v->offset_ms>=10000 || v->replacement_start || !v->method) return false;
     if(v->kind==CENSUS_ENUMERATED_ABSENT) {
       if(v->start || p->protected_identity || p->certificate_id || strcmp(v->method,"pidfd_no_pid")) return false;
@@ -478,7 +478,7 @@ static inline bool census_resolution_prefix_valid(const struct census_global_sou
  * latch. An unexplained hard failure can never be bypassed by an empty ledger. */
 static inline bool census_recorded_prefix_valid(const struct census_global_source *s) {
   const struct census_history *h=s->history;
-  if(!h->n || h->n>10 || h->truncated || s->truncated || s->errors_n!=s->errors_total ||
+  if(!h->n || h->n>CENSUS_MAX_SCANS || h->truncated || s->truncated || s->errors_n!=s->errors_total ||
       s->budget->fd_failed || expired()) return false;
   for(unsigned i=0;i<h->n;i++) {
     const struct census_history_scan *scan=&h->scans[i];const struct census_round_scan *receipt=&scan->receipt;

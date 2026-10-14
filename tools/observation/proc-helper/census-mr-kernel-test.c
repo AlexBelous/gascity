@@ -8,14 +8,14 @@
 #include "census-json.h"
 static struct owned_tree managed,managed_birth;
 static pid_t plain;static int plain_gate;static unsigned step;
-static bool managed_dead,birth_dead,plain_dead,normalization,root_dead,late9;
+static bool managed_dead,birth_dead,plain_dead,normalization,root_dead,late_final;
 static const char *negative;static struct census_global_source *owned_source;static int injected_extra=-1;
 static int mr_children(int argc,char **argv) {
  (void)argc;
  if(!strcmp(argv[1],"owned-leaf")) {
-  int ready=atoi(argv[2]),control=atoi(argv[3]);assert(write(ready,"b",1)==1);char cmd;
+  int ready=atoi(argv[2]),control=atoi(argv[3]);assert(write(ready,"b",1)==1);char cmd;bool changed_name=false;
   while(read(control,&cmd,1)==1) {
-   if(cmd=='c') {assert(!prctl(PR_SET_NAME,"changed-before-env"));assert(write(ready,"n",1)==1);continue;}
+   if(cmd=='c') {changed_name=!changed_name;assert(!prctl(PR_SET_NAME,changed_name?"mr-changed-a":"mr-changed-b"));assert(write(ready,"n",1)==1);continue;}
    break;
   }
   close(ready);close(control);return 0;
@@ -59,19 +59,25 @@ static bool mr_roots_only(void *unused,struct census_budget *b,struct census_pid
 #endif
 static unsigned birth_env_calls;
 static int mr_env(uint32_t pid) {
- if(step==(late9?9u:2u) && pid==(uint32_t)managed.leaf) return ESRCH;
- if(!normalization && step==(late9?9u:6u) && pid==(uint32_t)managed_birth.leaf && ++birth_env_calls==2) {
+ if(step==(late_final?CENSUS_MAX_SCANS-1u:2u) && pid==(uint32_t)managed.leaf) return ESRCH;
+ if(!normalization && step==(late_final?CENSUS_MAX_SCANS-1u:6u) && pid==(uint32_t)managed_birth.leaf && ++birth_env_calls==2) {
   retire_leaf(&managed_birth);birth_dead=true;return ESRCH;
  }
  return 0;
 }
 static bool mr_enum(void *unused,struct census_budget *b,struct census_pid_list *list) {
  (void)unused;step++;
+ /* Real owned mutable comm at every earlier seal prevents early convergence.
+  * No fake scans/errors/clock: retain same child/start/UID/GC identity and wait
+  * for its actual PR_SET_NAME acknowledgement before recording that scan. */
+ if(late_final && step>=4 && step<CENSUS_MAX_SCANS && (step-1)%3==0) {
+  assert(write(managed.control,"c",1)==1);char ack;assert(read(managed.ready,&ack,1)==1 && ack=='n');
+ }
  if(step==2 && negative && !strcmp(negative,"comm-before-env")) {assert(write(managed.control,"c",1)==1);char ack;assert(read(managed.ready,&ack,1)==1 && ack=='n');}
- if(step==(late9?10u:3u)) {
+ if(step==(late_final?CENSUS_MAX_SCANS:3u)) {
   if(!negative || strcmp(negative,"live")) {retire_leaf(&managed);managed_dead=true;}
   #ifndef GC_MR_BASELINE
-  if(negative && !late9 && strncmp(negative,"r-",2)) {
+  if(negative && !late_final && strncmp(negative,"r-",2)) {
    struct census_capture_fault *f=&owned_source->errors[0].raw;
    if(!strcmp(negative,"wrongfd")) {int old=(int)f->retained_pidfd_plus_one-1;int replacement=process_pidfd(managed.root);assert(replacement>=0 && census_fd_take(b,replacement));f->retained_pidfd_plus_one=(unsigned)replacement+1;census_fd_close(b,old);injected_extra=replacement;}
    else if(!strcmp(negative,"wrongdir")) {int old=(int)f->retained_procdir_plus_one-1;char path[32];snprintf(path,sizeof path,"%u",(unsigned)managed.root);int replacement=openat(ev.procfd,path,O_RDONLY|O_DIRECTORY|O_CLOEXEC);assert(replacement>=0 && census_fd_take(b,replacement));f->retained_procdir_plus_one=(unsigned)replacement+1;census_fd_close(b,old);injected_extra=replacement;}
@@ -102,7 +108,7 @@ static bool mr_enum(void *unused,struct census_budget *b,struct census_pid_list 
  if(normalization && step==6) {retire_leaf(&managed_birth);birth_dead=true;}
  uint32_t pids[6];size_t n=0;pids[n++]=getpid();pids[n++]=managed.root;pids[n++]=managed_birth.root;
  if(!managed_dead) pids[n++]=managed.leaf;
- if(!normalization && step>=(late9?7u:4u) && (step<=(late9?9u:6u) || !birth_dead)) pids[n++]=managed_birth.leaf;
+ if(!normalization && step>=(late_final?CENSUS_MAX_SCANS-3u:4u) && (step<=(late_final?CENSUS_MAX_SCANS-1u:6u) || !birth_dead)) pids[n++]=managed_birth.leaf;
  if(step>=4 && !plain_dead) pids[n++]=plain;
  for(size_t i=0;i<n;i++) for(size_t j=i+1;j<n;j++) if(pids[j]<pids[i]) {uint32_t v=pids[i];pids[i]=pids[j];pids[j]=v;}
  struct census_pid_list numeric={0};
@@ -122,7 +128,7 @@ int main(int argc,char **argv) {
  if(argc==4) return mr_children(argc,argv);
  normalization=argc==2 && !strcmp(argv[1],"normalization");
  if(argc==2 && !strncmp(argv[1],"negative-",9)) negative=argv[1]+9;
- late9=negative && !strcmp(negative,"late9");
+ late_final=negative && !strcmp(negative,"late-final");
  #ifdef GC_MR_BASELINE
  negative="baseline67";
  #endif
@@ -146,11 +152,25 @@ int main(int argc,char **argv) {
   if(!managed_dead) retire_leaf(&managed);
   if(!birth_dead) retire_leaf(&managed_birth);
   if(!plain_dead) {write(plain_gate,"x",1);close(plain_gate);waitpid(plain,NULL,0);}
-  if(late9) {
-    assert(j.n==10);bool exact=false;
-    for(unsigned k=0;k<s->errors_n;k++) if(s->errors[k].raw.pid==(uint32_t)managed.leaf && s->errors[k].scan_index==9) exact=true;
-    assert(exact && census_numeric_enumeration_absent(&s->history->scans[9],managed.leaf));
-    fprintf(stderr,"exact firstENV9/numericABSENT10/positiveproofAFTERseal10 NO laterseal UNKNOWN PASS\n");
+  if(late_final) {
+    /* The real pre-ENV identity/custody guard refuses this unproved fault
+     * immediately; do not fabricate scan31 or a post-seal terminal witness. */
+    assert(result==CENSUS_ROUNDS_UNKNOWN && j.n==CENSUS_MAX_SCANS-1u &&
+      !j.selected_first && !j.selected_second && !j.selected_seal);
+    const struct census_history_row *prior=census_history_find(&s->history->scans[CENSUS_MAX_SCANS-3u],(uint32_t)managed.leaf);
+    assert(census_row_verified(prior));bool exact=false;
+    for(unsigned k=0;k<s->errors_n;k++) {
+      const struct census_global_fault *e=&s->errors[k];
+      if(e->raw.pid!=(uint32_t)managed.leaf || e->scan_index!=CENSUS_MAX_SCANS-1u) continue;
+      assert(!strcmp(e->reason,"process_unavailable") && e->raw.start==prior->identity.start &&
+        e->raw.operation && !strcmp(e->raw.operation,"environ") && e->raw.error==ESRCH &&
+        !e->raw.retained_stage && !e->raw.retained_pidfd_plus_one);
+      for(unsigned q=0;q<r->resolutions_n;q++) assert(r->resolutions[q].error_index!=k+1u);
+      exact=true;
+    }
+    const struct census_history_row *root=census_history_find(&s->history->scans[j.n-1],(uint32_t)managed.root);
+    assert(exact && census_row_verified(root) && root->identity.declared_root && budget.fd_peak<=32 && !budget.fd_failed);
+    fprintf(stderr,"exact unproved firstENV%u/ESRCH/no-custody UNKNOWN; NO later scan or exit witness invented PASS\n",CENSUS_MAX_SCANS-1u);
   }
   if(!root_dead) retire_tree(&managed);
   retire_tree(&managed_birth);census_resolution_free(&budget,r);census_global_free(s);

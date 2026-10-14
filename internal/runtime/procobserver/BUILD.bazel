@@ -32,6 +32,8 @@ go_library(
 go_test(
     name = "procobserver_test",
     srcs = [
+        "census_more_rounds_candidate_test.go",
+        "census_more_rounds_wire_test.go",
         "census_test.go",
         "census_v3_birth_conservation_test.go",
         "census_v3_chain_composition_test.go",
@@ -55,6 +57,9 @@ go_test(
         "testenv_import_test.go",
     ],
     data = [
+        "testdata/census_owned_rounds_13.json",
+        "testdata/census_owned_rounds_31.json",
+        "testdata/census_shortlived_rounds_13.json",
         "testdata/protected-chain-f386.json",  # keep
         "//internal/runtime/observation:consumer_fixture",
     ],

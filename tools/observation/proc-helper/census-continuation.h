@@ -220,7 +220,7 @@ static inline bool census_final_resolutions_valid(const struct census_global_sou
 static inline bool census_continuation_capture(struct census_global_source *s,
     struct census_resolution_ledger *r,struct census_round_journal *j,
     unsigned round,enum census_scan_kind kind) {
-  if(j->n>=10 || (j->n && !census_continuation_gate(s,r))) return false;
+  if(j->n>=CENSUS_MAX_SCANS || (j->n && !census_continuation_gate(s,r))) return false;
   unsigned before=s->history->n;struct census_round_scan receipt={.scan_id=j->n+1,.round=round,.kind=kind};
   /* Sticky h.failed/s.fatal are preserved. Only this positively checked source
    * gate can record another slot, never a caller-provided retry permission. */
@@ -234,7 +234,7 @@ static inline enum census_round_result census_choose_proven_continuation(
     struct census_round_journal *j) {
   if(j->n || s->history->n || r->resolutions_n ||
       !census_continuation_capture(s,r,j,0,CENSUS_INITIAL)) return CENSUS_ROUNDS_UNKNOWN;
-  for(unsigned round=1;round<=3;round++) {
+  for(unsigned round=1;round<=CENSUS_MAX_ROUNDS;round++) {
     unsigned first=j->n;
     if(!census_continuation_capture(s,r,j,round,CENSUS_CLOSING) ||
         !census_continuation_capture(s,r,j,round,CENSUS_CLOSING) ||

@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <string.h>
 
+#define CENSUS_MAX_ROUNDS 10u
+#define CENSUS_MAX_SCANS (1u+3u*CENSUS_MAX_ROUNDS)
+
 enum census_scan_kind {CENSUS_INITIAL,CENSUS_CLOSING,CENSUS_SEAL};
 enum census_round_result {CENSUS_ROUNDS_UNKNOWN,CENSUS_ROUNDS_SELECTED_PENDING_PROOF};
 struct census_round_scan {
@@ -19,7 +22,7 @@ struct census_round_scan {
   unsigned hard_unresolved;
 };
 struct census_round_journal {
-  struct census_round_scan scans[10];
+  struct census_round_scan scans[CENSUS_MAX_SCANS];
   unsigned n,selected_first,selected_second,selected_seal;
 };
 typedef bool (*census_source_scan)(void *,unsigned,unsigned,enum census_scan_kind,
@@ -31,7 +34,7 @@ static inline bool census_journal_digest(const char digest[65]) {
 }
 static inline bool census_journal_capture(struct census_round_journal *j,void *context,
     census_source_scan source,unsigned round,enum census_scan_kind kind) {
-  if(j->n>=10) return false;
+  if(j->n>=CENSUS_MAX_SCANS) return false;
   struct census_round_scan next={.scan_id=j->n+1,.round=round,.kind=kind};
   bool returned=source(context,next.scan_id,round,kind,&next);
   // Preserve even failed source receipts; never clear or recycle a slot.
@@ -46,7 +49,7 @@ static inline bool census_journal_capture(struct census_round_journal *j,void *c
 static inline enum census_round_result census_choose_fresh_round(struct census_round_journal *j,
     void *context,census_source_scan source) {
   if(j->n || !census_journal_capture(j,context,source,0,CENSUS_INITIAL)) return CENSUS_ROUNDS_UNKNOWN;
-  for(unsigned round=1;round<=3;round++) {
+  for(unsigned round=1;round<=CENSUS_MAX_ROUNDS;round++) {
     unsigned first=j->n;
     if(!census_journal_capture(j,context,source,round,CENSUS_CLOSING) ||
        !census_journal_capture(j,context,source,round,CENSUS_CLOSING) ||

@@ -23,7 +23,11 @@ int main(void) {
   assert(j.n==7 && j.selected_first==5 && j.selected_second==6 && j.selected_seal==7);
   assert(j.scans[3].late_birth && j.scans[3].scan_id==4); // no rewriting first failed seal
   memset(&j,0,sizeof j);s.birth_through=3;
-  assert(census_choose_fresh_round(&j,&s,source)==CENSUS_ROUNDS_UNKNOWN && j.n==10);
+  assert(census_choose_fresh_round(&j,&s,source)==CENSUS_ROUNDS_SELECTED_PENDING_PROOF && j.n==13);
+  memset(&j,0,sizeof j);s.birth_through=9;
+  assert(census_choose_fresh_round(&j,&s,source)==CENSUS_ROUNDS_SELECTED_PENDING_PROOF && j.n==31);
+  memset(&j,0,sizeof j);s.birth_through=10;
+  assert(census_choose_fresh_round(&j,&s,source)==CENSUS_ROUNDS_UNKNOWN && j.n==31);
   memset(&j,0,sizeof j);s=(struct scenario){.hard_scan=3};
   assert(census_choose_fresh_round(&j,&s,source)==CENSUS_ROUNDS_UNKNOWN && j.n==3 && j.scans[2].hard_unresolved==1);
   memset(&j,0,sizeof j);s=(struct scenario){.deadline_scan=4};

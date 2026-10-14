@@ -42,7 +42,7 @@ struct census_history_scan {
   bool numeric_enumeration_complete; /* Independent of per-PID capture success. */
 };
 struct census_history {
-  struct census_history_scan scans[10];
+  struct census_history_scan scans[CENSUS_MAX_SCANS];
   unsigned n,errors_total;
   bool failed,truncated;
 };
@@ -118,7 +118,7 @@ static inline void census_history_free(struct census_budget *b,struct census_his
 static inline bool census_history_append_record(struct census_history *h,struct census_budget *b,
     const uint32_t *pids,size_t n,unsigned round,enum census_scan_kind kind,
     uint64_t offset_ms,void *context,census_identity_source source) {
-  if(h->n>=10) return false;
+  if(h->n>=CENSUS_MAX_SCANS) return false;
   struct census_history_scan *scan=&h->scans[h->n++];
   scan->receipt=(struct census_round_scan){.scan_id=h->n,.round=round,.kind=kind,
     .offset_ms=offset_ms,.enumerated=n};
@@ -180,7 +180,7 @@ static inline bool census_history_append(struct census_history *h,struct census_
 static inline bool census_numeric_enumeration_valid(const struct census_history_scan *scan) {
   if(!scan || !scan->numeric_enumeration_complete || scan->allocation_failed || !scan->rows ||
       !scan->allocated_rows || scan->allocated_rows>65536 || scan->allocated_rows!=scan->receipt.enumerated ||
-      !scan->receipt.scan_id || scan->receipt.scan_id>10 || scan->receipt.offset_ms>=10000) return false;
+      !scan->receipt.scan_id || scan->receipt.scan_id>CENSUS_MAX_SCANS || scan->receipt.offset_ms>=10000) return false;
   sha256_ctx hash;sha256_init(&hash);census_history_field(&hash,CENSUS_V3_RAW_HASH_DOMAIN);
   for(size_t i=0;i<scan->allocated_rows;i++) {
     uint32_t actual=scan->rows[i].pid;

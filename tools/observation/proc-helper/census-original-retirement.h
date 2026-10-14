@@ -89,7 +89,7 @@ static inline size_t census_original_managed_chain(const struct census_global_so
   return n;
 }
 static inline bool census_original_pending(const struct census_global_source *s,unsigned index) {
-  if(!index || index>s->errors_n || s->history->n>=10 || !census_exit_original_scope(s)) return false;
+  if(!index || index>s->errors_n || s->history->n>=CENSUS_MAX_SCANS || !census_exit_original_scope(s)) return false;
   const struct census_global_fault *e=&s->errors[index-1];
   if(!e->raw.retained_binding_verified || e->raw.retained_stage!=1 || !e->raw.retained_pidfd_plus_one ||
       !e->raw.retained_procdir_plus_one || !census_birth_companion_diagnostic(&e->raw)) return false;

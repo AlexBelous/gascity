@@ -141,7 +141,7 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 	bad := func() error { return fmt.Errorf("observer v3 census incomplete") }
 	if c.Schema != CensusV3Schema || controllerPID <= 1 || duration < 0 || duration >= 10000 ||
 		c.PeakFD < 1 || c.PeakFD > 32 || c.RetainedBytes < 1 || c.RetainedBytes > 16*1024*1024 ||
-		len(c.Scans) < 4 || len(c.Scans) > 10 || (len(c.Scans)-1)%3 != 0 ||
+		len(c.Scans) < 4 || len(c.Scans) > 31 || (len(c.Scans)-1)%3 != 0 ||
 		c.Proofs == nil || len(c.Proofs) > 128 || c.Certificates == nil || len(c.Certificates) > 128 ||
 		c.Resolutions == nil || errors == nil || len(errors) > 128 || total != len(errors) || truncated || len(c.Resolutions) != len(errors) {
 		return bad()

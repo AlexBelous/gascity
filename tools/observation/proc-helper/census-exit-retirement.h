@@ -225,7 +225,7 @@ static inline bool census_collect_coverage_retirements(struct census_global_sour
   return true;
 }
 static inline bool census_exit_pending(const struct census_global_source *s,unsigned error_index) {
-  if(!census_exit_original_scope(s) || s->history->n>=10 || !error_index || error_index>s->errors_n) return false;
+  if(!census_exit_original_scope(s) || s->history->n>=CENSUS_MAX_SCANS || !error_index || error_index>s->errors_n) return false;
   const struct census_global_fault *e=&s->errors[error_index-1];
   const struct census_owned_identity *prior=NULL;unsigned prior_scan=0;
   if(!e->raw.retained_stage || e->raw.retained_stage>2 || !e->raw.retained_pidfd_plus_one || !e->raw.retained_procdir_plus_one ||

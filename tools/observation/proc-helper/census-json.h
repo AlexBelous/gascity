@@ -161,7 +161,7 @@ static inline void census_json_census(struct census_json *o,const struct census_
  * The enclosing helper MUST mark this frame incomplete. */
 static inline void census_json_unknown_census(struct census_json *o,const struct census_global_source *s,
     const struct census_resolution_ledger *r) {
-  if(!census_typed_proofs_valid(r) || s->history->n>10 || s->errors_n>128) {o->failed=true;return;}
+  if(!census_typed_proofs_valid(r) || s->history->n>CENSUS_MAX_SCANS || s->errors_n>128) {o->failed=true;return;}
   census_json_text(o,"{\"schema\":\"bounded-process-census/v3\",\"scans\":[");
   for(unsigned i=0;i<s->history->n;i++) {
     const struct census_history_scan *scan=&s->history->scans[i];const struct census_round_scan *v=&scan->receipt;

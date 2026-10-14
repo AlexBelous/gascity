@@ -35,7 +35,7 @@ try:
     run(['cc', '-O0', '-std=c11', '-Wall', '-Wextra', '-Werror', source / 'census-mr-kernel-test.c', '-o', a.out / 'mr-test'], 'compile-candidate')
     run([a.out / 'mr-test'], 'mixed-GREEN')
     run([a.out / 'mr-test', 'normalization'], 'normalization-GREEN')
-    for case in ('wrongfd', 'wrongdir', 'live', 'binding', 'uid', 'secondpass', 'rootloss', 'deadline', 'budget', 'numeric', 'r-wrongfd', 'r-wrongdir', 'r-uid', 'r-reuse', 'r-protected', 'comm-before-env', 'late9'):
+    for case in ('wrongfd', 'wrongdir', 'live', 'binding', 'uid', 'secondpass', 'rootloss', 'deadline', 'budget', 'numeric', 'r-wrongfd', 'r-wrongdir', 'r-uid', 'r-reuse', 'r-protected', 'comm-before-env', 'late-final'):
         run([a.out / 'mr-test', 'negative-' + case], 'negative-' + case)
     run(['cc', '-O0', '-std=c11', '-Wall', '-Wextra', '-Werror', source / 'census-original-custody-kernel-test.c', '-o', a.out / 'custody-test'], 'compile-strong-custody')
     run([a.out / 'custody-test'], 'OTHER-REAPED-ABA-resource')

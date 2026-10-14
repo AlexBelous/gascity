@@ -89,7 +89,7 @@ static inline bool census_closing_survivors_equal(const struct census_global_sou
 static inline bool census_current_closings_equal(const struct census_global_source *s,
     const struct census_resolution_ledger *r) {
   unsigned n=s->history->n;
-  if((n!=4 && n!=7 && n!=10) || r->denied || !census_recorded_prefix_valid(s) ||
+  if((n<4 || n>CENSUS_MAX_SCANS || (n-1)%3!=0) || r->denied || !census_recorded_prefix_valid(s) ||
       !census_typed_proofs_valid(r) || !census_standalone_history_valid(s,r)) return false;
   /* Namespace origin is established by the existing immutable proc/bootstrap
    * and witness creator fences. This pure comparator neither replaces them nor

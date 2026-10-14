@@ -110,7 +110,7 @@ static inline bool census_global_scan_record(void *context,unsigned scan_id,unsi
   bool enumerated=s->enumerate(s->source_context,s->budget,&pids);
   int enum_error=errno;
   if(!enumerated) {
-    if(s->history->n>=10) {s->fatal=true;census_pid_clear(s->budget,&pids);return false;}
+    if(s->history->n>=CENSUS_MAX_SCANS) {s->fatal=true;census_pid_clear(s->budget,&pids);return false;}
     struct census_history_scan *failed=&s->history->scans[s->history->n++];
     failed->receipt=(struct census_round_scan){.scan_id=scan_id,.round=round,.kind=kind,
       .offset_ms=mono_ms()-start,.enumerated=pids.n,.hard_unresolved=1};

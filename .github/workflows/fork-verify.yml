@@ -20,6 +20,11 @@ on:
         required: false
         default: ""
         type: string
+      fullfast_source_sha:
+        description: "Exact reviewed 40-hex Native source for independent full-fast producer gate"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -174,4 +179,79 @@ jobs:
             ${{ runner.temp }}/clerk-pair/*.log
             ${{ runner.temp }}/clerk-pair/*.stderr
           if-no-files-found: error
+          retention-days: 14
+
+  reviewed-clerk-fullfast:
+    # Independent producer proof. This is not the normal git-push hook receipt.
+    if: ${{ github.repository == 'AlexBelous/gascity' && github.event_name == 'workflow_dispatch' && inputs.fullfast_source_sha != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      EXPECTED_SOURCE: ${{ inputs.fullfast_source_sha }}
+      EXPECTED_TREE: c24e1f78e91ce54c386bd65fd54e31fce4853df1
+      LOCAL_TEST_JOBS: "1"
+      CMD_GC_PROCESS_TOTAL: "6"
+    steps:
+      - name: Validate exact candidate input
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_SOURCE" = 673ee5fd29ce99d527f458051c5efaecfe7e9bab
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.fullfast_source_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify immutable source and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          test -z "$(git status --porcelain)"
+          printf 'source=%s\ntree=%s\n' "$EXPECTED_SOURCE" "$EXPECTED_TREE"
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: "2.1.7"
+          bd-version: "v1.3.0"
+          install-claude-cli: "false"
+      - name: Install native ICU headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libicu-dev pkg-config
+          test "$(pkg-config --modversion icu-uc | cut -d. -f1)" = 74
+      - name: Record Linux toolchain and capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          bd version
+          dolt version
+          pkg-config --modversion icu-uc
+          free -h
+          df -h .
+      - name: Unfiltered fast suite at reviewed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-fast-parallel 2>&1 | tee "$RUNNER_TEMP/clerk-fullfast.log"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          grep -Fxq 'All fast jobs passed' "$RUNNER_TEMP/clerk-fullfast.log"
+      - name: Hash terminal log
+        if: always()
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/clerk-fullfast.log"; then
+            sha256sum "$RUNNER_TEMP/clerk-fullfast.log"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: reviewed-clerk-fullfast-${{ inputs.fullfast_source_sha }}
+          path: ${{ runner.temp }}/clerk-fullfast.log
+          if-no-files-found: warn
           retention-days: 14

@@ -54,6 +54,7 @@ continuity.`,
 		},
 	}
 	cmd.AddCommand(
+		newSessionCapacityContractCmd(stdout),
 		newSessionNewCmd(stdout, stderr),
 		newSessionListCmd(stdout, stderr),
 		newSessionAttachCmd(stdout, stderr),
@@ -72,6 +73,26 @@ continuity.`,
 		newSessionWakeCmd(stdout, stderr),
 		newSessionWaitCmd(stdout, stderr),
 	)
+	return cmd
+}
+
+// This read-only capability handshake lets an external dispatcher fail closed
+// against an older gc binary before publishing a dedicated Clerk reservation.
+// The deployment must additionally verify the controller runs that same binary.
+func newSessionCapacityContractCmd(stdout io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "capacity-contract",
+		Short: "Report the native exact-session capacity admission contract",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return json.NewEncoder(stdout).Encode(map[string]any{
+				"schema":                      "gc.session-capacity-contract/v1",
+				"dedicated_alias_reservation": session.DedicatedClerkReservationContract,
+				"native_actual_start":         true,
+			})
+		},
+	}
+	cmd.Flags().Bool("json", false, "JSON output (the only supported format)")
 	return cmd
 }
 

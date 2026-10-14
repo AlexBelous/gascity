@@ -203,6 +203,111 @@ func writeAdmissionGrant(t *testing.T, city string, now time.Time) string {
 	return ledgerPath
 }
 
+func TestDedicatedClerkUsesOnlyExactAliasReservationAtNativeStart(t *testing.T) {
+	alias := "mail-0123456789abcdef01234567-crm"
+	key := "clerk@" + alias
+	for _, mode := range []string{"create", "normal", "runtime-only"} {
+		t.Run(mode, func(t *testing.T) {
+			city := admissionTestCity(t)
+			now := time.Date(2026, 10, 14, 14, 39, 2, 0, time.UTC)
+			ledgerPath := writeAdmissionGrant(t, city, now)
+			if err := os.WriteFile(filepath.Join(city, "config/capacity-scheduler-v2.toml"), []byte("[queue]\nmanaged_exact_routes=[\"clerk\"]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			grant := map[string]any{"slots": 1, "active_at_reservation": 0, "created_at": now.Format(time.RFC3339)}
+			writeLedger := func(reservations map[string]any) {
+				t.Helper()
+				data, err := json.Marshal(map[string]any{"schema": 1, "reservations": reservations})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(ledgerPath, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			mgr := NewManagerWithOptions(store, sp, WithCityPath(city), WithClock(&clock.Fake{Time: now}))
+			countStarts := func() int {
+				count := 0
+				for _, call := range sp.Calls {
+					if call.Method == "Start" {
+						count++
+					}
+				}
+				return count
+			}
+			var id string
+			if mode == "create" {
+				// Direct create persists a SID before the provider boundary, just as
+				// controller-managed `session new` creates its bead before enqueue.
+				writeLedger(map[string]any{"clerk": grant})
+				_, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "clerk", Alias: alias, Command: "fake-command", WorkDir: t.TempDir(), Provider: "fake"})
+				if err == nil || !runtime.IsProviderCapacity(err) {
+					t.Fatalf("generic grant admitted dedicated create: %v", err)
+				}
+				if got := countStarts(); got != 0 {
+					t.Fatalf("generic grant started provider %d times", got)
+				}
+				writeLedger(map[string]any{key: grant})
+				_, err = mgr.CreateSession(context.Background(), CreateOptions{Template: "clerk", Alias: "other/" + alias, Command: "fake-command", WorkDir: t.TempDir(), Provider: "fake"})
+				if err == nil || !runtime.IsProviderCapacity(err) {
+					t.Fatalf("qualified alias spent exact packet grant: %v", err)
+				}
+				if got := countStarts(); got != 0 {
+					t.Fatalf("qualified alias started provider %d times", got)
+				}
+				info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "clerk", Alias: alias, Command: "fake-command", WorkDir: t.TempDir(), Provider: "fake"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				id = info.ID
+			} else {
+				b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"state": string(StateSuspended), "template": "clerk", "alias": alias, "provider": "fake", "work_dir": t.TempDir(), "command": "fake-command"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				id = b.ID
+				start := func() error {
+					if mode == "normal" {
+						return mgr.Start(context.Background(), id, "fake-command", runtime.Config{})
+					}
+					return mgr.StartRuntimeOnly(context.Background(), id, "fake-command", runtime.Config{})
+				}
+				writeLedger(map[string]any{"clerk": grant})
+				if err := start(); err == nil || !runtime.IsProviderCapacity(err) {
+					t.Fatalf("generic grant admitted dedicated resume: %v", err)
+				}
+				if got := countStarts(); got != 0 {
+					t.Fatalf("generic grant started provider %d times", got)
+				}
+				writeLedger(map[string]any{key: grant})
+				if err := start(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := countStarts(); got != 1 {
+				t.Fatalf("exact grant provider starts=%d, want 1", got)
+			}
+			data, err := os.ReadFile(ledgerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ledger struct {
+				Reservations map[string]struct {
+					StartClaims map[string]string `json:"start_claims"`
+				} `json:"reservations"`
+			}
+			if err := json.Unmarshal(data, &ledger); err != nil {
+				t.Fatal(err)
+			}
+			if ledger.Reservations[key].StartClaims[id] != now.Format(time.RFC3339) {
+				t.Fatalf("exact SID claim absent: %s", data)
+			}
+		})
+	}
+}
+
 func TestCapacityAdmissionProofIsBoundedAndOneShot(t *testing.T) {
 	for _, mode := range []string{"concurrent-duplicate", "different-SID", "expired-evidence"} {
 		t.Run(mode, func(t *testing.T) {

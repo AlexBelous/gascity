@@ -214,6 +214,24 @@ func TestParsePruneDuration(t *testing.T) {
 	}
 }
 
+func TestSessionCapacityContractReportsExactDedicatedReservation(t *testing.T) {
+	var stdout bytes.Buffer
+	cmd := newSessionCapacityContractCmd(&stdout)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["schema"] != "gc.session-capacity-contract/v1" ||
+		got["dedicated_alias_reservation"] != session.DedicatedClerkReservationContract ||
+		got["native_actual_start"] != true {
+		t.Fatalf("unexpected contract: %v", got)
+	}
+}
+
 func TestSessionNewJSONRequiresNoAttach(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := cmdSessionNew([]string{"worker"}, "", "", "", false, true, 0, &stdout, &stderr)

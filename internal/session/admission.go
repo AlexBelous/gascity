@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +17,30 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// DedicatedClerkReservationContract is the exact alias-reservation key shape
+// shared with the approved-email dispatcher. Its entries use the ordinary
+// route ledger and global cap without allowing a pool Clerk to spend them.
+const DedicatedClerkReservationContract = "clerk@<mail-24hex-crm>"
+
+var dedicatedClerkAlias = regexp.MustCompile(`^(mail-[0-9a-f]{24}-crm)$`)
+
+func capacityReservationKey(route, sessionID string, store beads.Store) (string, string) {
+	if route != "clerk" {
+		return route, ""
+	}
+	if store == nil {
+		return "", "capacity_identity_unavailable"
+	}
+	info, err := NewStore(beads.SessionStore{Store: store}).Get(sessionID)
+	if err != nil || info.Template != route || info.Closed {
+		return "", "capacity_identity_unavailable"
+	}
+	if match := dedicatedClerkAlias.FindStringSubmatch(info.Alias); match != nil {
+		return "clerk@" + match[1], ""
+	}
+	return route, ""
+}
 
 // ClaimCapacityStart spends a reader-issued capacity reservation for a
 // specific session before the reconciler can start its provider. The reader
@@ -229,7 +254,11 @@ func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp run
 	if err != nil || json.Unmarshal(data, &ledger) != nil || ledger.Schema != 1 || ledger.Reservations == nil {
 		return false, "capacity_ledger_invalid"
 	}
-	entryRaw, ok := ledger.Reservations[route]
+	grantKey, reason := capacityReservationKey(route, sessionID, store)
+	if reason != "" {
+		return false, reason
+	}
+	entryRaw, ok := ledger.Reservations[grantKey]
 	if !ok {
 		return false, "capacity_grant_missing"
 	}
@@ -287,7 +316,7 @@ func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp run
 	}
 	claims[sessionID] = now.UTC().Format(time.RFC3339Nano)
 	entry["start_claims"], _ = json.Marshal(claims)
-	ledger.Reservations[route], _ = json.Marshal(entry)
+	ledger.Reservations[grantKey], _ = json.Marshal(entry)
 	// Preserve top-level fields written by pool_demand_reader.py.
 	var top map[string]json.RawMessage
 	if json.Unmarshal(data, &top) != nil {
@@ -331,7 +360,7 @@ func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp run
 	if err := os.Rename(tmp.Name(), ledgerPath); err != nil {
 		return false, "capacity_ledger_write_failed"
 	}
-	return true, fmt.Sprintf("capacity_grant_claimed:%s", strings.TrimSpace(route))
+	return true, fmt.Sprintf("capacity_grant_claimed:%s", strings.TrimSpace(grantKey))
 }
 
 func managedCapacityRoute(route string, exact, prefixes []string) bool {

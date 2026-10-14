@@ -13,7 +13,7 @@ import (
 
 func TestClaimPoolAdmissionRequiresVersionedFreshEvidenceBeforeSpend(t *testing.T) {
 	now := time.Date(2026, 10, 4, 8, 0, 0, 0, time.UTC)
-	for _, name := range []string{"complete", "legacy", "wrong-version", "missing-census", "wrong-contract", "incomplete", "null-count", "stale-published", "stale-evidence", "future-evidence", "missing-evidence", "count-conflict", "rows-conflict", "duplicate-SID", "cap3", "null-cap", "missing-overcap", "extended-row-conflict"} {
+	for _, name := range []string{"complete", "legacy", "wrong-version", "missing-census", "wrong-contract", "incomplete", "null-count", "stale-published", "stale-evidence", "future-evidence", "missing-evidence", "count-conflict", "rows-conflict", "duplicate-SID", "cap3", "cap4", "null-cap", "missing-overcap", "extended-row-conflict"} {
 		t.Run(name, func(t *testing.T) {
 			city := t.TempDir()
 			configDir := filepath.Join(city, "config")
@@ -29,6 +29,8 @@ func TestClaimPoolAdmissionRequiresVersionedFreshEvidenceBeforeSpend(t *testing.
 			switch name {
 			case "cap3":
 				capacity["managed_worker_cap"] = 3
+			case "cap4":
+				capacity["managed_worker_cap"] = 4
 			case "null-cap":
 				capacity["managed_worker_cap"] = nil
 			case "missing-overcap":
@@ -90,15 +92,47 @@ func TestClaimPoolAdmissionRequiresVersionedFreshEvidenceBeforeSpend(t *testing.
 				t.Fatal(err)
 			}
 			allowed, reason := claimPoolStartAdmission(city, "worker", "candidate-SID", now, runtime.NewFake(), beads.NewMemStore())
-			if allowed != (name == "complete") {
-				t.Fatalf("allowed=%v reason=%s; expected complete v5 only", allowed, reason)
+			positive := name == "complete" || name == "cap3"
+			if allowed != positive {
+				t.Fatalf("allowed=%v reason=%s; expected fresh complete v5 with cap2 or cap3", allowed, reason)
 			}
 			after, err := os.ReadFile(ledgerPath)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if name != "complete" && string(after) != string(before) {
+			if !positive && string(after) != string(before) {
 				t.Fatal("denied census spent or rewrote reservation")
+			}
+			if positive {
+				var spent struct {
+					Reservations map[string]struct {
+						Slots       int               `json:"slots"`
+						StartClaims map[string]string `json:"start_claims"`
+					} `json:"reservations"`
+				}
+				if err := json.Unmarshal(after, &spent); err != nil {
+					t.Fatal(err)
+				}
+				grant := spent.Reservations["worker"]
+				if string(after) == string(before) || grant.Slots != 1 || len(grant.StartClaims) != 1 || grant.StartClaims["candidate-SID"] != now.Format(time.RFC3339Nano) {
+					t.Fatal("allowed start did not spend exactly one reader-issued slot for candidate-SID")
+				}
+				for _, retry := range []struct{ sid, reason string }{
+					{"candidate-SID", "capacity_session_already_claimed"},
+					{"different-candidate-SID", "capacity_grant_consumed"},
+				} {
+					allowed, reason := claimPoolStartAdmission(city, "worker", retry.sid, now, runtime.NewFake(), beads.NewMemStore())
+					if allowed || reason != retry.reason {
+						t.Fatalf("retry %s: allowed=%v reason=%s; expected %s", retry.sid, allowed, reason, retry.reason)
+					}
+					retried, err := os.ReadFile(ledgerPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if string(retried) != string(after) {
+						t.Fatalf("denied retry %s rewrote spent reservation", retry.sid)
+					}
+				}
 			}
 		})
 	}

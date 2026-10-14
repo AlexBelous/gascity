@@ -4111,6 +4111,7 @@ gc session
 | Subcommand | Description |
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
+| [gc session capacity-contract](#gc-session-capacity-contract) | Report the native exact-session capacity admission contract |
 | [gc session close](#gc-session-close) | Close a session permanently |
 | [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
 | [gc session list](#gc-session-list) | List chat sessions |
@@ -4141,6 +4142,18 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 ```
 gc session attach <session-id-or-alias>
 ```
+
+## gc session capacity-contract
+
+Report the native exact-session capacity admission contract
+
+```
+gc session capacity-contract [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | JSON output (the only supported format) |
 
 ## gc session close
 

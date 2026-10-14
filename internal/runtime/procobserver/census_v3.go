@@ -413,7 +413,7 @@ func ValidateCensusV3(c CensusV3, errors []EvidenceError, total int, truncated b
 			// original scan positively classified it, preserve that exact
 			// incarnation, inherited tuple, UID and root protection as well.
 			original, known := byScan[e.ScanIndex][e.PID]
-			if e.StartTicks != nil && !known || known && !sameFreshClassification(original, v) {
+			if e.StartTicks != nil && !known || known && !sameBirthSurvivor(byScan, e.ScanIndex, r.ClassifiedScan, original, v, controllerPID) {
 				return bad()
 			}
 			// Null birth is only a numeric coverage event; it grants no ancestry or
@@ -466,6 +466,47 @@ func sameFreshClassification(a, b CensusIdentity) bool {
 		b.Name = ""
 	}
 	return a == b
+}
+
+// sameBirthSurvivor permits only a managed descendant's mutable comm between
+// its original full birth and the selected fresh triplet. Incarnation, inherited
+// ownership and the entire exact ancestor chain to a declared root are conserved.
+// The fresh closing pair and seal still compare all fields, including comm.
+func sameBirthSurvivor(rows map[int]map[int]CensusIdentity, originalScan, freshScan int, a, b CensusIdentity, controller int) bool {
+	if sameFreshClassification(a, b) {
+		return true
+	}
+	if a.Classification != "managed" || b.Classification != "managed" || a.DeclaredRoot || b.DeclaredRoot ||
+		!validCensusIdentity(a, controller) || !validCensusIdentity(b, controller) {
+		return false
+	}
+	a.Name = b.Name
+	if a != b {
+		return false
+	}
+	for _, uid := range a.UIDs {
+		if uid == 0 {
+			return false
+		}
+	}
+	seen := map[int]bool{a.PID: true}
+	for parent := a.PPID; len(seen) < 128; {
+		if seen[parent] {
+			return false
+		}
+		seen[parent] = true
+		old, ok := rows[originalScan][parent]
+		fresh, present := rows[freshScan][parent]
+		if !ok || !present || old.Classification != "managed" || !validCensusIdentity(old, controller) ||
+			!sameFreshClassification(old, fresh) || !sameInheritedTuple(a, old) {
+			return false
+		}
+		if old.DeclaredRoot {
+			return true
+		}
+		parent = old.PPID
+	}
+	return false
 }
 
 func sameInheritedTuple(a, b CensusIdentity) bool {

@@ -14,6 +14,12 @@ on:
   push:
     branches: ["feat/**", "fix/**"]
   workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: "Exact reviewed 40-hex source for isolated targeted tests and gc/helper artifacts"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -23,7 +29,7 @@ jobs:
     # Canonical PR branches already run the complete Blacksmith CI graph.
     # This lightweight fallback exists only for forks that cannot use those
     # runners or repository secrets.
-    if: ${{ github.repository != 'gastownhall/gascity' }}
+    if: ${{ github.repository != 'gastownhall/gascity' && !(github.event_name == 'workflow_dispatch' && inputs.expected_source_sha != '') }}
     runs-on: ubuntu-latest
     env:
       DOLT_VERSION: "2.1.7"
@@ -49,3 +55,123 @@ jobs:
         run: go test ./internal/orders/ -run 'TestParseScope|TestValidateRejectsUnknownScope|TestValidateAcceptsCityAndRigScope|TestParseEnv' -count=1 -v
       - name: Unit tests — scale from zero (#2819)
         run: go test ./cmd/gc/ -run 'TestBuildDesiredState_ScaleFromZero' -count=1 -v
+
+  reviewed-clerk-pair:
+    # Reuse this already registered dispatch path; no tag/release/deployment.
+    if: ${{ github.repository == 'AlexBelous/gascity' && github.event_name == 'workflow_dispatch' && inputs.expected_source_sha != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      EXPECTED_SOURCE: ${{ inputs.expected_source_sha }}
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "2GiB"
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: local
+      GOFLAGS: "-p=1"
+    steps:
+      - name: Validate exact source input
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$EXPECTED_SOURCE"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify immutable checkout and required scoped fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain)"
+          test -f tools/observation/proc-helper/census-comm-refresh-kernel-test.c
+          test -f internal/runtime/procobserver/census_comm_birth_test.go
+          grep -q 'func TestCapacityCapThreeBoundary' internal/session/admission_start_test.go
+          mkdir -m 700 "$RUNNER_TEMP/clerk-pair"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/clerk-pair/source-tree.txt"
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: "1.26.6"
+          cache: false
+      - name: Install native build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libicu-dev pkg-config
+          test "$(pkg-config --modversion icu-uc | cut -d. -f1)" = 74
+          dpkg-query -W libicu-dev gcc libc6-dev > "$RUNNER_TEMP/clerk-pair/native-dependencies.txt"
+          test "$(go env GOVERSION)" = go1.26.6
+      - name: Scoped native cap and one-shot boundary tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -p 1 ./internal/session -run '^(TestCapacityCapThreeBoundary|TestManagedStartAdmissionSpendsGrantAtActualBoundary|TestCapacityAdmissionProofIsBoundedAndOneShot)$' -count=1 -json | tee "$RUNNER_TEMP/clerk-pair/native-tests.jsonl"
+      - name: Owned-child comm capture and real C-to-Go wire
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/clerk-pair"
+          cc -O1 -Wall -Wextra tools/observation/proc-helper/census-comm-refresh-kernel-test.c -o "$out/comm-kernel-test"
+          "$out/comm-kernel-test" > "$out/comm-capture.log" 2>&1
+          "$out/comm-kernel-test" continuation > "$out/comm-continuation.log" 2>&1
+          "$out/comm-kernel-test" birth-change > "$out/comm-birth.log" 2>&1
+          "$out/comm-kernel-test" birth-change-vector > "$out/comm-birth-vector.json" 2> "$out/comm-birth-vector.stderr"
+          GC_COMM_BIRTH_VECTOR="$out/comm-birth-vector.json" go test -p 1 ./internal/runtime/procobserver -run '^TestCensusV3ManagedBirthComm(Refresh|OwnedVector)$' -count=1 -json | tee "$out/comm-go-tests.jsonl"
+      - name: Build coherent reviewed Linux pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/clerk-pair"
+          test "$(df --output=avail -B1 "$RUNNER_TEMP" | tail -1 | tr -d ' ')" -ge 4294967296
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain)"
+          make build BUILD_DIR="$out" VERSION="$EXPECTED_SOURCE" COMMIT="$EXPECTED_SOURCE"
+          make -C tools/observation/proc-helper build-v3 SOURCE_REVISION="$EXPECTED_SOURCE" OUT="$out/gc-process-observer-helper"
+          go version -m "$out/gc" > "$out/gc-buildinfo.txt"
+          readelf -h "$out/gc" > "$out/gc-elf.txt"
+          readelf -h "$out/gc-process-observer-helper" > "$out/helper-elf.txt"
+          mkdir -m 700 "$out/empty"
+          (cd "$out/empty"; env -i HOME="$out/empty" PATH=/usr/bin:/bin "$out/gc" version --json) > "$out/gc-version.json"
+          test -z "$(git status --porcelain)"
+      - name: Record actual artifact hashes and scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          import hashlib,json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'clerk-pair'
+          source=os.environ['EXPECTED_SOURCE']
+          for log,required in [('native-tests.jsonl',{'TestCapacityCapThreeBoundary','TestManagedStartAdmissionSpendsGrantAtActualBoundary','TestCapacityAdmissionProofIsBoundedAndOneShot'}),('comm-go-tests.jsonl',{'TestCensusV3ManagedBirthCommRefresh','TestCensusV3ManagedBirthCommOwnedVector'})]:
+              events=[json.loads(line) for line in (out/log).read_text().splitlines() if line.strip()]
+              assert not any(e.get('Action') in ('skip','fail','build-fail') for e in events)
+              passed={e.get('Test') for e in events if e.get('Action')=='pass'}
+              assert required <= passed, (log,required-passed)
+              assert any(e.get('Action')=='pass' and 'Test' not in e for e in events)
+          version=json.loads((out/'gc-version.json').read_text())
+          assert version['commit']==source and version['version']==source
+          members=[]
+          for name in ('gc','gc-process-observer-helper','native-tests.jsonl','comm-go-tests.jsonl','comm-birth-vector.json','gc-buildinfo.txt','gc-version.json','native-dependencies.txt'):
+              p=out/name
+              members.append({'path':name,'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          m={'schema':1,'source':source,'source_tree':(out/'source-tree.txt').read_text().strip(),'go':'1.26.6','target':'linux/amd64','icu_major':74,'helper_source_revision':source,'code_and_build_only':True,'full_suite_complete':False,'production_effects':False,'native_live_admission':False,'members':members}
+          (out/'PAIR-MANIFEST.json').write_text(json.dumps(m,indent=2)+'\n')
+          PYCODE
+          tar -C "$RUNNER_TEMP/clerk-pair" -czf "$RUNNER_TEMP/reviewed-clerk-pair.tar.gz" .
+          sha256sum "$RUNNER_TEMP/reviewed-clerk-pair.tar.gz" > "$RUNNER_TEMP/reviewed-clerk-pair.tar.gz.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: reviewed-clerk-pair-${{ inputs.expected_source_sha }}
+          path: |
+            ${{ runner.temp }}/reviewed-clerk-pair.tar.gz
+            ${{ runner.temp }}/reviewed-clerk-pair.tar.gz.sha256
+            ${{ runner.temp }}/clerk-pair/*.jsonl
+            ${{ runner.temp }}/clerk-pair/*.json
+            ${{ runner.temp }}/clerk-pair/*.txt
+            ${{ runner.temp }}/clerk-pair/*.log
+            ${{ runner.temp }}/clerk-pair/*.stderr
+          if-no-files-found: error
+          retention-days: 14

@@ -174,11 +174,15 @@ static inline bool census_bounded_fields_prior(struct census_budget *budget,int 
     fault->operation="comm";struct census_buffer checked={0};
     if(!prior->name || !census_buffer_read(budget,dir,"comm",MAX_FIELD+1,&checked)) return false;
     if(checked.n && checked.data[checked.n-1]=='\n') checked.data[--checked.n]=0;
-    bool same=!memchr(checked.data,0,checked.n) && utf8(checked.data,checked.n) &&
-      strlen(prior->name)==checked.n && !memcmp(prior->name,checked.data,checked.n);
+    bool valid=!memchr(checked.data,0,checked.n) && utf8(checked.data,checked.n);
+    bool same=valid && strlen(prior->name)==checked.n && !memcmp(prior->name,checked.data,checked.n);
     census_buffer_clear(budget,&checked);
-    if(!same) {errno=ESTALE;return false;}
-    fault->retained_comm_verified=true;fault->operation="environ";
+    if(!valid) {errno=EINVAL;return false;}
+    /* comm is mutable within one PID/start incarnation (exec or PR_SET_NAME).
+     * A changed prior name supplies no retained-capture authority. Continue
+     * through BOTH fresh environment/comm reads and all closing identity,
+     * stat, UID and pidfd checks below; never reuse the prior identity. */
+    fault->retained_comm_verified=same;fault->operation="environ";
   }
 #ifdef GC_HELPER_TEST
   if(census_test_environ_error) {

@@ -151,7 +151,7 @@ func claimCapacityStart(cityPath, route, sessionID string, now time.Time, sp run
 		}
 		cooldownActive = now.Before(cooldown)
 	}
-	if snap.Zone != "green" || snap.Hysteresis.GreenStreak < 2 || cooldownActive || snap.Capacity.OverCap != 0 || snap.Capacity.ActiveCount < 0 || snap.Capacity.Cap > 2 || snap.Capacity.Cap <= snap.Capacity.ActiveCount || len(snap.Capacity.Active) != snap.Capacity.ActiveCount {
+	if snap.Zone != "green" || snap.Hysteresis.GreenStreak < 2 || cooldownActive || snap.Capacity.OverCap != 0 || snap.Capacity.ActiveCount < 0 || snap.Capacity.Cap > 3 || snap.Capacity.Cap <= snap.Capacity.ActiveCount || len(snap.Capacity.Active) != snap.Capacity.ActiveCount {
 		return false, "capacity_not_admissible"
 	}
 	seenActive := make(map[string]bool, len(snap.Capacity.Active))

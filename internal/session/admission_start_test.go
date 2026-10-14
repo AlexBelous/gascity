@@ -347,3 +347,105 @@ func TestCapacityAdmissionCooldownContract(t *testing.T) {
 		})
 	}
 }
+
+// The reviewed hard ceiling is three; this changes no freshness, one-shot,
+// complete-census, zone or reservation prerequisite at the native boundary.
+func TestCapacityCapThreeBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cap    int
+		active int
+		mutate func(map[string]any)
+		allow  bool
+	}{
+		{name: "legacy-two", cap: 2, allow: true},
+		{name: "three", cap: 3, allow: true},
+		{name: "third-slot", cap: 3, active: 2, allow: true},
+		{name: "four-refused", cap: 4},
+		{name: "three-yellow", cap: 3, mutate: func(s map[string]any) { s["zone"] = "yellow" }},
+		{name: "three-stale", cap: 3, mutate: func(s map[string]any) { s["generated_at"] = "2026-10-04T07:58:59Z" }},
+		{name: "three-partial", cap: 3, mutate: func(s map[string]any) { s["live_census"].(map[string]any)["complete"] = false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := admissionTestCity(t)
+			now := time.Date(2026, 10, 4, 8, 0, 0, 0, time.UTC)
+			ledgerPath := writeAdmissionGrant(t, city, now)
+			snapshotPath := filepath.Join(city, ".gc/runtime/capacity-scheduler-v2/snapshot.json")
+			raw, err := os.ReadFile(snapshotPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snap map[string]any
+			if err = json.Unmarshal(raw, &snap); err != nil {
+				t.Fatal(err)
+			}
+			sp := runtime.NewFake()
+			store := beads.NewMemStore()
+			starts := func() int {
+				n := 0
+				for _, call := range sp.Calls {
+					if call.Method == "Start" {
+						n++
+					}
+				}
+				return n
+			}
+			rows := []any{}
+			for i := 0; i < tc.active; i++ {
+				name := []string{"active-a", "active-b"}[i]
+				b, e := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{"template": "worker", "state": "active", "session_name": name}})
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = sp.Start(context.Background(), name, runtime.Config{Env: map[string]string{"GC_CITY": city, "GC_SESSION_ID": b.ID, "GC_TEMPLATE": "worker"}}); e != nil {
+					t.Fatal(e)
+				}
+				rows = append(rows, map[string]any{"id": b.ID, "name": name, "route": "worker", "state": "active", "scheduler_owned": false, "suspended": false})
+			}
+			capacity := snap["capacity"].(map[string]any)
+			capacity["managed_worker_cap"], capacity["managed_active_count"], capacity["active"] = tc.cap, tc.active, rows
+			census := snap["live_census"].(map[string]any)
+			census["count"], census["active"] = tc.active, rows
+			if tc.mutate != nil {
+				tc.mutate(snap)
+			}
+			raw, err = json.Marshal(snap)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(snapshotPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(ledgerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mgr := NewManagerWithOptions(store, sp, WithCityPath(city), WithClock(&clock.Fake{Time: now}))
+			_, err = mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Command: "fake-command", WorkDir: t.TempDir(), Provider: "fake"})
+			if tc.allow {
+				if err != nil {
+					t.Fatalf("allowed cap %d refused: %v", tc.cap, err)
+				}
+				if got := starts(); got != tc.active+1 {
+					t.Fatalf("starts=%d want1", got)
+				}
+				// A second SID cannot spend the same reservation, even at ceiling three.
+				_, err = mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Command: "fake-command", WorkDir: t.TempDir(), Provider: "fake"})
+				if !runtime.IsProviderCapacity(err) || starts() != tc.active+1 {
+					t.Fatalf("second spend: err=%v starts=%d", err, starts())
+				}
+			} else {
+				if !runtime.IsProviderCapacity(err) || starts() != 0 {
+					t.Fatalf("denial err=%v starts=%d", err, starts())
+				}
+				after, e := os.ReadFile(ledgerPath)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if string(before) != string(after) {
+					t.Fatal("denied admission changed ledger")
+				}
+			}
+		})
+	}
+}

@@ -57,6 +57,34 @@ static inline bool census_same_classified(const struct census_history_row *a,
   }
   return census_same_owned(&a->identity,&b->identity);
 }
+/* A fully read managed descendant may exec/rename after its original seal
+ * birth. Only its name may differ; preserve the entire inherited incarnation
+ * and an unchanged, positively read ancestor chain to the same declared root.
+ * Selected closing/closing/seal rows still compare EXACT current names. */
+static inline bool census_same_birth_survivor(const struct census_history_scan *original_scan,
+    const struct census_history_scan *fresh_scan,const struct census_history_row *a,
+    const struct census_history_row *b) {
+  if(census_same_classified(a,b)) return true;
+  if(!census_row_verified(a) || !census_row_verified(b) ||
+      a->classification!=CENSUS_CLASS_MANAGED || b->classification!=CENSUS_CLASS_MANAGED ||
+      !census_managed_identity(&a->identity) || !census_managed_identity(&b->identity) ||
+      a->identity.declared_root || b->identity.declared_root) return false;
+  struct census_owned_identity before=a->identity;before.name=b->identity.name;
+  if(!census_same_owned(&before,&b->identity)) return false;
+  for(unsigned k=0;k<4;k++) if(!before.uids[k]) return false;
+  uint32_t parent=before.ppid,seen[128]={before.pid};unsigned n=1;
+  while(n<128) {
+    for(unsigned k=0;k<n;k++) if(seen[k]==parent) return false;
+    seen[n++]=parent;
+    const struct census_history_row *old=census_history_find(original_scan,parent),
+      *fresh=census_history_find(fresh_scan,parent);
+    if(!census_same_classified(old,fresh) || old->classification!=CENSUS_CLASS_MANAGED ||
+        !census_managed_identity(&old->identity) || !census_same_inherited(&before,&old->identity)) return false;
+    if(old->identity.declared_root) return true;
+    parent=old->identity.ppid;
+  }
+  return false;
+}
 #include "census-closing-reconcile.h"
 /* No new witness: link a FULL NONMANAGED seal birth to its indexed kernel pair. */
 static inline bool census_retired_birth_link_valid(const struct census_global_source *s,
@@ -137,7 +165,8 @@ static inline bool census_finish_births(struct census_global_source *s,
     struct census_history_row *b=census_history_find(&s->history->scans[j->selected_second-1],error->raw.pid);
     struct census_history_row *seal=census_history_find(&s->history->scans[j->selected_seal-1],error->raw.pid);
     struct census_history_row *original=census_history_find(&s->history->scans[error->scan_index-1],error->raw.pid);
-    if(!census_same_classified(original,a) || !census_same_classified(a,b) || !census_same_classified(b,seal)) {
+    if(!census_same_birth_survivor(&s->history->scans[error->scan_index-1],&s->history->scans[first-1],original,a) ||
+        !census_same_classified(a,b) || !census_same_classified(b,seal)) {
       if(!census_finish_retired_birth(s,r,j,e+1)) return false;
       continue;
     }
@@ -178,7 +207,9 @@ static inline bool census_final_resolutions_valid(const struct census_global_sou
         struct census_history_row *b=census_history_find(&s->history->scans[j->selected_second-1],pid);
         struct census_history_row *seal=census_history_find(&s->history->scans[j->selected_seal-1],pid);
         struct census_history_row *original=census_history_find(&s->history->scans[s->errors[e].scan_index-1],pid);
-        if(!census_same_classified(original,a) || !census_same_classified(a,b) || !census_same_classified(b,seal)) return false;
+        if(!census_same_birth_survivor(&s->history->scans[s->errors[e].scan_index-1],
+            &s->history->scans[j->selected_first-1],original,a) ||
+            !census_same_classified(a,b) || !census_same_classified(b,seal)) return false;
       }
       matches++;
     }

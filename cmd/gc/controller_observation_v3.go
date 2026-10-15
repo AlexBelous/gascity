@@ -22,6 +22,7 @@ import (
 type controllerObservationReplyV3 struct {
 	controllerObservationReply
 	ProcessDiagnostics []procobserver.ResponseV3 `json:"process_diagnostics"`
+	reacquisitionJoins []controllerV3CaptureJoin `json:"-"`
 }
 
 // Two bounded helper frames plus the existing bounded outer observation. A
@@ -40,6 +41,11 @@ func unknownControllerObservationV3(ctx context.Context, city, source, reason st
 // registered service must retain the existing global flight/generation guards;
 // this function neither starts a service nor changes those active guards.
 func collectControllerObservationV3(ctx context.Context, city string, p procobserver.ReleasePolicyV3, sp runtime.Provider, read func(context.Context, procobserver.ReleasePolicyV3) (procobserver.ResponseV3, error), now func() time.Time) controllerObservationReplyV3 {
+	return collectControllerObservationV3ForReacquisition(ctx, city, p, sp, read, now, false)
+}
+
+func collectControllerObservationV3ForReacquisition(ctx context.Context, city string, p procobserver.ReleasePolicyV3, sp runtime.Provider, read func(context.Context, procobserver.ReleasePolicyV3) (procobserver.ResponseV3, error), now func() time.Time, retryCoverage bool) controllerObservationReplyV3 {
+	var joins []controllerV3CaptureJoin
 	frames := []procobserver.ResponseV3{}
 	observed := observation.ObserveProcessEvidenceContext(ctx, city, sp, func() observation.ProcessEvidence {
 		frame, err := read(ctx, p)
@@ -51,6 +57,9 @@ func collectControllerObservationV3(ctx context.Context, city string, p procobse
 		if checked.Schema == procobserver.ResponseSchemaV3 {
 			frames = append(frames, checked)
 		}
+		if retryCoverage && !checked.Complete && checked.Schema == procobserver.ResponseSchemaV3 {
+			joins = append(joins, controllerV3JoinCapture(ctx, checked, p, sp, now))
+		}
 		anchors, anchorErr := checked.RetirementAnchors()
 		return observation.ProcessEvidence{Roots: checked.ObservedRoots(), StartedAt: checked.StartedAt, FinishedAt: checked.FinishedAt, Err: errors.Join(err, anchorErr), CensusContract: procobserver.CensusV3Schema, RetirementAnchors: anchors}
 	}, now)
@@ -61,6 +70,19 @@ func collectControllerObservationV3(ctx context.Context, city string, p procobse
 		r.CertificateDisposition = "provisional"
 	}
 	r.ProcessDiagnostics = frames
+	r.reacquisitionJoins = joins
+	if retryCoverage {
+		if !controllerV3CaptureProviderUnchanged(ctx, sp, r.Sessions) {
+			r.reacquisitionJoins = nil
+			r.ProviderComplete = false
+			r.ProcessComplete = false
+			r.CertificateDisposition = "provisional"
+			r.UnknownReasons = append(r.UnknownReasons, "final provider incarnation fence changed or unavailable")
+			r.FailureKinds = append(r.FailureKinds, observation.FailureInvariant)
+		}
+		// Include the retry-only final provider fence in this whole transaction.
+		r.FinishedAt = now().UTC()
+	}
 	r.ControllerPID = p.CallerBinding.PID
 	r.ControllerBinarySHA256 = p.CallerBinding.ControllerBinarySHA256
 	r.ControllerStartIdentity = p.CallerBinding.StartTicks

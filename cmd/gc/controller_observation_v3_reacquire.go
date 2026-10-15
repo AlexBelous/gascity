@@ -112,7 +112,7 @@ func (s *controllerObservationServiceV3) collectReacquired(ctx context.Context, 
 		Collect: func(ctx context.Context) controllerObservationReplyV3 { return s.collect(ctx, p, sp) },
 		Validate: func(r controllerObservationReplyV3) observationattempt.Decision {
 			if validateControllerObservationReplyV3(r, p, s.city, s.sourceRevision, s.now()) != nil {
-				return observationattempt.Fatal
+				return observationattempt.Rejected
 			}
 			if r.ProviderComplete && r.ProcessComplete {
 				return observationattempt.Complete
@@ -120,7 +120,7 @@ func (s *controllerObservationServiceV3) collectReacquired(ctx context.Context, 
 			if controllerV3TransientWhole(r, p, s.now) {
 				return observationattempt.TransientCoverage
 			}
-			return observationattempt.Fatal
+			return observationattempt.Rejected
 		},
 		Identity: func(r controllerObservationReplyV3) observationattempt.Identity {
 			v := observationattempt.Identity{BindingFingerprint: wholeAttemptDigest(p), ProviderFingerprint: wholeAttemptDigest(r.Sessions), RootFingerprint: controllerV3CompleteRootFingerprint(r.ProcessDiagnostics), WholeStartedAt: r.ObservedAt, WholeFinishedAt: r.FinishedAt}

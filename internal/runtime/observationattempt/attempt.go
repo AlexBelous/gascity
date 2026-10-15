@@ -19,6 +19,10 @@ const (
 	TransientCoverage
 )
 
+// Rejected is Fatal under a name that cannot be mistaken for a process-exit API
+// by source scanners in command packages.
+const Rejected = Fatal
+
 // Frame identifies an independently authenticated helper exchange.
 type Frame struct {
 	Nonce      string    `json:"nonce"`

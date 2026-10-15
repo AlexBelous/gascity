@@ -463,7 +463,11 @@ func validateRequiredTypes(data []byte, typ reflect.Type) error {
 						continue
 					}
 					tag := strings.Split(f.Tag.Get("json"), ",")
-					if tag[0] == "" || tag[0] == "-" {
+					if tag[0] == "-" {
+						// Match encoding/json: internal provenance is not a wire field.
+						continue
+					}
+					if tag[0] == "" {
 						return fmt.Errorf("untyped wire field")
 					}
 					fields[tag[0]] = f

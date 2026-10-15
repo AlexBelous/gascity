@@ -21,6 +21,7 @@ go_test(
         "descendant_evidence_test.go",
         "evidence_test.go",
         "observation_test.go",
+        "reacquire_provenance_test.go",
         "status_sessions_test.go",
         "testenv_import_test.go",
     ],

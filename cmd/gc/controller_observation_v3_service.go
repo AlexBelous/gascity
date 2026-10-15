@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/observationattempt"
 	"github.com/gastownhall/gascity/internal/runtime/procobserver"
 )
 
@@ -28,11 +29,15 @@ type controllerObservationServiceV3 struct {
 	readEvidence      func(context.Context, procobserver.ReleasePolicyV3) (procobserver.ResponseV3, error)
 	collect           func(context.Context, procobserver.ReleasePolicyV3, runtime.Provider) controllerObservationReplyV3
 	now               func() time.Time
+	// Review-only binding remains OFF by default until contract/code acceptance.
+	reacquireEnabled bool
+	retainAttempt    func(context.Context, controllerObservationReplyV3) (observationattempt.Receipt, error)
+	recordAttempt    func(context.Context, observationattempt.Receipt, observationattempt.Identity, observationattempt.Identity, controllerObservationReplyV3) (observationattempt.Receipt, error)
 }
 
 func newControllerObservationServiceV3(ctx context.Context, city string) *controllerObservationServiceV3 {
 	revision := commit
-	s := &controllerObservationServiceV3{ctx: ctx, city: filepath.Clean(city), sourceRevision: revision, now: time.Now}
+	s := &controllerObservationServiceV3{ctx: ctx, city: filepath.Clean(city), sourceRevision: revision, now: time.Now, reacquireEnabled: controllerObservationV3WholeReacquisitionEnabled}
 	s.currentSource = func() string { return commit }
 	s.loadPolicy = func() (procobserver.ReleasePolicyV3, error) {
 		return procobserver.LoadPolicyV3(controllerObservationPolicyPath, revision)
@@ -41,6 +46,24 @@ func newControllerObservationServiceV3(ctx context.Context, city string) *contro
 	s.readEvidence = procobserver.ReadContextV3
 	s.collect = func(ctx context.Context, p procobserver.ReleasePolicyV3, sp runtime.Provider) controllerObservationReplyV3 {
 		return collectControllerObservationV3(ctx, s.city, p, sp, s.readEvidence, s.now)
+	}
+	s.retainAttempt = func(ctx context.Context, r controllerObservationReplyV3) (observationattempt.Receipt, error) {
+		store, err := observationattempt.NewStore(filepath.Join(s.city, ".gc", "runtime", "observer-v3-reacquisition"), controllerObservationV3Limit)
+		if err != nil {
+			return observationattempt.Receipt{}, err
+		}
+		return store.Save(ctx, struct {
+			Schema      string                       `json:"schema"`
+			Kind        string                       `json:"classification"`
+			Observation controllerObservationReplyV3 `json:"collected_typed_envelope"`
+		}{"whole-observation-failure/v1", "transient_capture_incomplete", r})
+	}
+	s.recordAttempt = func(ctx context.Context, failed observationattempt.Receipt, first, selected observationattempt.Identity, r controllerObservationReplyV3) (observationattempt.Receipt, error) {
+		store, err := observationattempt.NewStore(filepath.Join(s.city, ".gc", "runtime", "observer-v3-reacquisition"), controllerObservationV3Limit)
+		if err != nil {
+			return observationattempt.Receipt{}, err
+		}
+		return store.SaveCandidate(ctx, failed, first, selected, wholeAttemptDigest(r))
 	}
 	return s
 }
@@ -170,9 +193,13 @@ func (s *controllerObservationServiceV3) observe(request context.Context) contro
 				return
 			}
 		}
-		// Exactly ONE complete collector attempt; V3 retry grammar is not inferred
-		// from V2 partial diagnostics. Ordinary provider ownership remains authority.
-		result = s.collect(ctx, p, sp)
+		// Single attempt by default. The separately reviewed whole-attempt binding
+		// never infers V3 eligibility from legacy diagnostics or reason strings.
+		if s.reacquireEnabled {
+			result = s.collectReacquired(ctx, p, sp, aborted)
+		} else {
+			result = s.collect(ctx, p, sp)
+		}
 		if validateControllerObservationReplyV3(result, p, s.city, source, s.now().UTC()) != nil {
 			result = s.unknown("controller v3 collected reply invalid, stale or mismatched")
 			return

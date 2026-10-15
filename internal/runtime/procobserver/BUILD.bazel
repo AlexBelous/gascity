@@ -12,6 +12,7 @@ go_library(
         "client_linux.go",
         "client_stub.go",
         "client_v3.go",
+        "reacquire_v3.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/procobserver",
     visibility = ["//:__subpackages__"],
@@ -54,6 +55,7 @@ go_test(
         "client_v3_unclassified_retirement_test.go",
         "observation_test.go",
         "observation_transport_integration_test.go",
+        "reacquire_v3_test.go",
         "testenv_import_test.go",
     ],
     data = [

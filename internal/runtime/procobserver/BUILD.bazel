@@ -66,9 +66,13 @@ go_test(
         "testenv_import_test.go",
     ],
     data = [
+        "testdata/census-exit-matrix.json",  # keep
+        "testdata/census-exit-mixed.json",  # keep
         "testdata/census_owned_rounds_13.json",
         "testdata/census_owned_rounds_31.json",
         "testdata/census_shortlived_rounds_13.json",
+        "testdata/mr-kernel-vector.json",  # keep
+        "testdata/native_mr_matrix.json",  # keep
         "testdata/protected-chain-f386.json",  # keep
         "//internal/runtime/observation:consumer_fixture",
     ],

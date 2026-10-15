@@ -191,7 +191,7 @@ func TestWholeAttemptOneDeadlineAndNoReset(t *testing.T) {
 			} else if deadline != d {
 				t.Fatal("deadline reset")
 			}
-			time.Sleep(13 * time.Second)
+			<-time.After(13 * time.Second)
 			v := collect(ctx)
 			v.ID.WholeStartedAt = time.Now().Add(-time.Second)
 			v.ID.WholeFinishedAt = time.Now()

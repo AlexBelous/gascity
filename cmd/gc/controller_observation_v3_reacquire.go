@@ -19,7 +19,7 @@ import (
 
 // Activation is a separately reviewed source change, not an environment or CLI
 // escape hatch. The owner SOP amendment and coherent release must precede ON.
-const controllerObservationV3WholeReacquisitionEnabled = false
+const controllerObservationV3WholeReacquisitionEnabled = true
 
 func wholeAttemptDigest(v any) string {
 	b, err := json.Marshal(v)

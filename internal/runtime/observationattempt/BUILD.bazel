@@ -27,8 +27,8 @@ filegroup(
     name = "bazel_repo_srcs",
     srcs = glob(
         ["**"],
-        exclude = ["BUILD.bazel"],
         allow_empty = True,
+        exclude = ["BUILD.bazel"],
     ),
     visibility = ["//visibility:public"],
 )

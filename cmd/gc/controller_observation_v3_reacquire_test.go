@@ -86,6 +86,9 @@ func controllerReacquireFrames(t *testing.T, original []procobserver.ResponseV3,
 
 func TestControllerV3ReacquireBindingFollowsReviewedConstant(t *testing.T) {
 	s := newControllerObservationServiceV3(context.Background(), t.TempDir())
+	if !s.reacquireEnabled {
+		t.Fatal("reviewed activation must enable bounded whole reacquisition by default")
+	}
 	if s.reacquireEnabled != controllerObservationV3WholeReacquisitionEnabled {
 		t.Fatal("constructor does not consume separately reviewed binding")
 	}

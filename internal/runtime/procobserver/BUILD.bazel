@@ -93,6 +93,12 @@ go_test(
     }),
 )
 
+filegroup(
+    name = "mr_kernel_fixture",
+    srcs = ["testdata/mr-kernel-vector.json"],
+    visibility = ["//internal/runtime/observation:__pkg__"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(

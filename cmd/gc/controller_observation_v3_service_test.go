@@ -118,7 +118,13 @@ func TestControllerV3ServicePolicyLatchesOnlyExactCaller(t *testing.T) {
 			t.Fatal("verified caller failed")
 		}
 	}
-	if loads != 2 || checks != 3 || s.policy == nil {
+	wantLoads, wantChecks := 2, 3
+	if controllerObservationV3WholeReacquisitionEnabled {
+		// Each of the two successful whole transactions revalidates policy and
+		// caller after collection and immediately before returning authority.
+		wantLoads, wantChecks = 6, 7
+	}
+	if loads != wantLoads || checks != wantChecks || s.policy == nil {
 		t.Fatalf("unexpected latch or caller revalidation: loads=%d checks=%d", loads, checks)
 	}
 }

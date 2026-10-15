@@ -24,6 +24,18 @@ const Schema = "managed-session-observation/v2"
 // advertised by a legacy helper or interpreted by the V2 controller consumer.
 const SchemaV3 = "managed-session-observation/v3"
 
+// FailureKind distinguishes actual identity/provider failures from consequences
+// of incomplete process evidence. It does not classify that evidence as safe.
+type FailureKind uint8
+
+// FailureInvariant, FailureIncompleteProjection, and FailureProviderTracker
+// identify why an observation cannot be accepted as complete.
+const (
+	FailureInvariant FailureKind = iota + 1
+	FailureIncompleteProjection
+	FailureProviderTracker
+)
+
 // Session is a live provider handle attributed by its own incarnation metadata.
 type Session struct {
 	SessionID           string `json:"session_id"`
@@ -63,6 +75,8 @@ type Observation struct {
 	Processes              []Process `json:"processes"`
 	UnknownReasons         []string  `json:"unknown_reasons"`
 	CertificateDisposition string    `json:"certificate_disposition,omitempty"`
+	// FailureKinds is internal cause provenance, never additional wire authority.
+	FailureKinds []FailureKind `json:"-"`
 }
 
 // TokenDigest returns a non-reversible comparison value for an incarnation
@@ -107,7 +121,14 @@ func ObserveProcessEvidenceContext(ctx context.Context, city string, sp runtime.
 
 func observe(ctx context.Context, city string, sp runtime.Provider, readRoots func() ([]proctable.ObservedRoot, error), readEvidence func() ProcessEvidence, now func() time.Time) Observation {
 	out := Observation{Schema: Schema, CityPath: city, ObservedAt: now().UTC(), ProviderType: ProviderBoundaryType(sp), Sessions: []Session{}, Processes: []Process{}, UnknownReasons: []string{}}
-	fail := func(reason string) { out.UnknownReasons = append(out.UnknownReasons, reason) }
+	fail := func(reason string) {
+		out.UnknownReasons = append(out.UnknownReasons, reason)
+		out.FailureKinds = append(out.FailureKinds, FailureInvariant)
+	}
+	failProjection := func(reason string) {
+		out.UnknownReasons = append(out.UnknownReasons, reason)
+		out.FailureKinds = append(out.FailureKinds, FailureIncompleteProjection)
+	}
 	if city == "" || !filepath.IsAbs(city) || sp == nil || (readRoots == nil && readEvidence == nil) {
 		fail("observation context unavailable")
 		out.FinishedAt = now().UTC()
@@ -197,7 +218,7 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 	}
 	if strictErr != nil {
 		processOK = false
-		fail("strict process scan incomplete: " + strictErr.Error())
+		failProjection("strict process scan incomplete: " + strictErr.Error())
 	}
 	var scanned []runtime.LiveRuntime
 	if capable {
@@ -216,6 +237,7 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 		if err != nil {
 			processOK = false
 			fail("provider process scan incomplete")
+			out.FailureKinds = append(out.FailureKinds, FailureProviderTracker)
 		}
 	}
 	byPID := map[int]runtime.LiveRuntime{}
@@ -258,7 +280,7 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 	}
 	if len(liveSID) != len(bySID) {
 		processOK = false
-		fail("live provider SID lacks process identity")
+		failProjection("live provider SID lacks process identity")
 	}
 	// Fence changes during the observation without turning durable rows into
 	// liveness. A restarted run with the same provider handle must also deny.
@@ -297,12 +319,19 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 		trackingAfter, trackingErr := tracker.TrackProcessRoots(supplied)
 		if trackingErr != nil || !reflect.DeepEqual(scanned, trackingAfter) {
 			processOK = false
-			fail("provider process ownership changed or became unavailable")
+			if trackingErr != nil || !onlyTrackingProjectionChanged(scanned, trackingAfter, strict, rechecked) {
+				fail("provider process ownership changed or became unavailable")
+				if trackingErr != nil {
+					out.FailureKinds = append(out.FailureKinds, FailureProviderTracker)
+				}
+			} else {
+				failProjection("provider process ownership changed or became unavailable")
+			}
 		}
 	}
 	if recheckErr != nil || !reflect.DeepEqual(strict, rechecked) {
 		processOK = false
-		fail("process identities changed or became unavailable during observation")
+		failProjection("process identities changed or became unavailable during observation")
 	}
 	if readEvidence != nil {
 		versioned := false
@@ -312,7 +341,7 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 		if versioned {
 			if len(evidence) != 2 || !verifiedRetirementAnchors(evidence, out.Processes, city) {
 				processOK = false
-				fail("descendant retirement anchor lacks both fresh provider joins")
+				failProjection("descendant retirement anchor lacks both fresh provider joins")
 			}
 		}
 	}
@@ -336,6 +365,39 @@ func observe(ctx context.Context, city string, sp runtime.Provider, readRoots fu
 	sort.Slice(out.Sessions, func(i, j int) bool { return out.Sessions[i].SessionID < out.Sessions[j].SessionID })
 	sort.Slice(out.Processes, func(i, j int) bool { return out.Processes[i].PID < out.Processes[j].PID })
 	return out
+}
+
+// onlyTrackingProjectionChanged distinguishes a truncated helper projection
+// from a real provider ownership change. Existing PID ownership must be exact;
+// only rows added/removed by the corresponding helper projection may differ.
+func onlyTrackingProjectionChanged(before, after []runtime.LiveRuntime, previous, current []proctable.ObservedRoot) bool {
+	rootSets := [2]map[int]bool{{}, {}}
+	for i, roots := range [][]proctable.ObservedRoot{previous, current} {
+		for _, root := range roots {
+			if rootSets[i][root.Runtime.PID] {
+				return false
+			}
+			rootSets[i][root.Runtime.PID] = true
+		}
+	}
+	sets := [2]map[int]runtime.LiveRuntime{{}, {}}
+	for i, rows := range [][]runtime.LiveRuntime{before, after} {
+		for _, row := range rows {
+			if _, duplicate := sets[i][row.PID]; duplicate || !rootSets[i][row.PID] || !row.IsTracked || row.ProviderName == "" {
+				return false
+			}
+			sets[i][row.PID] = row
+		}
+	}
+	for i, rows := range sets {
+		for pid, row := range rows {
+			other, exists := sets[1-i][pid]
+			if exists && row != other || !exists && rootSets[1-i][pid] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func verifiedRetirementAnchors(frames []ProcessEvidence, processes []Process, city string) bool {

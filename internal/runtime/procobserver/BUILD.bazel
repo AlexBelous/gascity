@@ -6,12 +6,15 @@ go_library(
     name = "procobserver",
     srcs = [
         "census.go",
+        "census_exit_v3.go",
+        "census_original_v3.go",
         "census_v3.go",
         "census_v3_wire.go",
         "client.go",
         "client_linux.go",
         "client_stub.go",
         "client_v3.go",
+        "reacquire_v3.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/procobserver",
     visibility = ["//:__subpackages__"],
@@ -32,8 +35,11 @@ go_library(
 go_test(
     name = "procobserver_test",
     srcs = [
+        "census_comm_birth_test.go",
+        "census_exit_v3_test.go",
         "census_more_rounds_candidate_test.go",
         "census_more_rounds_wire_test.go",
+        "census_original_v3_test.go",
         "census_test.go",
         "census_v3_birth_conservation_test.go",
         "census_v3_chain_composition_test.go",
@@ -46,20 +52,27 @@ go_test(
         "census_v3_test.go",
         "census_v3_unclassified_retirement_test.go",
         "census_v3_zombie_test.go",
+        "client_json_ignored_field_test.go",
         "client_linux_test.go",
         "client_test.go",
         "client_transport_integration_test.go",
+        "client_v3_diagnostic_link_test.go",
         "client_v3_rendered_policy_test.go",
         "client_v3_test.go",
         "client_v3_unclassified_retirement_test.go",
         "observation_test.go",
         "observation_transport_integration_test.go",
+        "reacquire_v3_test.go",
         "testenv_import_test.go",
     ],
     data = [
+        "testdata/census-exit-matrix.json",  # keep
+        "testdata/census-exit-mixed.json",  # keep
         "testdata/census_owned_rounds_13.json",
         "testdata/census_owned_rounds_31.json",
         "testdata/census_shortlived_rounds_13.json",
+        "testdata/mr-kernel-vector.json",  # keep
+        "testdata/native_mr_matrix.json",  # keep
         "testdata/protected-chain-f386.json",  # keep
         "//internal/runtime/observation:consumer_fixture",
     ],
@@ -78,6 +91,12 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+filegroup(
+    name = "mr_kernel_fixture",
+    srcs = ["testdata/mr-kernel-vector.json"],
+    visibility = ["//internal/runtime/observation:__pkg__"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

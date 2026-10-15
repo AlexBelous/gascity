@@ -45,7 +45,7 @@ func newControllerObservationServiceV3(ctx context.Context, city string) *contro
 	s.checkCaller = procobserver.CheckCaller
 	s.readEvidence = procobserver.ReadContextV3
 	s.collect = func(ctx context.Context, p procobserver.ReleasePolicyV3, sp runtime.Provider) controllerObservationReplyV3 {
-		return collectControllerObservationV3(ctx, s.city, p, sp, s.readEvidence, s.now)
+		return collectControllerObservationV3ForReacquisition(ctx, s.city, p, sp, s.readEvidence, s.now, s.reacquireEnabled)
 	}
 	s.retainAttempt = func(ctx context.Context, r controllerObservationReplyV3) (observationattempt.Receipt, error) {
 		store, err := observationattempt.NewStore(filepath.Join(s.city, ".gc", "runtime", "observer-v3-reacquisition"), controllerObservationV3Limit)
@@ -53,10 +53,11 @@ func newControllerObservationServiceV3(ctx context.Context, city string) *contro
 			return observationattempt.Receipt{}, err
 		}
 		return store.Save(ctx, struct {
-			Schema      string                       `json:"schema"`
-			Kind        string                       `json:"classification"`
-			Observation controllerObservationReplyV3 `json:"collected_typed_envelope"`
-		}{"whole-observation-failure/v1", "transient_capture_incomplete", r})
+			Schema           string                         `json:"schema"`
+			Kind             string                         `json:"classification"`
+			Observation      controllerObservationReplyV3   `json:"collected_typed_envelope"`
+			EligibilityJoins []controllerV3CaptureJoinAudit `json:"eligibility_provider_joins,omitempty"`
+		}{"whole-observation-failure/v1", "transient_capture_incomplete", r, controllerV3CaptureJoinAudits(r.reacquisitionJoins)})
 	}
 	s.recordAttempt = func(ctx context.Context, failed observationattempt.Receipt, first, selected observationattempt.Identity, r controllerObservationReplyV3) (observationattempt.Receipt, error) {
 		store, err := observationattempt.NewStore(filepath.Join(s.city, ".gc", "runtime", "observer-v3-reacquisition"), controllerObservationV3Limit)

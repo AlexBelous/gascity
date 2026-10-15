@@ -2,6 +2,8 @@ package procobserver
 
 import (
 	"encoding/json"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,14 +38,33 @@ func EligibleCapturePairReacquisitionV3(frames []ResponseV3, p ReleasePolicyV3, 
 			return false
 		}
 	}
-	if partial != 1 || complete == nil {
+	if partial < 1 {
 		return false
 	}
 	// A complete helper half is only an eligibility veto. It is never combined
 	// with any subsequent helper half or used as positive final provider authority.
 	roots := map[int]Root{}
-	for _, r := range complete.Roots {
-		roots[r.PID] = r
+	if complete != nil {
+		for _, r := range complete.Roots {
+			roots[r.PID] = r
+		}
+	} else {
+		var baseline []CensusIdentity
+		for _, f := range frames {
+			identities, ok := CaptureReacquisitionIdentitiesV3(f, p, now)
+			if !ok || len(f.Roots) != 0 || len(identities) == 0 || baseline != nil && !reflect.DeepEqual(baseline, identities) {
+				return false
+			}
+			baseline = identities
+		}
+		for _, v := range baseline {
+			if v.DeclaredRoot {
+				roots[v.PID] = rootFromCensusIdentity(v)
+			}
+		}
+		if len(roots) == 0 {
+			return false
+		}
 	}
 	for _, f := range frames {
 		if f.Complete {
@@ -116,10 +137,12 @@ func EligibleCapturePairReacquisitionV3(frames []ResponseV3, p ReleasePolicyV3, 
 					return false
 				}
 			}
-			for _, s := range complete.Census.Scans {
-				for _, v := range s.Verified {
-					if v.PID == e.PID && (v.Classification != "nonmanaged" || v.DeclaredRoot || infrastructureName(v.Name) || e.StartTicks != nil && v.StartTicks != *e.StartTicks) {
-						return false
+			for _, other := range frames {
+				for _, s := range other.Census.Scans {
+					for _, v := range s.Verified {
+						if v.PID == e.PID && (v.Classification != "nonmanaged" || v.DeclaredRoot || infrastructureName(v.Name) || e.StartTicks != nil && v.StartTicks != *e.StartTicks) {
+							return false
+						}
 					}
 				}
 			}
@@ -189,17 +212,61 @@ func EligibleCapturePairReacquisitionV3(frames []ResponseV3, p ReleasePolicyV3, 
 		}
 		// Protected descendants are not silently discarded between attempts.
 		// Their separate retirement grammar remains outside this retry taxonomy.
-		for _, s := range complete.Census.Scans {
-			for pid, v := range managed {
-				found := false
-				for _, current := range s.Verified {
-					found = found || current.PID == pid && current == v
-				}
-				if !found {
-					return false
+		if complete != nil {
+			for _, s := range complete.Census.Scans {
+				for pid, v := range managed {
+					found := false
+					for _, current := range s.Verified {
+						found = found || current.PID == pid && current == v
+					}
+					if !found {
+						return false
+					}
 				}
 			}
 		}
 	}
 	return true
+}
+
+// CaptureReacquisitionIdentitiesV3 returns provisional managed identities only.
+// It neither fills wire roots nor supplies process completeness or provider
+// authority. Partial frames require the exact managed set in EVERY scan;
+// complete frames use their final sealed set for cross-attempt comparison.
+func CaptureReacquisitionIdentitiesV3(f ResponseV3, p ReleasePolicyV3, now time.Time) ([]CensusIdentity, bool) {
+	b, err := json.Marshal(f)
+	if err != nil {
+		return nil, false
+	}
+	checked, decodeErr := DecodeResponseV3(b, p, f.RequestNonce, now)
+	if checked.Schema != ResponseSchemaV3 || f.Complete && decodeErr != nil || len(f.Census.Scans) < 1 || len(f.Census.Scans) > 31 {
+		return nil, false
+	}
+	var baseline []CensusIdentity
+	for _, s := range f.Census.Scans {
+		if !f.Complete && !validNumericEnumeration(s) {
+			return nil, false
+		}
+		identities := []CensusIdentity{}
+		seen := map[int]bool{}
+		for _, v := range s.Verified {
+			if !validCensusIdentity(v, p.CallerBinding.PID) || seen[v.PID] || !f.Complete && originalNumericAbsent(s, v.PID) {
+				return nil, false
+			}
+			seen[v.PID] = true
+			if v.Classification == "managed" {
+				identities = append(identities, v)
+			}
+		}
+		sort.Slice(identities, func(i, j int) bool { return identities[i].PID < identities[j].PID })
+		if !f.Complete && baseline != nil && !reflect.DeepEqual(baseline, identities) {
+			return nil, false
+		}
+		baseline = identities
+	}
+	return baseline, true
+}
+
+func rootFromCensusIdentity(v CensusIdentity) Root {
+	return Root{PID: v.PID, PPID: v.PPID, PGID: v.PGID, StartTicks: v.StartTicks, SessionID: v.SessionID, City: v.City, Template: v.Template, Epoch: v.Epoch, InstanceTokenSHA256: v.InstanceTokenSHA256, Name: v.Name}
 }

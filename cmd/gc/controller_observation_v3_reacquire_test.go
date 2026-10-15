@@ -92,7 +92,7 @@ func TestControllerV3ReacquireBindingFollowsReviewedConstant(t *testing.T) {
 }
 
 func TestControllerV3ReacquireServiceWholeTransactions(t *testing.T) {
-	for _, mode := range []string{"complete-first", "partial-first", "partial-second", "durable-readback", "retention-failed", "record-failed", "permission", "tracker-failed", "provider-changed", "root-replaced", "caller-changed", "policy-changed", "generation-changed", "nonce-reused", "second-incomplete", "default-single"} {
+	for _, mode := range []string{"complete-first", "partial-first", "partial-second", "both-partial", "both-managed-retired", "both-second-epoch-drift", "both-second-token-drift", "durable-readback", "retention-failed", "record-failed", "permission", "tracker-failed", "provider-changed", "root-replaced", "caller-changed", "policy-changed", "generation-changed", "nonce-reused", "second-incomplete", "default-single"} {
 		t.Run(mode, func(t *testing.T) {
 			s, cs, p, original := controllerV3ServiceFixture(t)
 			clock := s.now()
@@ -106,6 +106,26 @@ func TestControllerV3ReacquireServiceWholeTransactions(t *testing.T) {
 				index = 1
 			}
 			frames := controllerReacquireFrames(t, original, clock, index)
+			if mode == "both-partial" || mode == "both-managed-retired" || mode == "both-second-epoch-drift" || mode == "both-second-token-drift" {
+				other := controllerReacquireFrames(t, original, clock, 1)
+				frames[1] = other[1]
+				// The successful fresh transaction has the same managed set in every
+				// scan. A separate negative covers retirement/change of protected rows.
+				for i := 2; mode != "both-managed-retired" && i < 4; i++ {
+					f := &frames[i]
+					f.Errors = []procobserver.EvidenceError{}
+					f.ErrorsTotal = 0
+					f.Census.Proofs = []procobserver.CensusProofV3{}
+					f.Census.Certificates = []procobserver.DescendantCertificate{}
+					f.Census.Resolutions = []procobserver.CensusResolution{}
+					for j := range f.Census.Scans {
+						scan := &f.Census.Scans[j]
+						scan.Verified = scan.Verified[:1]
+						scan.LiveCount = 1
+						scan.LiveDigest = f.Census.ReconciledDigest
+					}
+				}
+			}
 			if mode == "permission" {
 				frames[0].Errors[0].Errno = 13
 			}
@@ -167,6 +187,12 @@ func TestControllerV3ReacquireServiceWholeTransactions(t *testing.T) {
 				}
 				f := frames[calls]
 				calls++
+				if calls == 4 && mode == "both-second-epoch-drift" {
+					_ = cs.sp.SetMeta("sid", "GC_RUNTIME_EPOCH", "2")
+				}
+				if calls == 4 && mode == "both-second-token-drift" {
+					_ = cs.sp.SetMeta("sid", "GC_INSTANCE_TOKEN", "new-provider-incarnation")
+				}
 				return f, nil
 			}
 			collect := s.collect
@@ -223,12 +249,12 @@ func TestControllerV3ReacquireServiceWholeTransactions(t *testing.T) {
 			}
 			got := s.observe(context.Background())
 			controllerV3ServiceIdle(t)
-			wantComplete := mode == "complete-first" || mode == "partial-first" || mode == "partial-second" || mode == "durable-readback"
+			wantComplete := mode == "complete-first" || mode == "partial-first" || mode == "partial-second" || mode == "both-partial" || mode == "durable-readback"
 			if (got.ProviderComplete && got.ProcessComplete) != wantComplete {
 				t.Fatalf("mode=%s transactions=%d reads=%d retained=%d causes=%v reasons=%v", mode, transactions, calls, retained, got.FailureKinds, got.UnknownReasons)
 			}
 			wantTransactions := 1
-			if mode == "partial-first" || mode == "partial-second" || mode == "durable-readback" || mode == "provider-changed" || mode == "root-replaced" || mode == "record-failed" || mode == "nonce-reused" || mode == "second-incomplete" {
+			if mode == "partial-first" || mode == "partial-second" || mode == "both-partial" || mode == "both-managed-retired" || mode == "both-second-epoch-drift" || mode == "both-second-token-drift" || mode == "durable-readback" || mode == "provider-changed" || mode == "root-replaced" || mode == "record-failed" || mode == "nonce-reused" || mode == "second-incomplete" {
 				wantTransactions = 2
 			}
 			if transactions != wantTransactions || calls != wantTransactions*2 {
@@ -256,5 +282,161 @@ func TestControllerV3ReacquireServiceWholeTransactions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// PID ownership is supplied independently of helper identities. Unlike the
+// older branch-mechanics fake, matching SID metadata never certifies a PID.
+type controllerPartialOwnershipProvider struct {
+	*controllerRetryProvider
+	handles        []runtime.ProcessHandle
+	nonempty       int
+	mode           string
+	afterFinalList func()
+}
+
+func (p *controllerPartialOwnershipProvider) TrackProcessRoots(in []runtime.LiveRuntime) ([]runtime.LiveRuntime, error) {
+	if len(in) > 0 {
+		p.nonempty++
+		if p.mode == "tracker-error" {
+			return nil, errors.New("fixture tracker failed")
+		}
+		if p.mode == "second-pid-drift" && p.nonempty == 2 {
+			p.handles[0].PID++
+		}
+		if p.mode == "metadata-drift" && p.nonempty == 2 {
+			_ = p.SetMeta("sid", "GC_RUNTIME_EPOCH", "2")
+		}
+		if p.mode == "input-mutation" {
+			in[0].PPID++
+		}
+	}
+	return runtime.BindProcessEvidence(in, p.handles)
+}
+
+func (p *controllerPartialOwnershipProvider) ListRunning(prefix string) ([]string, error) {
+	names, err := p.controllerRetryProvider.ListRunning(prefix)
+	if p.nonempty == 2 && p.afterFinalList != nil {
+		p.afterFinalList()
+	}
+	if p.mode == "extra-handle" && p.nonempty >= 2 {
+		return append(names, "new-unmatched-provider-handle"), err
+	}
+	return names, err
+}
+
+func TestControllerV3BothPartialRequiresActualPIDOwnership(t *testing.T) {
+	for _, mode := range []string{"exact", "sid-only", "missing-handle", "duplicate", "second-pid-drift", "tracker-error", "metadata-drift", "extra-handle", "input-mutation", "wire-only"} {
+		t.Run(mode, func(t *testing.T) {
+			policy, original, now := controllerV3Fixture()
+			f := controllerReacquireFrames(t, original, now, 0)
+			other := controllerReacquireFrames(t, original, now, 1)
+			f[1] = other[1]
+			p := &controllerPartialOwnershipProvider{controllerRetryProvider: controllerV3Provider(t), handles: []runtime.ProcessHandle{{Name: "sid", SessionID: "sid", PID: 20}}, mode: mode}
+			switch mode {
+			case "sid-only":
+				p.handles[0].PID = 21
+			case "missing-handle":
+				p.handles = nil
+			case "duplicate":
+				p.handles = append(p.handles, p.handles[0])
+			}
+			calls := 0
+			got := collectControllerObservationV3ForReacquisition(context.Background(), "/city", policy, p, func(context.Context, procobserver.ReleasePolicyV3) (procobserver.ResponseV3, error) {
+				v := f[calls]
+				calls++
+				return v, nil
+			}, func() time.Time { return now }, true)
+			if mode == "wire-only" {
+				got.reacquisitionJoins = nil
+			}
+			if controllerV3TransientWhole(got, policy, func() time.Time { return now }) != (mode == "exact") {
+				t.Fatal("incorrect partial ownership eligibility", got.UnknownReasons)
+			}
+			if got.ProcessComplete || got.CertificateDisposition != "provisional" || len(got.Processes) != 0 || !reflect.DeepEqual(got.ProcessDiagnostics, f[:2]) {
+				t.Fatal("provisional proof altered original wire/projection")
+			}
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire controllerObservationReplyV3
+			if err = json.Unmarshal(b, &wire); err != nil || len(wire.reacquisitionJoins) != 0 {
+				t.Fatal("internal proof leaked to wire")
+			}
+		})
+	}
+}
+
+func TestControllerV3BothPartialIntervalIncludesFinalProviderFence(t *testing.T) {
+	policy, original, now := controllerV3Fixture()
+	f := controllerReacquireFrames(t, original, now, 0)
+	other := controllerReacquireFrames(t, original, now, 1)
+	f[1] = other[1]
+	current := now
+	p := &controllerPartialOwnershipProvider{controllerRetryProvider: controllerV3Provider(t), handles: []runtime.ProcessHandle{{Name: "sid", SessionID: "sid", PID: 20}}}
+	calls := 0
+	p.afterFinalList = func() { current = now.Add(time.Millisecond) }
+	got := collectControllerObservationV3ForReacquisition(context.Background(), "/city", policy, p, func(context.Context, procobserver.ReleasePolicyV3) (procobserver.ResponseV3, error) {
+		v := f[calls]
+		calls++
+		return v, nil
+	}, func() time.Time { return current }, true)
+	if !got.FinishedAt.Equal(current) || got.FinishedAt.Before(now.Add(time.Millisecond)) {
+		t.Fatal("whole interval omits final ownership fence")
+	}
+	if !reflect.DeepEqual(got.ProcessDiagnostics, f[:2]) {
+		t.Fatal("helper intervals altered")
+	}
+}
+
+func TestControllerV3BothPartialRetentionIncludesEligibilityAudit(t *testing.T) {
+	policy, original, now := controllerV3Fixture()
+	frames := controllerReacquireFrames(t, original, now, 0)
+	other := controllerReacquireFrames(t, original, now, 1)
+	frames[1] = other[1]
+	provider := &controllerPartialOwnershipProvider{controllerRetryProvider: controllerV3Provider(t), handles: []runtime.ProcessHandle{{Name: "sid", SessionID: "sid", PID: 20}}}
+	calls := 0
+	r := collectControllerObservationV3ForReacquisition(context.Background(), "/city", policy, provider, func(context.Context, procobserver.ReleasePolicyV3) (procobserver.ResponseV3, error) {
+		f := frames[calls]
+		calls++
+		return f, nil
+	}, func() time.Time { return now }, true)
+	if !controllerV3TransientWhole(r, policy, func() time.Time { return now }) {
+		t.Fatal("audit fixture is not eligible")
+	}
+	service := newControllerObservationServiceV3(context.Background(), t.TempDir())
+	if err := os.MkdirAll(filepath.Join(service.city, ".gc", "runtime"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := service.retainAttempt(context.Background(), r)
+	if err != nil || !receipt.Complete {
+		t.Fatal("failed retention", err)
+	}
+	b, err := os.ReadFile(receipt.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "ParentIsProviderInfrastructure") {
+		t.Fatal("audit guessed absent parent metadata")
+	}
+	var bundle struct {
+		Observation json.RawMessage                `json:"collected_typed_envelope"`
+		Joins       []controllerV3CaptureJoinAudit `json:"eligibility_provider_joins"`
+	}
+	if err = json.Unmarshal(b, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	originalWire, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(bundle.Observation) != string(originalWire) || len(bundle.Joins) != 2 {
+		t.Fatal("bundle altered original failed wire or lost eligibility proof")
+	}
+	for i, j := range bundle.Joins {
+		if j.Classification != "eligibility_only_not_complete" || j.RequestNonce != frames[i].RequestNonce || len(j.ManagedIdentities) != 1 || len(j.TrackedRoots) != 1 || j.TrackedRoots[0].PID != 20 || j.TrackedRoots[0].ProviderName != "sid" {
+			t.Fatal("incorrect audit provenance")
+		}
 	}
 }

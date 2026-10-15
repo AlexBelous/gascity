@@ -62,6 +62,7 @@ go_test(
         "client_v3_unclassified_retirement_test.go",
         "observation_test.go",
         "observation_transport_integration_test.go",
+        "reacquire_both_partial_v3_test.go",
         "reacquire_v3_test.go",
         "testenv_import_test.go",
     ],

@@ -2,19 +2,33 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "observationattempt",
-    srcs = ["attempt.go", "retention.go"],
+    srcs = [
+        "attempt.go",
+        "retention.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/observationattempt",
     visibility = ["//:__subpackages__"],
 )
 
 go_test(
     name = "observationattempt_test",
-    srcs = ["attempt_test.go", "retention_test.go"],
+    srcs = [
+        "attempt_test.go",
+        "retention_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":observationattempt"],
+    deps = ["//internal/testenv"],
 )
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
     name = "bazel_repo_srcs",
-    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+        allow_empty = True,
+    ),
     visibility = ["//visibility:public"],
 )

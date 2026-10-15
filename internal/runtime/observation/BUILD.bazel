@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "observation",
     srcs = [
+        "census_mr_join_test.go",
         "observation.go",
         "status_sessions.go",
     ],

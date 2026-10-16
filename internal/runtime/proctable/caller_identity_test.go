@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -114,5 +116,45 @@ func TestCallerFinalReadCancellationDeniesSuccess(t *testing.T) {
 	}
 	if _, err := readCallerIncarnations(ctx, 11, a, read); err == nil {
 		t.Fatal("last-read cancellation returned success")
+	}
+}
+
+func TestCallerChainPreservesSafeAcquisitionDiagnostic(t *testing.T) {
+	for _, at := range []int{1, 3} {
+		anchor, rows := callerChainFixture()
+		calls := 0
+		chain, err := readCallerIncarnations(context.Background(), 11, anchor, func(_ context.Context, pid int) (CallerIncarnation, error) {
+			calls++
+			if calls == at {
+				return CallerIncarnation{}, callerFailure("target-pidfd", syscall.EACCES)
+			}
+			return rows[pid], nil
+		})
+		stage, errno := CallerDiagnostic(err)
+		if len(chain) != 0 || !errors.Is(err, errCallerUnknown) || stage != "target-pidfd" || errno != int(syscall.EACCES) {
+			t.Fatalf("safe leaf lost at read%d: %v %s %d", at, err, stage, errno)
+		}
+	}
+}
+
+func TestCallerChainStripsArbitraryReaderError(t *testing.T) {
+	for _, at := range []int{1, 3} {
+		anchor, rows := callerChainFixture()
+		calls := 0
+		chain, err := readCallerIncarnations(context.Background(), 11, anchor, func(_ context.Context, pid int) (CallerIncarnation, error) {
+			calls++
+			if calls == at {
+				return CallerIncarnation{}, errors.New("PRIVATE-PATH-TOKEN")
+			}
+			return rows[pid], nil
+		})
+		stage, errno := CallerDiagnostic(err)
+		want := "chain-forward"
+		if at == 3 {
+			want = "chain-recheck"
+		}
+		if len(chain) != 0 || !errors.Is(err, errCallerUnknown) || stage != want || errno != 0 || strings.Contains(fmt.Sprint(err), "PRIVATE") {
+			t.Fatalf("unsafe reader diagnostic at %d: %v %s %d", at, err, stage, errno)
+		}
 	}
 }

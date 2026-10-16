@@ -84,24 +84,24 @@ func projectBDManagedChild(raw, final []string) ([]string, error) {
 
 func executeBDChild(ctx context.Context, platform string, ambient, final []string, acquire bdChildAcquire, spawn bdChildSpawn) error {
 	if ctx == nil || ctx.Err() != nil || spawn == nil {
-		return errBDChildAuthority
+		return bdChildFailure(ctx, bdDiagAcquire, nil)
 	}
 	parent := append([]string(nil), ambient...)
 	projected := append([]string(nil), final...)
 	if platform == "linux" {
 		if len(parent) > 4096 {
-			return errBDChildEnvironment
+			return bdChildFailure(ctx, bdDiagEnvironment, errBDChildEnvironment)
 		}
 		total := 0
 		for _, entry := range parent {
 			total += len(entry)
 			key, _, ok := strings.Cut(entry, "=")
 			if !ok || key == "" || strings.ContainsRune(entry, 0) || total > 16<<20 {
-				return errBDChildEnvironment
+				return bdChildFailure(ctx, bdDiagEnvironment, errBDChildEnvironment)
 			}
 			for _, b := range []byte(key) {
 				if b <= 32 || b == 127 {
-					return errBDChildEnvironment
+					return bdChildFailure(ctx, bdDiagEnvironment, errBDChildEnvironment)
 				}
 			}
 		}
@@ -113,32 +113,32 @@ func executeBDChild(ctx context.Context, platform string, ambient, final []strin
 	// OS acquisition must independently preserve raw duplicates and incarnation.
 	claimed, claimedCity, err := parseBDChildEnv(parent)
 	if err != nil {
-		return err
+		return bdChildFailure(ctx, bdDiagEnvironment, err)
 	}
 	if acquire == nil {
-		return errBDChildAuthority
+		return bdChildFailure(ctx, bdDiagAcquire, nil)
 	}
 	raw, readers, err := acquire(ctx)
 	if err != nil || ctx.Err() != nil {
-		return errBDChildAuthority
+		return bdChildFailure(ctx, bdDiagAcquire, err)
 	}
 	measured, measuredCity, err := parseBDChildEnv(raw)
 	if err != nil || measured != claimed || measuredCity != claimedCity {
-		return errBDChildAuthority
+		return bdChildFailure(ctx, bdDiagAcquire, nil)
 	}
 	ticket, err := authorizeBDSessionChild(ctx, bdChildSessionTool, raw, readers)
 	if err != nil {
-		return err
+		return bdChildFailure(ctx, bdDiagAcquire, err)
 	}
 	projected, err = projectBDManagedChild(raw, projected)
 	if err != nil {
-		return err
+		return bdChildFailure(ctx, bdDiagEnvironment, err)
 	}
 	if err = recheckBDSessionChild(ctx, ticket, projected, readers); err != nil {
-		return err
+		return bdChildFailure(ctx, bdDiagRecheck, err)
 	}
 	if ctx.Err() != nil {
-		return errBDChildAuthority
+		return bdChildFailure(ctx, bdDiagAcquire, nil)
 	}
 	// Preserve the child's original exit/error behavior; authority errors are
 	// raised BEFORE this callback. Existing downstream holder fencing remains.

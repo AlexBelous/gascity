@@ -1384,6 +1384,38 @@ static void timestamp(struct timespec t, char out[40]) {
   snprintf(out, 40, "%s.%09ldZ", date, t.tv_nsec);
 }
 static bool send_output(struct output *o) {
+#ifdef GC_HELPER_V3_SEND_BUDGET
+  uint32_t size = htonl((uint32_t)o->n);
+  unsigned char *p = (unsigned char *)&size;
+  size_t left = 4;
+  const uint64_t start = (uint64_t)ev.monotonic_start.tv_sec * 1000u +
+                         (uint64_t)ev.monotonic_start.tv_nsec / 1000000u;
+  for (int frame = 0; frame < 2; frame++) {
+    while (left) {
+      uint64_t now = mono_ms();
+      if (now < start || now - start >= 10000u)
+        return false;
+      struct pollfd pollfd = {.fd = CONNECTION_FD, .events = POLLOUT};
+      int ready = poll(&pollfd, 1, (int)(10000u - (now - start)));
+      if (ready < 0 && errno == EINTR)
+        continue;
+      if (ready <= 0 || !(pollfd.revents & POLLOUT))
+        return false;
+      if (expired())
+        return false;
+      ssize_t n = write(CONNECTION_FD, p, left);
+      if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+        continue;
+      if (n <= 0)
+        return false;
+      p += (size_t)n;
+      left -= (size_t)n;
+    }
+    p = (unsigned char *)o->b;
+    left = o->n;
+  }
+  return !expired();
+#else
   uint32_t size = htonl((uint32_t)o->n);
   unsigned char *p = (unsigned char *)&size;
   size_t left = 4;
@@ -1404,6 +1436,7 @@ static bool send_output(struct output *o) {
     left = o->n;
   }
   return true;
+#endif
 }
 #ifdef GC_HELPER_TEST
 /* Probe only in the disposable fixture build. Every attempted operation must

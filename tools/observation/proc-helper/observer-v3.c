@@ -1,6 +1,7 @@
 /* Separate immutable-candidate V3 entry. Not installed or runtime enabled.
  * The V2 source/entry remains unchanged. Compile/release review must pin this
  * entire new candidate before use; no argument or request selects a proc path. */
+#define GC_HELPER_V3_SEND_BUDGET 1
 #define main gc_legacy_v2_reference_main
 #include "observer.c"
 #undef main
@@ -16,31 +17,63 @@
   "non_target_env=validated_city_context_no_session_keys_v1;" \
   "session_keys=sid,template,epoch,token_presence_v1;census=bounded-process-census/v3;rounds=10;scans=31;" \
   "certificates=provisional_descendant_chain_v3"
+/* V3 fatal-stage diagnostic ABI: no payload, errno, path or secret output.
+ * Every status below remains a failed connection, never provider authority.
+ * V2 keeps its original exit2 contract; complete0/incomplete1 are unchanged. */
+enum census_v3_fatal_status {
+  CENSUS_V3_FATAL_INVOCATION_SOURCE = 64,
+  CENSUS_V3_FATAL_CLOCK_START = 65,
+  CENSUS_V3_FATAL_SIGPIPE_SETUP = 66,
+  CENSUS_V3_FATAL_BOOTSTRAP = 67,
+  CENSUS_V3_FATAL_BINDING_FILE = 68,
+  CENSUS_V3_FATAL_SELF_HASH = 69,
+  CENSUS_V3_FATAL_BOOT_IDENTITY = 70,
+  CENSUS_V3_FATAL_NAMESPACE_IDENTITY = 71,
+  CENSUS_V3_FATAL_PROC_MOUNT = 72,
+  CENSUS_V3_FATAL_CALLER_INITIAL = 73,
+  CENSUS_V3_FATAL_REQUEST = 74,
+  CENSUS_V3_FATAL_DUMPABLE = 75,
+  CENSUS_V3_FATAL_KERNEL_PROVENANCE = 76,
+  CENSUS_V3_FATAL_FD_GET = 77,
+  CENSUS_V3_FATAL_FD_NONBLOCK = 78,
+  CENSUS_V3_FATAL_SECCOMP = 79,
+  CENSUS_V3_FATAL_GLOBAL_ALLOC = 80,
+  CENSUS_V3_FATAL_LEDGER_ALLOC = 81,
+  CENSUS_V3_FATAL_ENVELOPE_ALLOC = 82,
+  CENSUS_V3_FATAL_ENVELOPE_FINALIZE = 83,
+  CENSUS_V3_FATAL_SEND = 84,
+};
 static struct census_bootstrap census_v3;
 int main(int argc,char **argv) {
   (void)argv;
-  if(argc!=1 || !hex_string(HELPER_SOURCE_REVISION,40)) return 2;
+  if(argc!=1 || !hex_string(HELPER_SOURCE_REVISION,40)) return CENSUS_V3_FATAL_INVOCATION_SOURCE;
   ev.complete=true;ev.processfd=ev.active_pidfd=ev.procfd=-1;
   if(clock_gettime(CLOCK_MONOTONIC,&ev.monotonic_start) ||
-      clock_gettime(CLOCK_REALTIME,&ev.realtime_start)) return 2;
+      clock_gettime(CLOCK_REALTIME,&ev.realtime_start)) return CENSUS_V3_FATAL_CLOCK_START;
   timestamp(ev.realtime_start,ev.started);
   sha256_sum(CENSUS_V3_POLICY,strlen(CENSUS_V3_POLICY),ev.policy);
   struct sigaction ignore={.sa_handler=SIG_IGN};
-  if(sigemptyset(&ignore.sa_mask) || sigaction(SIGPIPE,&ignore,NULL) ||
-      !census_bootstrap_init(&census_v3)) return 2;
+  if(sigemptyset(&ignore.sa_mask) || sigaction(SIGPIPE,&ignore,NULL)) return CENSUS_V3_FATAL_SIGPIPE_SETUP;
+  if(!census_bootstrap_init(&census_v3)) return CENSUS_V3_FATAL_BOOTSTRAP;
   struct census_budget *budget=&census_v3.budget;
-  if(!census_binding_v3(budget) || !census_self_hash_v3(budget) ||
-      !census_text_v3(budget,"sys/kernel/random/boot_id",ev.boot,sizeof ev.boot) ||
-      strcmp(ev.boot,ev.binding.boot) || !namespace_identity(ev.ns,sizeof ev.ns) ||
-      strcmp(ev.ns,ev.binding.ns) || !census_mount_v3(budget) ||
-      !census_peer_v3(&census_v3,true) || !census_receive_request_v3(budget) ||
-      prctl(PR_SET_DUMPABLE,0,0,0,0) || !census_kernel_v3(budget)) return 2;
+  if(!census_binding_v3(budget)) return CENSUS_V3_FATAL_BINDING_FILE;
+  if(!census_self_hash_v3(budget)) return CENSUS_V3_FATAL_SELF_HASH;
+  if(!census_text_v3(budget,"sys/kernel/random/boot_id",ev.boot,sizeof ev.boot) ||
+      strcmp(ev.boot,ev.binding.boot)) return CENSUS_V3_FATAL_BOOT_IDENTITY;
+  if(!namespace_identity(ev.ns,sizeof ev.ns) || strcmp(ev.ns,ev.binding.ns)) return CENSUS_V3_FATAL_NAMESPACE_IDENTITY;
+  if(!census_mount_v3(budget)) return CENSUS_V3_FATAL_PROC_MOUNT;
+  if(!census_peer_v3(&census_v3,true)) return CENSUS_V3_FATAL_CALLER_INITIAL;
+  if(!census_receive_request_v3(budget)) return CENSUS_V3_FATAL_REQUEST;
+  if(prctl(PR_SET_DUMPABLE,0,0,0,0)) return CENSUS_V3_FATAL_DUMPABLE;
+  if(!census_kernel_v3(budget)) return CENSUS_V3_FATAL_KERNEL_PROVENANCE;
   ev.trusted_kernel=true;
   int flags=fcntl(CONNECTION_FD,F_GETFL);
-  if(flags<0 || fcntl(CONNECTION_FD,F_SETFL,flags|O_NONBLOCK) || install_seccomp()) return 2;
+  if(flags<0) return CENSUS_V3_FATAL_FD_GET;
+  if(fcntl(CONNECTION_FD,F_SETFL,flags|O_NONBLOCK)) return CENSUS_V3_FATAL_FD_NONBLOCK;
+  if(install_seccomp()) return CENSUS_V3_FATAL_SECCOMP;
   struct census_global_source *source=census_global_new(budget,NULL,census_fixed_enumeration,census_fixed_capture);
-  if(!source) return 2;
-  struct census_resolution_ledger *proofs=census_resolution_new(budget);if(!proofs) return 2;
+  if(!source) return CENSUS_V3_FATAL_GLOBAL_ALLOC;
+  struct census_resolution_ledger *proofs=census_resolution_new(budget);if(!proofs) return CENSUS_V3_FATAL_LEDGER_ALLOC;
   enum census_round_result result=census_choose_proven_continuation(source,proofs,&census_v3.journal);
   ev.complete=result==CENSUS_ROUNDS_SELECTED_PENDING_PROOF;
   if(!census_peer_v3(&census_v3,false)) {
@@ -58,12 +91,14 @@ int main(int argc,char **argv) {
    * replaced: seccomp denies mount/setns/unshare and all executable mappings.
    * No unreviewed post-sandbox readlink/uname syscall is introduced. */
   struct census_envelope *envelope=census_envelope_new(source,proofs,&census_v3.journal);
-  if(!envelope || !census_envelope_finalize(envelope)) return 2;
+  if(!envelope) return CENSUS_V3_FATAL_ENVELOPE_ALLOC;
+  if(!census_envelope_finalize(envelope)) return CENSUS_V3_FATAL_ENVELOPE_FINALIZE;
   struct output wire={.b=envelope->json->data,.n=envelope->json->n};
   bool complete=envelope->complete;
-  /* No re-encoding/retry on any limit or write failure; original UNKNOWN is
-   * preserved, and transport failure cannot manufacture COMPLETE. */
-  if(!send_output(&wire)) return 2;
+  /* Readiness and EINTR/EAGAIN continue only the same unsent suffix within
+   * the original wall budget. No re-encoding or new request deadline; limits
+   * and permanent write failures still cannot manufacture COMPLETE. */
+  if(!send_output(&wire)) return CENSUS_V3_FATAL_SEND;
   census_envelope_free(budget,envelope);census_resolution_free(budget,proofs);
   census_global_free(source);census_identity_clear(budget,&census_v3.caller);
   census_fd_close(budget,ev.procfd);

@@ -120,6 +120,11 @@ jobs:
           "$out/comm-kernel-test" birth-change > "$out/comm-birth.log" 2>&1
           "$out/comm-kernel-test" birth-change-vector > "$out/comm-birth-vector.json" 2> "$out/comm-birth-vector.stderr"
           GC_COMM_BIRTH_VECTOR="$out/comm-birth-vector.json" go test -p 1 ./internal/runtime/procobserver -run '^TestCensusV3ManagedBirthComm(Refresh|OwnedVector)$' -count=1 -json | tee "$out/comm-go-tests.jsonl"
+      - name: Owned V3 sender and fatal-stage regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C tools/observation/proc-helper send-test v3-fatal-test
       - name: Build coherent reviewed Linux pair
         shell: bash
         run: |

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func bdStage0Fixture() ([]string, bdChildReaders) {
@@ -547,5 +548,65 @@ func TestBDStage0InfrastructureKeepsAttribution(t *testing.T) {
 	out, err := projectBDInfrastructureChild(bdChildInfrastructure, env)
 	if err != nil || !reflect.DeepEqual(out, env[5:]) {
 		t.Fatal("explicit infrastructure must preserve city and tool actor")
+	}
+}
+
+func TestBDChildDiagnosticReaderFailuresRemainClosedAndPrivate(t *testing.T) {
+	for _, tc := range []struct {
+		name, stage string
+		fail        func(*bdStage0Harness)
+	}{
+		{"record", "record_read", func(h *bdStage0Harness) {
+			h.recordErr = errors.New("PRIVATE-RAW-ERROR /private/path token=DO-NOT-PRINT")
+		}},
+		{"provider", "provider_read", func(h *bdStage0Harness) {
+			h.providerErr = errors.New("PRIVATE-RAW-ERROR /private/path token=DO-NOT-PRINT")
+		}},
+		{"caller", "caller_read", func(h *bdStage0Harness) {
+			h.callerErr = errors.New("PRIVATE-RAW-ERROR /private/path token=DO-NOT-PRINT")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBDStage0Harness()
+			tc.fail(h)
+			err := h.run()
+			if !errors.Is(err, errBDChildAuthority) || h.spawns != 0 || !strings.Contains(fmt.Sprint(err), "stage="+tc.stage) {
+				t.Fatalf("missing safe stage/no-spawn: %v", err)
+			}
+			for _, secret := range []string{"PRIVATE-RAW-ERROR", "/private/path", "DO-NOT-PRINT", "fixture-only-fence", "fixture-id"} {
+				if strings.Contains(fmt.Sprintf("%v %+v %#v", err, err, err), secret) {
+					t.Fatal("private context leaked")
+				}
+			}
+		})
+	}
+}
+
+func TestBDChildDiagnosticFullRecordDriftDistinguished(t *testing.T) {
+	h := newBDStage0Harness()
+	h.onRecord = func(x *bdStage0Harness) {
+		if x.recordCalls == 2 {
+			x.record.revision = "revision-2"
+		}
+	}
+	err := h.run()
+	if !errors.Is(err, errBDChildAuthority) || h.spawns != 0 || !strings.Contains(fmt.Sprint(err), "stage=recheck_record_drift") {
+		t.Fatalf("record revision drift lost: %v", err)
+	}
+}
+
+func TestBDChildDiagnosticDeadlineVersusOrdinaryReaderFailure(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		if deadline {
+			var stop context.CancelFunc
+			ctx, stop = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer stop()
+		}
+		defer cancel()
+		err := bdChildFailure(ctx, bdDiagCallerRead, errors.New("PRIVATE-CAUSE"))
+		if !errors.Is(err, errBDChildAuthority) || !strings.Contains(fmt.Sprint(err), fmt.Sprintf("deadline=%t", deadline)) || strings.Contains(fmt.Sprint(err), "PRIVATE-CAUSE") {
+			t.Fatalf("deadline/private cause lost: %v", err)
+		}
 	}
 }

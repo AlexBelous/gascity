@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // These error-bearing seams compose the Linux persisted/provider/caller
@@ -176,22 +178,22 @@ func cloneBDChildCaller(caller bdChildCaller) bdChildCaller {
 
 func readBDChildAuthority(ctx context.Context, tuple bdChildTuple, city string, readers bdChildReaders) (bdChildTicket, error) {
 	if ctx == nil || ctx.Err() != nil || readers.record == nil || readers.provider == nil || readers.caller == nil {
-		return bdChildTicket{}, errBDChildAuthority
+		return bdChildTicket{}, bdChildFailure(ctx, bdDiagAcquire, nil)
 	}
 	record, err := readers.record(ctx, tuple.sid)
 	if err != nil || ctx.Err() != nil || record.tuple != tuple || record.city != city ||
 		record.closed || record.resetPending || !validBDChildIdentityText(record.revision) ||
 		!validBDChildIdentityText(record.provider) || !validBDChildIdentityText(record.handle) {
-		return bdChildTicket{}, errBDChildAuthority
+		return bdChildTicket{}, bdChildFailure(ctx, bdDiagRecordRead, err)
 	}
 	switch record.state {
 	case "active", "awake", "creating", "start-pending":
 	default:
-		return bdChildTicket{}, errBDChildAuthority
+		return bdChildTicket{}, bdChildFailure(ctx, bdDiagRecordRead, nil)
 	}
 	providers, err := readers.provider(ctx, record)
 	if err != nil || ctx.Err() != nil || len(providers) == 0 || len(providers) > 4096 {
-		return bdChildTicket{}, errBDChildAuthority
+		return bdChildTicket{}, bdChildFailure(ctx, bdDiagProviderRead, err)
 	}
 	var selected bdChildProvider
 	matches := 0
@@ -203,44 +205,44 @@ func readBDChildAuthority(ctx context.Context, tuple bdChildTuple, city string, 
 			!validBDChildIdentityText(p.provider) || !validBDChildIdentityText(p.handle) ||
 			!validBDChildIdentityText(p.namespace) || p.rootPID <= 1 || p.rootPID > 2147483647 || !validBDChildNumber(p.rootStart) ||
 			seenPID[p.rootPID] || seenSID[p.tuple.sid] || seenHandle[p.handle] {
-			return bdChildTicket{}, errBDChildAuthority
+			return bdChildTicket{}, bdChildFailure(ctx, bdDiagProviderRead, nil)
 		}
 		seenPID[p.rootPID] = true
 		seenSID[p.tuple.sid] = true
 		seenHandle[p.handle] = true
 		if p.tuple.sid == tuple.sid {
 			if p.tuple != tuple || p.city != city || p.provider != record.provider || p.handle != record.handle {
-				return bdChildTicket{}, errBDChildAuthority
+				return bdChildTicket{}, bdChildFailure(ctx, bdDiagProviderRead, nil)
 			}
 			selected = p
 			matches++
 		}
 	}
 	if matches != 1 {
-		return bdChildTicket{}, errBDChildAuthority
+		return bdChildTicket{}, bdChildFailure(ctx, bdDiagProviderRead, nil)
 	}
 	caller, err := readers.caller(ctx)
 	if err != nil || ctx.Err() != nil || len(caller.processes) == 0 || len(caller.processes) > 128 {
-		return bdChildTicket{}, errBDChildAuthority
+		return bdChildTicket{}, bdChildFailure(ctx, bdDiagCallerRead, err)
 	}
 	caller = cloneBDChildCaller(caller)
 	seen := map[int]bool{}
 	for i, p := range caller.processes {
 		if p.pid <= 1 || p.pid > 2147483647 || seen[p.pid] || !validBDChildNumber(p.start) ||
 			p.namespace != selected.namespace || p.uid != selected.uid || p.city != city {
-			return bdChildTicket{}, errBDChildAuthority
+			return bdChildTicket{}, bdChildFailure(ctx, bdDiagCallerRead, nil)
 		}
 		seen[p.pid] = true
 		captured, capturedCity, parseErr := parseBDChildRawEnv(p.env)
 		if parseErr != nil || captured != tuple || capturedCity != city {
-			return bdChildTicket{}, errBDChildAuthority
+			return bdChildTicket{}, bdChildFailure(ctx, bdDiagCallerRead, nil)
 		}
 		if i+1 < len(caller.processes) {
 			if p.ppid != caller.processes[i+1].pid || p.pid == selected.rootPID {
-				return bdChildTicket{}, errBDChildAuthority
+				return bdChildTicket{}, bdChildFailure(ctx, bdDiagCallerRead, nil)
 			}
 		} else if p.pid != selected.rootPID || p.start != selected.rootStart {
-			return bdChildTicket{}, errBDChildAuthority
+			return bdChildTicket{}, bdChildFailure(ctx, bdDiagCallerRead, nil)
 		}
 	}
 	return bdChildTicket{valid: true, record: record, provider: selected, caller: caller}, nil
@@ -260,7 +262,7 @@ func authorizeBDSessionChild(ctx context.Context, op bdChildOperation, raw []str
 	}
 	ticket, err := readBDChildAuthority(ctx, tuple, city.effective(), readers)
 	if err != nil {
-		return bdChildTicket{}, err
+		return bdChildTicket{}, bdChildFailure(ctx, bdDiagAcquire, err)
 	}
 	ticket.city = city
 	return ticket, nil
@@ -277,7 +279,18 @@ func recheckBDSessionChild(ctx context.Context, ticket bdChildTicket, finalRaw [
 	current, err := readBDChildAuthority(ctx, tuple, city.effective(), readers)
 	if err != nil || current.record != ticket.record || current.provider != ticket.provider ||
 		!reflect.DeepEqual(current.caller, ticket.caller) {
-		return errBDChildAuthority
+		stage := bdDiagRecheck
+		if err == nil {
+			switch {
+			case current.record != ticket.record:
+				stage = bdDiagRecheckRecord
+			case current.provider != ticket.provider:
+				stage = bdDiagRecheckProvider
+			default:
+				stage = bdDiagRecheckCaller
+			}
+		}
+		return bdChildFailure(ctx, stage, err)
 	}
 	return nil
 }
@@ -293,10 +306,10 @@ func runBDSessionChild(ctx context.Context, op bdChildOperation, raw, finalRaw [
 		return err
 	}
 	if err = recheckBDSessionChild(ctx, ticket, projected, readers); err != nil {
-		return err
+		return bdChildFailure(ctx, bdDiagRecheck, err)
 	}
 	if ctx.Err() != nil {
-		return errBDChildAuthority
+		return bdChildFailure(ctx, bdDiagAcquire, nil)
 	}
 	// No pre-spawn read/check can claim a cross-process transaction. Existing
 	// downstream holder fencing remains necessary for a race AFTER this recheck.
@@ -304,4 +317,65 @@ func runBDSessionChild(ctx context.Context, op bdChildOperation, raw, finalRaw [
 		return errBDChildSpawn
 	}
 	return nil
+}
+
+// bdChildFailureStage is a closed diagnostic vocabulary, never caller input.
+type bdChildFailureStage string
+
+const (
+	bdDiagUnknown         bdChildFailureStage = "unknown"
+	bdDiagAcquire         bdChildFailureStage = "acquire"
+	bdDiagEnvironment     bdChildFailureStage = "environment"
+	bdDiagStore           bdChildFailureStage = "store"
+	bdDiagRecordRead      bdChildFailureStage = "record_read"
+	bdDiagProviderRead    bdChildFailureStage = "provider_read"
+	bdDiagCallerRead      bdChildFailureStage = "caller_read"
+	bdDiagRecheck         bdChildFailureStage = "recheck"
+	bdDiagRecheckRecord   bdChildFailureStage = "recheck_record_drift"
+	bdDiagRecheckProvider bdChildFailureStage = "recheck_provider_drift"
+	bdDiagRecheckCaller   bdChildFailureStage = "recheck_caller_drift"
+)
+
+type bdChildDiagnosticError struct {
+	base                        error
+	stage                       bdChildFailureStage
+	callerStage                 string
+	errno                       int
+	deadline, canceled, recheck bool
+}
+
+func (e *bdChildDiagnosticError) Error() string {
+	return fmt.Sprintf("%s: stage=%s caller=%s errno=%d deadline=%t canceled=%t recheck=%t", e.base.Error(), e.stage, e.callerStage, e.errno, e.deadline, e.canceled, e.recheck)
+}
+func (e *bdChildDiagnosticError) Unwrap() error              { return e.base }
+func (e *bdChildDiagnosticError) Format(s fmt.State, _ rune) { _, _ = s.Write([]byte(e.Error())) }
+func bdChildFailure(ctx context.Context, stage bdChildFailureStage, cause error) error {
+	switch stage {
+	case bdDiagAcquire, bdDiagEnvironment, bdDiagStore, bdDiagRecordRead, bdDiagProviderRead, bdDiagCallerRead, bdDiagRecheck, bdDiagRecheckRecord, bdDiagRecheckProvider, bdDiagRecheckCaller:
+	default:
+		stage = bdDiagUnknown
+	}
+	var prior *bdChildDiagnosticError
+	var result bdChildDiagnosticError
+	if errors.As(cause, &prior) {
+		result = *prior
+	} else {
+		result.base = errBDChildAuthority
+		if stage == bdDiagEnvironment && errors.Is(cause, errBDChildEnvironment) {
+			result.base = errBDChildEnvironment
+		}
+		result.stage = stage
+		// The existing proctable API returns only its static source stage and errno;
+		// neither arbitrary underlying Error text nor identity values are retained.
+		result.callerStage, result.errno = proctable.CallerDiagnostic(cause)
+	}
+	if ctx != nil {
+		result.deadline = result.deadline || errors.Is(ctx.Err(), context.DeadlineExceeded)
+		result.canceled = result.canceled || (ctx.Err() != nil && !errors.Is(ctx.Err(), context.DeadlineExceeded))
+	}
+	switch stage {
+	case bdDiagRecheck, bdDiagRecheckRecord, bdDiagRecheckProvider, bdDiagRecheckCaller:
+		result.recheck = true
+	}
+	return &result
 }

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -151,5 +153,38 @@ func TestBDControllerInfraPhysicalAbsence(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBDExecutionDiagnosticSurvivesOuterAcquireAndRecheck(t *testing.T) {
+	raw, readers := bdStage0Fixture()
+	for _, mode := range []string{"nested", "acquire-environment"} {
+		spawns := 0
+		cause := bdChildFailure(context.Background(), bdDiagCallerRead, errors.New("PRIVATE-LOWER-CAUSE"))
+		if mode == "acquire-environment" {
+			cause = errBDChildEnvironment
+		}
+		err := executeBDChild(context.Background(), "linux", raw, raw, func(context.Context) ([]string, bdChildReaders, error) { return nil, bdChildReaders{}, cause }, func(context.Context, bdChildEnvironment) error { spawns++; return nil })
+		if !errors.Is(err, errBDChildAuthority) || spawns != 0 {
+			t.Fatalf("original acquire sentinel/spawn changed: %v", err)
+		}
+		if mode == "nested" && !strings.Contains(fmt.Sprint(err), "stage=caller_read") {
+			t.Fatalf("lower leaf lost: %v", err)
+		}
+	}
+	calls := 0
+	base := readers.record
+	readers.record = func(ctx context.Context, sid string) (bdChildRecord, error) {
+		calls++
+		r, e := base(ctx, sid)
+		if calls == 2 {
+			r.revision = "changed-private-revision"
+		}
+		return r, e
+	}
+	spawns := 0
+	err := executeBDChild(context.Background(), "linux", raw, raw, func(context.Context) ([]string, bdChildReaders, error) { return raw, readers, nil }, func(context.Context, bdChildEnvironment) error { spawns++; return nil })
+	if !errors.Is(err, errBDChildAuthority) || spawns != 0 || !strings.Contains(fmt.Sprint(err), "stage=recheck_record_drift") || !strings.Contains(fmt.Sprint(err), "recheck=true") {
+		t.Fatalf("outer recheck diagnostic lost: %v", err)
 	}
 }

@@ -83,7 +83,10 @@ func readCallerIncarnations(ctx context.Context, pid int, anchor CallerAnchor, r
 		}
 		seen[pid] = true
 		p, err := read(ctx, pid)
-		if err != nil || p.PID != pid || p.Start == "" || p.PGID <= 0 || p.Platform != anchor.Platform || p.Domain != anchor.Domain || p.UIDs != anchor.UIDs {
+		if err != nil {
+			return nil, callerFailure("chain-forward", err)
+		}
+		if p.PID != pid || p.Start == "" || p.PGID <= 0 || p.Platform != anchor.Platform || p.Domain != anchor.Domain || p.UIDs != anchor.UIDs {
 			return nil, errCallerUnknown
 		}
 		p.Environment = CallerEnvironment{entries: p.Environment.Entries(), complete: p.Environment.complete}
@@ -108,7 +111,10 @@ func readCallerIncarnations(ctx context.Context, pid int, anchor CallerAnchor, r
 					return nil, errCallerUnknown
 				}
 				fresh, err := read(ctx, prior.PID)
-				if err != nil || ctx.Err() != nil || !reflect.DeepEqual(prior, fresh) {
+				if err != nil {
+					return nil, callerFailure("chain-recheck", err)
+				}
+				if ctx.Err() != nil || !reflect.DeepEqual(prior, fresh) {
 					return nil, errCallerUnknown
 				}
 			}

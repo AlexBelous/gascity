@@ -20,6 +20,10 @@ const MaxEncodedAttemptBytes int64 = 33 * 1024 * 1024
 // MaxCandidateRecordBytes bounds the small, immutable candidate link.
 const MaxCandidateRecordBytes int64 = 16 * 1024
 
+// retentionSlots bounds failed attempts and their candidate siblings globally
+// across all Store instances sharing the same directory.
+const retentionSlots = 16
+
 // CandidateRecord is audit evidence, never a final selection, admission or
 // delivery certificate. Its envelope must still pass the owning service's final
 // guards. Correlation requires the actual COMPLETE public reply with this hash.
@@ -34,7 +38,8 @@ type CandidateRecord struct {
 
 var errRetention = errors.New("typed observation retention unavailable")
 
-// Store retains at most eight immutable files; it never deletes or rotates.
+// Store retains at most sixteen failed attempts and their candidate siblings;
+// it never deletes or rotates.
 // The caller must supply a trusted parent directory within its own runtime.
 type Store struct {
 	dir   string
@@ -88,7 +93,7 @@ func (w *limitedHashWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Save durably preserves collected typed JSON at0600. Eight O_EXCL slots bound
+// Save durably preserves collected typed JSON at0600. Fixed O_EXCL slots bound
 // concurrent callers across Store instances. A partial/failed file consumes its
 // slot and is retained. Encode may buffer the whole value before the capped write.
 func (s *Store) Save(ctx context.Context, value any) (Receipt, error) {
@@ -105,7 +110,7 @@ func (s *Store) Save(ctx context.Context, value any) (Receipt, error) {
 		return receipt, errRetention
 	}
 	defer root.Close() //nolint:errcheck // file and directory durability checked below
-	for slot := 0; slot < 8; slot++ {
+	for slot := 0; slot < retentionSlots; slot++ {
 		name := fmt.Sprintf("failed-attempt-%d.json", slot)
 		f, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if errors.Is(err, os.ErrExist) {
@@ -142,7 +147,7 @@ func (s *Store) SaveCandidate(ctx context.Context, failed Receipt, first, select
 		return receipt, errRetention
 	}
 	name, owned := filepath.Base(failed.Path), false
-	for slot := 0; slot < 8; slot++ {
+	for slot := 0; slot < retentionSlots; slot++ {
 		owned = owned || name == fmt.Sprintf("failed-attempt-%d.json", slot)
 	}
 	if !owned {

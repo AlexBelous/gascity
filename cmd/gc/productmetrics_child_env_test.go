@@ -1,14 +1,81 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
 )
+
+func TestNudgePollerCommandDoesNotInheritWorkerIdentity(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := filepath.Join(dir, "child.env")
+	spy := filepath.Join(dir, "gc-child-spy")
+	keys := []string{"GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS", "GC_AGENT", "GC_TEMPLATE", "GC_SESSION_ORIGIN", "GC_RUNTIME_EPOCH", "GC_CONTINUATION_EPOCH", "GC_INSTANCE_TOKEN", "BEADS_HOLDER_TOKEN", "BEADS_ACTOR", "CLAUDE_CODE_SESSION_ID"}
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$GC_DISABLE_USAGE_METRICS\" \"$BD_DISABLE_METRICS\" \"$OTEL_SERVICE_NAME\" \"$GC_CITY_PATH\" \"$GC_CITY\" \"$FOREIGN_API_KEY\" > \"$GC_TEST_POLLER_ENV_SPY\"\n" +
+		"for key in " + strings.Join(keys, " ") + "; do\n" +
+		"  eval \"present=\\${$key+x}\"; printf '%s=%s\\n' \"$key\" \"$present\" >> \"$GC_TEST_POLLER_ENV_SPY\"\n" +
+		"done\n" +
+		"printf 'arg=%s\\n' \"$@\" >> \"$GC_TEST_POLLER_ENV_SPY\"\n"
+	if err := os.WriteFile(spy, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range keys {
+		t.Setenv(key, "fixture-worker-identity")
+	}
+	t.Setenv("GC_TEST_POLLER_ENV_SPY", snapshot)
+	t.Setenv("GC_CITY_PATH", dir)
+	t.Setenv("GC_CITY", dir)
+	t.Setenv("FOREIGN_API_KEY", "fixture-ordinary-credential")
+	t.Setenv(execenv.UsageMetricsDisableEnv, "0")
+	t.Setenv("BD_DISABLE_METRICS", "keep-beads-setting")
+	t.Setenv("OTEL_SERVICE_NAME", "keep-otel-setting")
+
+	// This is ensureNudgePoller's real construction seam. Only the executable
+	// is a finite fixture; no gc poller, provider or queue is opened. Start and
+	// synchronously reap it here instead of the launcher's production Release.
+	cmd := nudgePollerCommand(spy, dir, "target-sid", "target-provider")
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Fatal("poller construction lost its existing detached-process contract")
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(hangBudget):
+		_ = cmd.Process.Kill() // Only this test's owned finite spy.
+		<-done
+		t.Fatal("owned poller-construction spy did not exit")
+	}
+	data, err := os.ReadFile(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	want := []string{execenv.UsageMetricsDisableValue, "keep-beads-setting", "keep-otel-setting", dir, dir, "fixture-ordinary-credential"}
+	for _, key := range keys {
+		want = append(want, key+"=")
+	}
+	for _, arg := range []string{"nudge", "poll", "--city", dir, "--session", "target-provider", "target-sid"} {
+		want = append(want, "arg="+arg)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("poller construction environment/target = %#v, want %#v", got, want)
+	}
+}
 
 func TestProductMetricsChildEnvAdapterCanonicalizesExplicitEnvironment(t *testing.T) {
 	cmd := exec.Command("unused")

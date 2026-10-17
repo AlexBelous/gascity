@@ -113,7 +113,11 @@ static struct census_envelope *census_envelope_new(struct census_global_source *
 static bool census_envelope_finalize(struct census_envelope *e) {(void)e;return gate("envelope_finalize");}
 static bool send_output(struct output *w) {
   if(!gate("send")) return false;
-  if(w->n!=14 || strcmp(w->b,"owned-sentinel")) abort();sent=ev.complete;return true;
+  if(w->n!=14 || strcmp(w->b,"owned-sentinel")) {
+    abort();
+  }
+  sent=ev.complete;
+  return true;
 }
 static void census_envelope_free(struct census_budget *b,struct census_envelope *e) {(void)b;(void)e;(void)gate("free_envelope");}
 static void census_resolution_free(struct census_budget *b,struct census_resolution_ledger *l) {(void)b;(void)l;(void)gate("free_ledger");}

@@ -1,0 +1,23 @@
+{
+  "64": "invocation_source",
+  "65": "clock_start",
+  "66": "sigpipe_setup",
+  "67": "bootstrap",
+  "68": "binding_file",
+  "69": "self_hash",
+  "70": "boot_identity",
+  "71": "namespace_identity",
+  "72": "proc_mount",
+  "73": "caller_initial",
+  "74": "request",
+  "75": "dumpable",
+  "76": "kernel_provenance",
+  "77": "fd_get",
+  "78": "fd_nonblock",
+  "79": "seccomp",
+  "80": "global_alloc",
+  "81": "ledger_alloc",
+  "82": "envelope_alloc",
+  "83": "envelope_finalize",
+  "84": "send"
+}

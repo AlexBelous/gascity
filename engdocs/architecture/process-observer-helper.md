@@ -7,6 +7,9 @@ only production command is `gc-process-observer-helper` with no arguments. The
 system manager supplies one already connected AF_UNIX stream on fd3. It exits
 after that connection; provider handles and admission stay in ordinary gc.
 
+The V2 contract below is preserved. The separate V3 entry has a
+[V3 send budget and fatal-stage diagnostic contract](process-observer-v3-send-status.md).
+
 ## Fixed wire contract
 
 The client writes one uint32 network-order length followed by UTF-8 JSON, then

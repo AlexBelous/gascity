@@ -36,6 +36,7 @@ go_test(
     name = "procobserver_test",
     srcs = [
         "census_comm_birth_test.go",
+        "census_exit_poll_companion_test.go",
         "census_exit_v3_test.go",
         "census_more_rounds_candidate_test.go",
         "census_more_rounds_wire_test.go",
@@ -69,6 +70,8 @@ go_test(
     data = [
         "testdata/census-exit-matrix.json",  # keep
         "testdata/census-exit-mixed.json",  # keep
+        "testdata/census-exit-poll-companion-modeled.json",  # keep
+        "testdata/census-original-full-poll-actual-linux.json",  # keep
         "testdata/census_owned_rounds_13.json",
         "testdata/census_owned_rounds_31.json",
         "testdata/census_shortlived_rounds_13.json",

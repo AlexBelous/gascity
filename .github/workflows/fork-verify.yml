@@ -125,6 +125,13 @@ jobs:
         run: |
           set -euo pipefail
           make -C tools/observation/proc-helper send-test v3-fatal-test
+      - name: Original FULL and initial-poll companion owned-child witness
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/clerk-pair"
+          make -C tools/observation/proc-helper original-full-poll-test original-full-poll-kernel-test OUT="$out/poll-companion"
+          GC_ORIGINAL_FULL_POLL_VECTOR="$out/poll-companion-original-full-poll-vector.json" go test -p 1 ./internal/runtime/procobserver -run '^TestOriginalFullPoll' -count=1 -v
       - name: Build coherent reviewed Linux pair
         shell: bash
         run: |

@@ -24,6 +24,10 @@ static inline bool census_birth_companion_diagnostic(const struct census_capture
     !fault->diagnostic_first_identity_present && fault->fields_pass==1 &&
     fault->diagnostic_exit_poll==CENSUS_EXIT_POLL_ZERO && !fault->bound_exit_valid;
 }
+static inline bool census_birth_poll_companion(const struct census_capture_fault *fault) {
+  return fault->operation && !strcmp(fault->operation,"pidfd_poll") &&
+    fault->error==ESTALE && !fault->start && !fault->capture_diagnostic_available;
+}
 static inline bool census_exit_error_compatible(const struct census_global_fault *e,
     const struct census_typed_proof *p) {
   const struct census_exit_witness *w=&p->exit_witness;
@@ -32,6 +36,7 @@ static inline bool census_exit_error_compatible(const struct census_global_fault
     return !strcmp(e->raw.operation,"census") && !e->raw.error && e->raw.start==p->source.start;
   if(strcmp(e->reason,"process_unavailable")) return false;
   if(w->stage==2) return !strcmp(e->raw.operation,"pidfd_poll") && e->raw.error==ESTALE && !e->raw.start;
+  if(w->stage==3 && census_birth_poll_companion(&e->raw)) return true;
   return !strcmp(e->raw.operation,"environ") && e->raw.error==ESRCH && e->raw.start==p->source.start &&
     (w->stage!=3 || census_birth_companion_diagnostic(&e->raw));
 }
@@ -159,11 +164,17 @@ static inline bool census_resolve_exit_windows(struct census_global_source *s,
     if(stage==3) for(unsigned other=0;other<s->errors_n;other++) {
       const struct census_global_fault *f=&s->errors[other];
       if(other==slot || f->raw.pid!=e->raw.pid) continue;
-      if(strcmp(f->reason,"process_unavailable") || !f->raw.operation || strcmp(f->raw.operation,"environ") ||
-          f->raw.error!=ESRCH || f->raw.start!=prior->start || f->scan_index<=e->scan_index) {compatible=129;break;}
       const struct census_capture_fault *companion=&f->raw;
+      if(strcmp(f->reason,"process_unavailable") || f->scan_index<=e->scan_index) {compatible=129;break;}
+      bool poll_companion=census_birth_poll_companion(companion);
+      if(!poll_companion && (!f->raw.operation || strcmp(f->raw.operation,"environ") ||
+          f->raw.error!=ESRCH || f->raw.start!=prior->start)) {compatible=129;break;}
       uint32_t companion_uids[4]={0};
-      if(!census_birth_companion_diagnostic(companion) || companion->retained_stage!=1 ||
+      /* A raw initial-poll fault is not proof. Its own stage2 descriptors must
+       * independently revalidate the same FULL zombie, in addition to the
+       * original successful birth's stage3 descriptors above. */
+      if((poll_companion?companion->retained_stage!=2:
+          (!census_birth_companion_diagnostic(companion) || companion->retained_stage!=1)) ||
           companion->retained_start!=prior->start || !companion->retained_pidfd_plus_one ||
           !companion->retained_procdir_plus_one || memcmp(companion->retained_uids,prior->uids,sizeof prior->uids) ||
           !census_exit_original_full_zombie(s->budget,(int)companion->retained_pidfd_plus_one-1,

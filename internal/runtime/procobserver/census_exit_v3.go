@@ -184,14 +184,24 @@ func validateExitExtensions(c CensusV3, errors []EvidenceError, rows map[int]map
 					births++
 					birthScan = e.ScanIndex
 				} else {
-					if r.Kind != "known_nonmanaged_terminal" || r.ClassifiedScan >= e.ScanIndex || e.Reason != "process_unavailable" || e.Operation != "environ" ||
-						e.Errno != 3 || !sameStart(e.StartTicks, p.StartTicks) {
+					if r.Kind != "known_nonmanaged_terminal" || r.ClassifiedScan >= e.ScanIndex || e.Reason != "process_unavailable" {
 						return false
 					}
-					d := e.CaptureDiagnostic
-					if d == nil || !validCaptureDiagnostic(e, false) || d.FieldsPass != 1 || !*d.BoundLive ||
-						*d.FirstIdentityPresent || d.ExitPoll != "zero" || *d.ExitWitness {
-						return false
+					if e.Operation == "pidfd_poll" {
+						// The stage3 compound witness attests both original FULL
+						// custody and the companion's independent stage2 custody.
+						if e.Errno != 116 || e.StartTicks != nil || e.CaptureDiagnostic != nil {
+							return false
+						}
+					} else {
+						if e.Operation != "environ" || e.Errno != 3 || !sameStart(e.StartTicks, p.StartTicks) {
+							return false
+						}
+						d := e.CaptureDiagnostic
+						if d == nil || !validCaptureDiagnostic(e, false) || d.FieldsPass != 1 || !*d.BoundLive ||
+							*d.FirstIdentityPresent || d.ExitPoll != "zero" || *d.ExitWitness {
+							return false
+						}
 					}
 					envs++
 				}

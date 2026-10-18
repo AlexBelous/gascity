@@ -78,8 +78,18 @@ func (h *nativeTestHost) Observe(seat nativeCapacitySeat) (nativeScopeObservatio
 
 type nativeTestProvider struct {
 	*runtime.Fake
-	startErr error
-	started  []runtime.Config
+	startErr      error
+	started       []runtime.Config
+	registryErr   error
+	registryReads int
+}
+
+func (p *nativeTestProvider) ListRunning(prefix string) ([]string, error) {
+	p.registryReads++
+	if p.registryErr != nil {
+		return nil, p.registryErr
+	}
+	return p.Fake.ListRunning(prefix)
 }
 
 func (p *nativeTestProvider) SupportsCommandScope(string) bool { return true }
@@ -188,6 +198,61 @@ func TestNativeConcurrentLastSeatIsAtomic(t *testing.T) {
 	}
 	if allowed != 1 || len(readNativeTestLedger(t, city).Seats) != 3 {
 		t.Fatalf("allowed=%d seats=%d", allowed, len(readNativeTestLedger(t, city).Seats))
+	}
+}
+
+func TestNativeLedgerAdmissionDoesNotDependOnProviderRegistry(t *testing.T) {
+	city, c, host, sp, store := nativeTestFixture(t, 2)
+	// A first tmux start has no server to enumerate yet. That diagnostic
+	// failure cannot override the authoritative durable seats or erase them.
+	sp.registryErr = errors.New("isolated tmux server does not exist yet")
+	b := nativeTestSession(t, store)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	if !allowed {
+		t.Fatalf("registry diagnostic blocked the free durable seat: %s", reason)
+	}
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
+	if err := mgr.startRuntime(ctx, b.Metadata["session_name"], runtime.Config{Command: "fake-command", Env: map[string]string{"GC_SESSION_ID": b.ID, "GC_TEMPLATE": "worker"}}); err != nil {
+		t.Fatal(err)
+	}
+	seat := readNativeTestLedger(t, city).Seats[b.ID]
+	if len(sp.started) != 1 || sp.started[0].CommandScope == nil || seat.State != "active" {
+		t.Fatal("free durable seat did not produce one accounted scoped start")
+	}
+	other := nativeTestSession(t, store)
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, store); err == nil {
+		t.Fatal("registry failure disabled the shared cap")
+	}
+	if sp.registryReads != 0 || len(readNativeTestLedger(t, city).Seats) != 3 {
+		t.Fatalf("registry reads=%d; durable seats=%d", sp.registryReads, len(readNativeTestLedger(t, city).Seats))
+	}
+}
+
+func TestNativeLedgerAdmissionStillValidatesTargetIdentity(t *testing.T) {
+	for _, invalid := range []string{"missing", "closed", "wrong-template"} {
+		t.Run(invalid, func(t *testing.T) {
+			city, c, host, sp, store := nativeTestFixture(t, 2)
+			b := nativeTestSession(t, store)
+			var err error
+			sid := b.ID
+			switch invalid {
+			case "missing":
+				sid = "gc-missing-session"
+			case "closed":
+				err = store.Close(b.ID)
+			case "wrong-template":
+				err = store.SetMetadata(b.ID, "template", "another-route")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := claimNativeCapacityStart(context.Background(), city, "worker", sid, time.Now(), c, host, sp, store); err == nil {
+				t.Fatal("invalid target identity admitted")
+			}
+			if len(readNativeTestLedger(t, city).Seats) != 2 || len(sp.started) != 0 || sp.registryReads != 0 {
+				t.Fatal("invalid target mutated admission or consulted global registry")
+			}
+		})
 	}
 }
 

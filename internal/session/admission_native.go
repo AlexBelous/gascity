@@ -371,9 +371,9 @@ func claimNativeCapacityStart(ctx context.Context, city, route, sid string, now 
 		if len(ledger.Seats) >= c.Limits.Cap {
 			return fmt.Errorf("native capacity full")
 		}
-		if err := validateNativeRegistry(ledger, sp, store, c); err != nil {
-			return err
-		}
+		// The durable seat ledger is the admission authority. Whole-provider
+		// enumeration is diagnostic: a missing first tmux server or unrelated
+		// roster failure must not veto this target's independently owned seat.
 		if err := host.Resources(c); err != nil {
 			return fmt.Errorf("native capacity resources unavailable")
 		}
@@ -384,36 +384,6 @@ func claimNativeCapacityStart(ctx context.Context, city, route, sid string, now 
 		return nil
 	})
 	return proof, err
-}
-
-func validateNativeRegistry(ledger *nativeCapacityLedger, sp runtime.Provider, store beads.Store, c nativeCapacityConfig) error {
-	infos, err := NewStore(beads.SessionStore{Store: store}).ListAll(ListAllOptions{})
-	if err != nil {
-		return fmt.Errorf("native capacity registry unavailable")
-	}
-	known := make(map[string]Info, len(infos))
-	for _, info := range infos {
-		if info.SessionName != "" {
-			known[info.SessionName] = info
-		}
-	}
-	names, err := sp.ListRunning("")
-	if err != nil {
-		return fmt.Errorf("native capacity registry unavailable")
-	}
-	for _, name := range names {
-		info, ok := known[name]
-		if !ok {
-			return fmt.Errorf("native capacity runtime unmapped")
-		}
-		if managedCapacityRoute(info.Template, c.Queue.Exact, c.Queue.Prefixes) {
-			seat, present := ledger.Seats[info.ID]
-			if !present || seat.Handle != name || seat.Route != info.Template {
-				return fmt.Errorf("native capacity runtime unowned")
-			}
-		}
-	}
-	return nil
 }
 
 func beginNativeCapacityStart(ctx context.Context, proof *capacityAdmissionProof, name string, cfg runtime.Config) (runtime.Config, error) {

@@ -1,13 +1,102 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
 // noSleep is a sleep stub so the confirm loop runs instantly under test.
 func noSleep(time.Duration) {}
+
+// A cold Codex turn can accept its input before the busy footer renders. A
+// second Escape in that interval cancels the accepted turn instead of helping
+// submit it. Missing busy evidence is not permission to repeat that key.
+func testSubmitKeepsAcceptedTurnWhenBusyIsLate(t *testing.T) {
+	sends := 0
+	interrupted := false
+	sendSubmit := func() error {
+		sends++
+		if sends > 1 {
+			interrupted = true
+		}
+		return nil
+	}
+	confirmed, err := submitEnterAndConfirm(sendSubmit, func() {}, func() (bool, error) {
+		return false, nil // the first input was accepted, but the footer is still stale
+	}, noSleep, 1)
+	if err != nil || confirmed {
+		t.Fatalf("confirmed=%v err=%v, want unconfirmed delivery", confirmed, err)
+	}
+	if interrupted {
+		t.Fatalf("accepted turn interrupted by %d submit sequences; want one initial Escape then Enter", sends)
+	}
+}
+
+// Exercise the actual NudgeSession caller: a drained composer with no busy
+// footer must not receive a second destructive Escape. Plain Enter retains its
+// existing retry budget. No real tmux or model process participates.
+func testNudgeKeepsDrainedCodexTurnWhenBusyIsLate(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		enters   int
+		escapes  int
+	}{
+		{provider: "codex", enters: 1, escapes: 1},
+		{provider: "claude", enters: 3},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			session := "late-busy-" + tc.provider
+			t.Cleanup(func() { sessionNudgeLocks.Delete(session) })
+			synctest.Test(t, func(t *testing.T) {
+				ex := &lateBusyNudgeExecutor{provider: tc.provider}
+				tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+				err := tm.NudgeSession(session, "one assigned operation")
+				if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
+					t.Fatalf("NudgeSession error = %v, want unconfirmed or delivered-unobserved", err)
+				}
+				if ex.enters != tc.enters || ex.escapes != tc.escapes {
+					t.Fatalf("submit keys: Enter=%d Escape=%d, want Enter=%d Escape=%d", ex.enters, ex.escapes, tc.enters, tc.escapes)
+				}
+			})
+		})
+	}
+}
+
+type lateBusyNudgeExecutor struct {
+	provider string
+	enters   int
+	escapes  int
+}
+
+func (e *lateBusyNudgeExecutor) execute(args []string) (string, error) {
+	switch {
+	case slices.Contains(args, "show-environment"):
+		return "GC_PROVIDER=" + e.provider, nil
+	case slices.Contains(args, "display-message") && slices.Contains(args, "#{session_name}|#{session_attached}"):
+		return "late-busy-" + e.provider + "|0", nil
+	case slices.Contains(args, "capture-pane"):
+		if e.provider == "codex" {
+			return "› ", nil
+		}
+		return "❯ ", nil
+	case slices.Contains(args, "send-keys"):
+		if slices.Contains(args, "Enter") {
+			e.enters++
+		}
+		if slices.Contains(args, "Escape") {
+			e.escapes++
+		}
+	}
+	return "", nil
+}
+
+func (e *lateBusyNudgeExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return e.execute(args)
+}
 
 // TestSubmitEnterAndConfirmReEntersWhileIdle proves the ga-bwm fix: when the
 // first Enter is lost (the pane stays idle with the message still drafted), the
@@ -19,7 +108,7 @@ func TestSubmitEnterAndConfirmReEntersWhileIdle(t *testing.T) {
 	busy := func() (bool, error) { return enters >= 2, nil }
 	sendEnter := func() error { enters++; return nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep, submitEnterMaxSends)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -38,7 +127,7 @@ func TestSubmitEnterAndConfirmStopsWhenBusy(t *testing.T) {
 	busy := func() (bool, error) { return enters >= 1, nil }
 	sendEnter := func() error { enters++; return nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep, submitEnterMaxSends)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -63,7 +152,7 @@ func TestSubmitEnterAndConfirmNoDoubleSubmitOnFastTurn(t *testing.T) {
 	}
 	sendEnter := func() error { enters++; return nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep, submitEnterMaxSends)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -83,7 +172,7 @@ func TestSubmitEnterAndConfirmBestEffortWhenNeverBusy(t *testing.T) {
 	busy := func() (bool, error) { return false, nil }
 	sendEnter := func() error { enters++; return nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep, submitEnterMaxSends)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -93,6 +182,8 @@ func TestSubmitEnterAndConfirmBestEffortWhenNeverBusy(t *testing.T) {
 	if enters != submitEnterMaxSends {
 		t.Fatalf("enters = %d, want %d (bounded best-effort sends)", enters, submitEnterMaxSends)
 	}
+	t.Run("accepted Codex turn with late busy footer", testSubmitKeepsAcceptedTurnWhenBusyIsLate)
+	t.Run("actual nudge with drained composer and late busy footer", testNudgeKeepsDrainedCodexTurnWhenBusyIsLate)
 }
 
 // TestSubmitEnterAndConfirmClearsStaleSendError proves a transient first-send
@@ -110,7 +201,7 @@ func TestSubmitEnterAndConfirmClearsStaleSendError(t *testing.T) {
 	}
 	busy := func() (bool, error) { return false, nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep, submitEnterMaxSends)
 	if err != nil {
 		t.Fatalf("err = %v, want nil (later send succeeded)", err)
 	}
@@ -130,7 +221,7 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 	sendEnter := func() error { enters++; return sendErr }
 	busy := func() (bool, error) { return false, nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep, submitEnterMaxSends)
 	if confirmed {
 		t.Fatal("confirmed = true, want false")
 	}

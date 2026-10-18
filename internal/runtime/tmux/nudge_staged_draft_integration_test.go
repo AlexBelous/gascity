@@ -111,8 +111,8 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 
 	// CONTROL: the same eaten submits, but the draft is short enough to show
 	// inline, so no staged-draft marker is on screen. Recovery must not fire:
-	// exactly the ordinary window's submits reach the pane and the verdict
-	// stays unconfirmed, as before the fix.
+	// only the initial Codex submit reaches the pane and the verdict stays
+	// unconfirmed rather than repeating Escape against an ambiguous turn.
 	t.Run("no staged-draft marker: no extra submits", func(t *testing.T) {
 		tm, logPath := start(t, "gcstageddraftnone", submitEnterMaxSends+2, 100*time.Millisecond)
 
@@ -120,8 +120,8 @@ func TestNudgeRecoversStagedDraftSwallowedByPasteIngest(t *testing.T) {
 		if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 			t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
 		}
-		if got := count(t, logPath, "SWALLOWED"); got != submitEnterMaxSends {
-			t.Fatalf("TUI saw %d submits, want exactly the ordinary window's %d", got, submitEnterMaxSends)
+		if got := count(t, logPath, "SWALLOWED"); got != 1 {
+			t.Fatalf("TUI saw %d submits, want exactly one initial submit", got)
 		}
 		if got := count(t, logPath, "SUBMIT"); got != 0 {
 			t.Fatalf("TUI submits = %d, want 0", got)

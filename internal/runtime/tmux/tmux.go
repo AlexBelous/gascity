@@ -74,9 +74,9 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // would put Escape-Escape into the pane, which codex binds to
 // backtrack/edit-previous rather than to submit. Declaring it here (instead of
 // dropping codex from the skip list, which would produce the same two keystrokes
-// today) also keeps the pair RETRYABLE as a unit: sendNudgeSubmitSequence is what
-// the submit-confirm loop and the best-effort fallback re-send, and a re-sent
-// bare Enter would be swallowed exactly like the first one.
+// today) also keeps the pair together for staged-draft recovery: a re-sent bare
+// Enter could be swallowed exactly like the first one. Recovery repeats the pair
+// only while the composer positively shows the unsubmitted draft.
 //
 // This table does NOT yet contain an entry for the claude-specific stall
 // this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
@@ -2283,12 +2283,10 @@ const (
 	submitReEnterBackoff      = 200 * time.Millisecond
 )
 
-// submitEnterAndConfirm sends the provider's submit key sequence (see
-// nudgeSubmitKeySequences — a single Enter for every family this fork has
-// verified so far) and confirms the message submitted by observing the
-// agent transition to its busy/processing state. It re-sends the sequence
-// only while the pane remains idle (submission not yet observed), so a turn
-// that already started can never receive a second submit.
+// submitEnterAndConfirm sends the provider's submit key sequence up to maxSends
+// times and confirms delivery by observing the agent's busy indicator. Callers
+// whose sequence can interrupt a turn must pass one: missing busy evidence does
+// not prove a previously submitted turn stayed idle.
 //
 // Returns:
 //   - (true, nil)  — the agent went busy: the message submitted.
@@ -2300,9 +2298,9 @@ const (
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, error) {
+func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration), maxSends int) (bool, error) {
 	var lastErr error
-	for send := 0; send < submitEnterMaxSends; send++ {
+	for send := 0; send < maxSends; send++ {
 		if send > 0 {
 			// Re-confirm the pane is still idle before re-sending. A turn that
 			// already submitted (busy) must never receive a second Enter.
@@ -2738,21 +2736,18 @@ func (t *Tmux) nudgeSession(
 	// (recoverStagedDraft). Providers without a reliable indicator keep
 	// best-effort delivery.
 	submitKeys := submitKeySequence(target)
-	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
-	// Escape is only safe to repeat while the pane is still idle. If the first
-	// attempt actually submitted and the pane went busy, a re-sent Escape is an
-	// INTERRUPT for the very TUIs that need the Escape (codex reads it as
-	// cancel), so a retry could kill the turn it just started. submitEnterAndConfirm
-	// re-checks busy before every re-send, which is why the verified path is safe
-	// — and why codex is on it (submitVerifyEligibleFamilies). The best-effort
-	// fallback below and NudgePane's retry loop do NOT re-check; they are safe
-	// only for single-key (plain Enter) sequences, which is what every family
-	// without a table entry has. Adding a multi-key entry for a family that is
-	// not submit-verify eligible would need that gap closed first.
+	// A cold Codex turn can accept its input before its busy footer renders.
+	// Repeating Escape then Enter in that gap interrupts the accepted turn.
+	// Such sequences get one initial send; recoverStagedDraft below may repeat
+	// them only while the unsubmitted draft is positively visible.
+	maxSends := submitEnterMaxSends
+	if len(submitKeys) > 1 && submitKeys[0] == "Escape" {
+		maxSends = 1
+	}
 	sendSubmit := func() error { return t.sendNudgeSubmitSequence(target, submitKeys) }
 	wake := func() { t.WakePaneIfDetached(session) }
 	if t.submitVerifyEligible(target) {
-		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep)
+		confirmed, err := submitEnterAndConfirm(sendSubmit, wake, func() (bool, error) { return t.paneBusy(target) }, time.Sleep, maxSends)
 		if err != nil {
 			return fmt.Errorf("failed to send submit sequence: %w", err)
 		}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/herdr/herdrtest"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
@@ -53,9 +54,10 @@ func TestOwnedNativeScopeLinuxIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = sp.Stop(info.SessionName) }()
-	deadline := time.Now().Add(2 * time.Second)
 	var seen nativeCapacitySeat
-	for time.Now().Before(deadline) {
+	// Poll is the existing bounded live-boundary condition waiter. It does
+	// not invoke herdr; this fixture still owns only its isolated tmux scope.
+	herdrtest.Poll(t, "actual scope witness", 2*time.Second, func() (bool, string) {
 		if err := withNativeCapacityLedger(context.Background(), city, c, host, func(l *nativeCapacityLedger) error {
 			refreshNativeSeats(l, host, time.Now())
 			seen = l.Seats[info.ID]
@@ -63,32 +65,25 @@ func TestOwnedNativeScopeLinuxIntegration(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if seen.State == "active" && seen.CgroupPath != "" {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+		return seen.State == "active" && seen.CgroupPath != "", fmt.Sprintf("state=%s cgroup=%q", seen.State, seen.CgroupPath)
+	})
 	if seen.State != "active" || !seen.LaunchFinalized || seen.CgroupPath == "" {
 		t.Fatalf("actual scope never witnessed: state=%s finalized=%v", seen.State, seen.LaunchFinalized)
 	}
 	if observed, err := host.Observe(seen); err != nil || !observed.Populated {
 		t.Fatalf("actual owned model not contained: populated=%v err=%v", observed.Populated, err)
 	}
-	deadline = time.Now().Add(2500 * time.Millisecond)
-	for sp.IsRunning(info.SessionName) && time.Now().Before(deadline) {
-		time.Sleep(25 * time.Millisecond)
-	}
-	if sp.IsRunning(info.SessionName) {
-		t.Fatal("owned model stand-in did not exit on time")
-	}
+	herdrtest.Poll(t, "owned model stand-in exit", 2500*time.Millisecond, func() (bool, string) {
+		running := sp.IsRunning(info.SessionName)
+		return !running, fmt.Sprintf("pane running=%v", running)
+	})
 	if observed, err := host.Observe(seen); err != nil || !observed.Populated {
 		t.Fatalf("detached child disappeared from owned accounting: populated=%v err=%v", observed.Populated, err)
 	}
 	// A lost provider row is not the release proof. Wait for the actual exact
 	// cgroup to empty/remove; its durable seat is retired only by that proof.
-	deadline = time.Now().Add(7 * time.Second)
-	retired := false
-	for time.Now().Before(deadline) {
+	herdrtest.Poll(t, "completed actual model scope retirement", 7*time.Second, func() (bool, string) {
+		retired := false
 		if err := withNativeCapacityLedger(context.Background(), city, c, host, func(l *nativeCapacityLedger) error {
 			refreshNativeSeats(l, host, time.Now())
 			_, present := l.Seats[info.ID]
@@ -97,14 +92,8 @@ func TestOwnedNativeScopeLinuxIntegration(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if retired {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if !retired {
-		t.Fatal("completed actual model scope did not release seat")
-	}
+		return retired, fmt.Sprintf("seat retired=%v", retired)
+	})
 	final := readNativeTestLedger(t, city)
 	if len(final.Seats) != 0 || len(final.Retired) != 1 || final.Retired[0].SessionID != info.ID {
 		t.Fatal("actual scope retirement missing")

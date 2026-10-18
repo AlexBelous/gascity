@@ -3,10 +3,10 @@ package tmux
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -46,9 +46,16 @@ func TestManagedScopeWrapsFinalModelArgumentsAndLiteralPrompt(t *testing.T) {
 			if len(args) < 4 || args[len(args)-3] != "sh" || args[len(args)-2] != "-c" {
 				t.Fatalf("not actual model command enclosure: %q", args)
 			}
-			cmd := exec.CommandContext(context.Background(), "sh", "-c", call.command)
-			cmd.Env = append(os.Environ(), "CI=1", "NO_COLOR=1", "DOLLAR=must-not-expand", "NO_EXPAND=must-not-expand", "BASE_LITERAL=must-not-expand")
-			out, err := cmd.CombinedOutput()
+			// Reuse the provider's bounded real shell executor rather than
+			// adding another subprocess runner just for the argv spy.
+			outPath := filepath.Join(dir, "model-argv.txt")
+			runner := &tmuxStartOps{tm: &Tmux{}}
+			if err := runner.runSetupCommand(context.Background(), call.command+" > "+shellquote.Quote(outPath), map[string]string{
+				"CI": "1", "NO_COLOR": "1", "DOLLAR": "must-not-expand", "NO_EXPAND": "must-not-expand", "BASE_LITERAL": "must-not-expand",
+			}, 5*time.Second); err != nil {
+				t.Fatal(err)
+			}
+			out, err := os.ReadFile(outPath)
 			if err != nil || string(out) != want {
 				t.Fatalf("model argv changed: err=%v got=%q want=%q", err, out, want)
 			}

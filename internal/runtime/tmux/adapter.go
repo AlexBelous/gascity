@@ -296,6 +296,9 @@ func (p *Provider) Interrupt(name string) error {
 	return err
 }
 
+// SupportsCommandScope reports that the actual model command is launched locally.
+func (p *Provider) SupportsCommandScope(_ string) bool { return true }
+
 // IsRunning reports whether the named session has a live (non-dead) pane.
 // Uses a short-lived cache (default 2s TTL) backed by a single
 // `tmux list-panes -a` call instead of per-session HasSession + IsPaneDead
@@ -1893,7 +1896,20 @@ func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFil
 	default:
 		fullCommand += " " + cfg.PromptSuffix
 	}
-	return wrapInteractiveColorEnv(fullCommand, unsetColorEnv), promptFile, nil
+	fullCommand = wrapInteractiveColorEnv(fullCommand, unsetColorEnv)
+	if cfg.CommandScope != nil {
+		scope := cfg.CommandScope
+		if !filepath.IsAbs(scope.Launcher) || !strings.HasPrefix(scope.Unit, "gc-managed-") || !strings.HasSuffix(scope.Unit, ".scope") || strings.ContainsAny(scope.Unit, "/\x00\r\n\t ") {
+			return "", promptFile, fmt.Errorf("managed command scope invalid")
+		}
+		if len(scope.EntryCommand) == 0 || !filepath.IsAbs(scope.EntryCommand[0]) {
+			return "", promptFile, fmt.Errorf("managed command entry unavailable")
+		}
+		args := []string{scope.Launcher, "--user", "--scope", "--unit=" + scope.Unit, "--collect", "--quiet", "--no-ask-password", "--expand-environment=no", "--"}
+		args = append(args, scope.EntryCommand...)
+		fullCommand = shellquote.Join(append(args, "sh", "-c", fullCommand))
+	}
+	return fullCommand, promptFile, nil
 }
 
 func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {

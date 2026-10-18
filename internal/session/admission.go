@@ -50,6 +50,11 @@ func capacityReservationKey(route, sessionID string, store beads.Store) (string,
 // reservation expiry: retrying too early could produce a second process from
 // one admission after an ambiguous provider start.
 func ClaimCapacityStart(cityPath, route, sessionID string, now time.Time, sp runtime.Provider, store beads.Store) (bool, string) {
+	if enabled, err := NativeManagedAdmission(cityPath, route); err != nil {
+		return false, "capacity_scope_invalid"
+	} else if enabled {
+		return false, "native_capacity_requires_runtime_boundary"
+	}
 	return claimCapacityStart(cityPath, route, sessionID, now, sp, store, nil)
 }
 

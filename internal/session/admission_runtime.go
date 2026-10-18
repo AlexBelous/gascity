@@ -21,12 +21,17 @@ type capacityAdmissionProof struct {
 	city, route, id  string
 	minted, deadline time.Time
 	used             atomic.Bool
+	native           *nativeCapacityProof
 }
 
 // AdmitCapacityStart spends at most one SID grant before start preparation.
 // The returned context carries an opaque one-shot proof for that same attempt.
 // Unmanaged targets and cities with no scheduler retain existing behavior.
 func AdmitCapacityStart(ctx context.Context, city, route, id string, now time.Time, sp runtime.Provider, store beads.Store) (context.Context, bool, string) {
+	return admitCapacityStartWithHost(ctx, city, route, id, now, sp, store, newNativeCapacityHost())
+}
+
+func admitCapacityStartWithHost(ctx context.Context, city, route, id string, now time.Time, sp runtime.Provider, store beads.Store, host nativeCapacityHost) (context.Context, bool, string) {
 	if proof, ok := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok {
 		if !pathutil.SamePath(city, proof.city) || route != proof.route || id != proof.id {
 			return ctx, false, "capacity_claim_identity_mismatch"
@@ -34,10 +39,22 @@ func AdmitCapacityStart(ctx context.Context, city, route, id string, now time.Ti
 		if proof.used.Load() {
 			return ctx, false, "capacity_session_already_claimed"
 		}
-		if now.Before(proof.minted) || now.After(proof.deadline) {
+		if proof.native == nil && (now.Before(proof.minted) || now.After(proof.deadline)) {
 			return ctx, false, "capacity_census_stale"
 		}
 		return ctx, true, "capacity_grant_prepared"
+	}
+	c, nativeMode, err := readNativeCapacityConfig(city)
+	if err != nil {
+		return ctx, false, "capacity_scope_invalid"
+	}
+	if nativeMode && managedCapacityRoute(route, c.Queue.Exact, c.Queue.Prefixes) {
+		native, err := claimNativeCapacityStart(ctx, city, route, id, now, c, host, sp, store)
+		if err != nil {
+			return ctx, false, err.Error()
+		}
+		proof := &capacityAdmissionProof{city: city, route: route, id: id, minted: now, native: native}
+		return context.WithValue(ctx, capacityAdmissionKey{}, proof), true, "native_capacity_reserved"
 	}
 	var deadline time.Time
 	allowed, reason := claimCapacityStart(city, route, id, now, sp, store, &deadline)
@@ -76,8 +93,28 @@ func (m *Manager) startRuntime(ctx context.Context, name string, cfg runtime.Con
 	if err != nil {
 		return err
 	}
-	if proof, ok := admitted.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok && !proof.used.CompareAndSwap(false, true) {
-		return CapacityAdmissionError("capacity_session_already_claimed")
+	if proof, ok := admitted.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok {
+		if !proof.used.CompareAndSwap(false, true) {
+			return CapacityAdmissionError("capacity_session_already_claimed")
+		}
+		if proof.native != nil {
+			cfg, err = beginNativeCapacityStart(admitted, proof, name, cfg)
+			if err != nil {
+				return errors.Join(CapacityAdmissionError(err.Error()), abandonNativeReservedSeat(proof))
+			}
+			startErr := m.sp.Start(admitted, name, cfg)
+			// Persistence after a canceled provider call still matters. A failed
+			// finalization leaves the durable launch-in-flight seat occupied.
+			finalCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			stopCancellation := context.AfterFunc(admitted, cancel)
+			defer stopCancellation()
+			finalErr := finishNativeCapacityStart(finalCtx, proof, startErr, m.now().UTC())
+			if finalErr != nil {
+				return errors.Join(startErr, CapacityAdmissionError(finalErr.Error()))
+			}
+			return errors.Join(startErr, finalErr)
+		}
 	}
 	return m.sp.Start(admitted, name, cfg)
 }

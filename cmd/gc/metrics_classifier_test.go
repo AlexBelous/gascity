@@ -84,6 +84,7 @@ func TestClassifyProductMetricsCommandCanonicalMatrix(t *testing.T) {
 		{name: "invalid known bool beats help", args: []string{"status", "--json=bogus", "--help"}, wantID: productMetricsGeneratedCommandID163, recording: productMetricsRecordingRecordable},
 		{name: "invalid duration beats help", args: []string{"stop", "--timeout", "bogus", "--help"}, wantID: productMetricsGeneratedCommandID164, recording: productMetricsRecordingRecordable},
 		{name: "user completion", args: []string{"completion", "bash"}, wantID: productMetricsGeneratedCommandID20, recording: productMetricsRecordingRecordable},
+		{name: "private managed model entry", args: []string{"session", "capacity-enter", "/private/city", "owned-sid", "attempt", "gc-managed-owned.scope", "--", "sh", "-c", "true"}, recording: productMetricsRecordingExcluded},
 		{name: "private completion", args: []string{"__complete", "status"}, recording: productMetricsRecordingExcluded},
 		{name: "private completion alias", args: []string{"__completeNoDesc", "status"}, recording: productMetricsRecordingExcluded},
 		{name: "private completion after split root scope", args: []string{"--city", "/tmp/city", "__complete", "status"}, recording: productMetricsRecordingExcluded},
@@ -111,6 +112,7 @@ func TestClassifyProductMetricsCommandPolicyMatrix(t *testing.T) {
 		reason    productMetricsExclusionReason
 	}{
 		{name: "ordinary", args: []string{"start"}, notice: productMetricsNoticeEligible, recording: productMetricsRecordingRecordable},
+		{name: "private managed model entry", args: []string{"session", "capacity-enter", "/private/city", "owned-sid", "attempt", "gc-managed-owned.scope", "--", "sh", "-c", "true"}, notice: productMetricsNoticeIneligible, recording: productMetricsRecordingExcluded, reason: productMetricsExclusionHiddenPrivate},
 		{name: "root help before completion is eligible", args: []string{"--help", "completion", "bash"}, notice: productMetricsNoticeEligible, recording: productMetricsRecordingRecordable},
 		{name: "completion group help is ineligible", args: []string{"completion", "--help", "bash"}, notice: productMetricsNoticeIneligible, recording: productMetricsRecordingRecordable},
 		{name: "generic json", args: []string{"start", "--json"}, notice: productMetricsNoticeIneligible, recording: productMetricsRecordingRecordable},

@@ -726,6 +726,12 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // the roots the scan did surface are still killed, and matching the started
 // replacement is impossible because it does not exist yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
+	// A native proof was minted only after the previous exact owned scope was
+	// retired. Its mandatory scope contains this attempt's model descendants;
+	// a second whole-host census is neither needed nor allowed on this path.
+	if proof, ok := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok && proof.native != nil && proof.city == m.cityPath && proof.id == sessionID && !proof.used.Load() {
+		return nil
+	}
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
@@ -1048,7 +1054,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
 		if err := m.startRuntime(ctx, sessName, cfg); err != nil {
-			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
+			if !runtime.IsProviderCapacity(err) && runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
 				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
 					return metaErr
 				}
@@ -1289,85 +1295,87 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		if err != nil {
 			return err
 		}
-		// Closed beads are terminal; mutating lifecycle metadata after
-		// close produces impossible status=closed + live-state rows.
-		if b.Status == "closed" {
-			return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
-		}
-		current := State(b.Metadata["state"])
-		if current == StateSuspended {
-			// Older direct-suspend paths persisted only state=suspended. Repair
-			// those records in place so a supervisor restart cannot interpret
-			// ordinary demand as permission to wake an operator-held session.
-			return m.persistSuspensionHold(id, b.Metadata["suspended_at"] == "")
-		}
-		// failed-create is a create-rollback terminal state: the create never
-		// reached creation_complete, so there is no live turn to suspend — only
-		// a possibly-leaked runtime process to tear down. `gc stop` issues
-		// suspend on every session bead (no state pre-filter), and under a
-		// backing-store outage the reconciler cannot reap failed-create beads
-		// (its close path requires a reachable store), so suspend is the only
-		// thing that can clear the leaked process. Tear the runtime down
-		// best-effort and report success rather than rejecting with an
-		// illegal-transition error that blocks `gc stop` city-wide (#2597). The
-		// bead is left in failed-create for the reconciler to reap once the
-		// store is reachable again.
-		//
-		// Limitation: explicit-named beads whose rollback already cleared
-		// session_name (rollbackPendingCreate in
-		// cmd/gc/session_lifecycle_parallel.go) fall back to the synthetic
-		// sessionNameFor(id) here, so this Stop targets the synthetic name
-		// rather than the original explicit name and the leak under the
-		// original name persists. That is a strict improvement over the pre-fix
-		// state (suspend rejected outright, runtime leaked, `gc stop` blocked
-		// city-wide); preserving the original name across rollback for cleanup
-		// is tracked as follow-up.
-		if current == StateFailedCreate {
-			if strings.TrimSpace(sessName) != "" {
-				_ = m.sp.Stop(sessName) // best-effort: tear down any leaked runtime
+		return m.withNativeCapacityTeardown(id, b.Metadata["template"], func() error {
+			// Closed beads are terminal; mutating lifecycle metadata after
+			// close produces impossible status=closed + live-state rows.
+			if b.Status == "closed" {
+				return &IllegalTransitionError{From: StateClosed, Command: CmdSuspend}
 			}
-			return nil
-		}
-		// draining is the same shape of problem as failed-create above, but only
-		// for the SHUTDOWN sweep: `gc stop` and `gc restart` issue suspend on every
-		// session bead with no state pre-filter, so rejecting draining with an
-		// illegal-transition error made every restart SKIP the draining seats. They
-		// survived as live panes still holding their pool slot names, which is
-		// precisely what starves the pool (ga-rxhu2).
-		//
-		// Scoped to the sweep on purpose. A targeted operator suspend of a draining
-		// seat still returns the illegal transition: the arm below has none of the
-		// gates the reconciler's terminal escalation insists on for the same class
-		// of kill (no assigned-work probe, no token fence, no confirm-dead), so
-		// letting an operator reach it would turn POST /suspend into an ungated
-		// mid-drain kill that reports success while the row stays draining and
-		// CmdWake cannot bring it back.
-		//
-		// The early return deliberately writes NO state. A drain is not a
-		// suspension: `state` stays draining so the drain machinery can finish it
-		// or the reconciler can reap it, and the drain reason survives the stop.
-		// For the same reason this is NOT a StateDraining -> StateSuspended edge in
-		// the transition table — suspended is still an OPEN row, so the edge would
-		// release no pool name while silently losing the drain. Only a close frees
-		// the name, and CmdClose is already legal from draining.
-		if current == StateDraining && intent == suspendIntentShutdown {
-			return m.tearDownRuntimeForSuspend(sessName)
-		}
-		// Normalize legacy/aliased states (empty and awake both mean active)
-		// after the failed-create pre-check above, preserving closed-guard-
-		// first ordering.
-		current = canonicalLifecycleState(current)
-		if _, err := Transition(current, CmdSuspend); err != nil {
-			return err
-		}
+			current := State(b.Metadata["state"])
+			if current == StateSuspended {
+				// Older direct-suspend paths persisted only state=suspended. Repair
+				// those records in place so a supervisor restart cannot interpret
+				// ordinary demand as permission to wake an operator-held session.
+				return m.persistSuspensionHold(id, b.Metadata["suspended_at"] == "")
+			}
+			// failed-create is a create-rollback terminal state: the create never
+			// reached creation_complete, so there is no live turn to suspend — only
+			// a possibly-leaked runtime process to tear down. `gc stop` issues
+			// suspend on every session bead (no state pre-filter), and under a
+			// backing-store outage the reconciler cannot reap failed-create beads
+			// (its close path requires a reachable store), so suspend is the only
+			// thing that can clear the leaked process. Tear the runtime down
+			// best-effort and report success rather than rejecting with an
+			// illegal-transition error that blocks `gc stop` city-wide (#2597). The
+			// bead is left in failed-create for the reconciler to reap once the
+			// store is reachable again.
+			//
+			// Limitation: explicit-named beads whose rollback already cleared
+			// session_name (rollbackPendingCreate in
+			// cmd/gc/session_lifecycle_parallel.go) fall back to the synthetic
+			// sessionNameFor(id) here, so this Stop targets the synthetic name
+			// rather than the original explicit name and the leak under the
+			// original name persists. That is a strict improvement over the pre-fix
+			// state (suspend rejected outright, runtime leaked, `gc stop` blocked
+			// city-wide); preserving the original name across rollback for cleanup
+			// is tracked as follow-up.
+			if current == StateFailedCreate {
+				if strings.TrimSpace(sessName) != "" {
+					_ = m.sp.Stop(sessName) // best-effort: tear down any leaked runtime
+				}
+				return nil
+			}
+			// draining is the same shape of problem as failed-create above, but only
+			// for the SHUTDOWN sweep: `gc stop` and `gc restart` issue suspend on every
+			// session bead with no state pre-filter, so rejecting draining with an
+			// illegal-transition error made every restart SKIP the draining seats. They
+			// survived as live panes still holding their pool slot names, which is
+			// precisely what starves the pool (ga-rxhu2).
+			//
+			// Scoped to the sweep on purpose. A targeted operator suspend of a draining
+			// seat still returns the illegal transition: the arm below has none of the
+			// gates the reconciler's terminal escalation insists on for the same class
+			// of kill (no assigned-work probe, no token fence, no confirm-dead), so
+			// letting an operator reach it would turn POST /suspend into an ungated
+			// mid-drain kill that reports success while the row stays draining and
+			// CmdWake cannot bring it back.
+			//
+			// The early return deliberately writes NO state. A drain is not a
+			// suspension: `state` stays draining so the drain machinery can finish it
+			// or the reconciler can reap it, and the drain reason survives the stop.
+			// For the same reason this is NOT a StateDraining -> StateSuspended edge in
+			// the transition table — suspended is still an OPEN row, so the edge would
+			// release no pool name while silently losing the drain. Only a close frees
+			// the name, and CmdClose is already legal from draining.
+			if current == StateDraining && intent == suspendIntentShutdown {
+				return m.tearDownRuntimeForSuspend(sessName)
+			}
+			// Normalize legacy/aliased states (empty and awake both mean active)
+			// after the failed-create pre-check above, preserving closed-guard-
+			// first ordering.
+			current = canonicalLifecycleState(current)
+			if _, err := Transition(current, CmdSuspend); err != nil {
+				return err
+			}
 
-		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
-			return err
-		}
+			if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+				return err
+			}
 
-		// Update state and suspension timestamp together so stores with a
-		// write-through cache preserve one coherent lifecycle transition.
-		return m.persistSuspensionHold(id, true)
+			// Update state and suspension timestamp together so stores with a
+			// write-through cache preserve one coherent lifecycle transition.
+			return m.persistSuspensionHold(id, true)
+		})
 	})
 }
 
@@ -1456,49 +1464,51 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 		if err != nil {
 			return err
 		}
-		if b.Status == "closed" {
+		return m.withNativeCapacityTeardown(id, b.Metadata["template"], func() error {
+			if b.Status == "closed" {
+				_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
+				return nil // idempotent: already closed
+			}
+			// CmdClose is legal from any non-none state; this is effectively a
+			// documentation check that will catch future table changes. The
+			// canonicalizer treats empty metadata state as StateActive for
+			// bootstrap beads and the reconciler's StateAwake alias as StateActive
+			// so already-awake beads can close cleanly.
+			current := canonicalLifecycleState(State(b.Metadata["state"]))
+			if _, err := Transition(current, CmdClose); err != nil {
+				return err
+			}
+
+			// Stop the live runtime before marking the bead closed. Stop is
+			// idempotent for an already-gone session (returns nil), which also lets
+			// auto.Provider discard stale ACP route entries for suspended sessions.
+			// A genuine terminate failure must propagate and leave the bead open
+			// rather than report a "closed but still running" session — swallowing
+			// it here previously masked exactly that wedge.
+			if err := m.sp.Stop(sessName); err != nil {
+				return fmt.Errorf("stopping runtime for session %s: %w", id, err)
+			}
+			nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
+			if err != nil {
+				log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
+			}
+			if capped {
+				log.Printf("session %s: closing after capped wait cancellation lookup", id)
+			}
+			result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
+			if err := m.clearWakeAndHoldOverrides(id); err != nil {
+				return err
+			}
+			if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
+				return err
+			}
+
+			if err := m.store.Close(id); err != nil {
+				return err
+			}
 			_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
-			return nil // idempotent: already closed
-		}
-		// CmdClose is legal from any non-none state; this is effectively a
-		// documentation check that will catch future table changes. The
-		// canonicalizer treats empty metadata state as StateActive for
-		// bootstrap beads and the reconciler's StateAwake alias as StateActive
-		// so already-awake beads can close cleanly.
-		current := canonicalLifecycleState(State(b.Metadata["state"]))
-		if _, err := Transition(current, CmdClose); err != nil {
-			return err
-		}
-
-		// Stop the live runtime before marking the bead closed. Stop is
-		// idempotent for an already-gone session (returns nil), which also lets
-		// auto.Provider discard stale ACP route entries for suspended sessions.
-		// A genuine terminate failure must propagate and leave the bead open
-		// rather than report a "closed but still running" session — swallowing
-		// it here previously masked exactly that wedge.
-		if err := m.sp.Stop(sessName); err != nil {
-			return fmt.Errorf("stopping runtime for session %s: %w", id, err)
-		}
-		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(id, time.Now().UTC())
-		if err != nil {
-			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
-		}
-		if capped {
-			log.Printf("session %s: closing after capped wait cancellation lookup", id)
-		}
-		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		if err := m.clearWakeAndHoldOverrides(id); err != nil {
-			return err
-		}
-		if err := m.retireConfiguredNamedSessionIdentifiers(id, b); err != nil {
-			return err
-		}
-
-		if err := m.store.Close(id); err != nil {
-			return err
-		}
-		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
-		return nil
+			return nil
+		})
 	})
 	return result, err
 }

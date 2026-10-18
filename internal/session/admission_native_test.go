@@ -323,7 +323,7 @@ func TestNativeProofStartsExactlyOnceWithoutSnapshotOrScanner(t *testing.T) {
 	}
 }
 
-func TestNativeOldProtocolUnwitnessedStartRetainsSeatAcrossRestart(t *testing.T) {
+func TestNativeFailedOrNeverWitnessedStartRetainsSeatAcrossRestart(t *testing.T) {
 	for _, failed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "fast-exit-before-witness", true: "failed-and-late-launch"}[failed], func(t *testing.T) {
 			city, c, host, sp, store := nativeTestFixture(t, 2)

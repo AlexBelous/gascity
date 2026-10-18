@@ -1629,6 +1629,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// ga-ebb62d). The ctx param may legitimately be nil here, so the metric
 	// uses context.Background().
 	startedThisTick := 0
+	if err := sessionpkg.RefreshNativeCapacity(ctx, cityPath, clk.Now().UTC()); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: refreshing owned capacity: %v\n", err) //nolint:errcheck
+	}
 	defer func() {
 		telemetry.RecordReconcileCycle(context.Background(), startedThisTick)
 	}()

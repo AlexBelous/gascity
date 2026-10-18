@@ -214,6 +214,19 @@ func TestParsePruneDuration(t *testing.T) {
 	}
 }
 
+func TestSessionCapacityEntryRefusesBeforeExecutingModel(t *testing.T) {
+	city := t.TempDir()
+	marker := filepath.Join(city, "model-must-not-run")
+	cmd := newSessionCapacityEnterCmd()
+	cmd.SetArgs([]string{city, "owned-sid", "attempt", "gc-managed-owned.scope", "--", "/bin/sh", "-c", "touch " + marker})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("missing admission authority executed the model")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("model ran before entry acknowledgement: %v", err)
+	}
+}
+
 func TestSessionCapacityContractReportsExactDedicatedReservation(t *testing.T) {
 	clearGCEnv(t)
 	clearInheritedCityRoutingEnv(t)

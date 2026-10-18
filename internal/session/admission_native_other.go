@@ -26,3 +26,7 @@ func (unsupportedNativeCapacityHost) Command(string) (runtime.CommandScope, erro
 func (unsupportedNativeCapacityHost) Observe(nativeCapacitySeat) (nativeScopeObservation, error) {
 	return nativeScopeObservation{}, fmt.Errorf("native managed admission requires Linux cgroup2")
 }
+
+func (unsupportedNativeCapacityHost) SelfScope(string) (nativeScopeObservation, error) {
+	return nativeScopeObservation{}, fmt.Errorf("native managed admission requires Linux cgroup2")
+}

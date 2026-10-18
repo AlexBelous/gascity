@@ -188,7 +188,31 @@ func (linuxNativeCapacityHost) Command(unit string) (runtime.CommandScope, error
 	if err != nil || n < 254 {
 		return runtime.CommandScope{}, fmt.Errorf("native scope launcher lacks literal argument support")
 	}
-	return runtime.CommandScope{Launcher: binary, Unit: unit}, nil
+	executable, err := os.Executable()
+	if err != nil || !filepath.IsAbs(executable) {
+		return runtime.CommandScope{}, fmt.Errorf("native entry executable unavailable")
+	}
+	return runtime.CommandScope{Launcher: binary, Unit: unit, EntryCommand: []string{executable}}, nil
+}
+
+func (host linuxNativeCapacityHost) SelfScope(unit string) (nativeScopeObservation, error) {
+	data, err := nativeBoundedRead("/proc/self/cgroup")
+	if err != nil {
+		return nativeScopeObservation{}, err
+	}
+	group := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "0::") {
+			if group != "" {
+				return nativeScopeObservation{}, fmt.Errorf("native self cgroup ambiguous")
+			}
+			group = strings.TrimPrefix(line, "0::")
+		}
+	}
+	if group == "" || filepath.Base(group) != unit {
+		return nativeScopeObservation{}, fmt.Errorf("native self cgroup mismatch")
+	}
+	return host.observeGroup(nativeCapacitySeat{Unit: unit}, group)
 }
 
 func (linuxNativeCapacityHost) Observe(seat nativeCapacitySeat) (nativeScopeObservation, error) {
@@ -204,6 +228,11 @@ func (linuxNativeCapacityHost) Observe(seat nativeCapacitySeat) (nativeScopeObse
 			return observed, nil
 		} // No positive witness; still occupied.
 	}
+	return linuxNativeCapacityHost{}.observeGroup(seat, group)
+}
+
+func (linuxNativeCapacityHost) observeGroup(seat nativeCapacitySeat, group string) (nativeScopeObservation, error) {
+	var observed nativeScopeObservation
 	if !strings.HasPrefix(group, "/") || filepath.Clean(group) != group || filepath.Base(group) != seat.Unit || strings.ContainsAny(group, "\x00\r\n") {
 		return observed, fmt.Errorf("native scope path invalid")
 	}

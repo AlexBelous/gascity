@@ -107,7 +107,12 @@ func (m *Manager) startRuntime(ctx context.Context, name string, cfg runtime.Con
 			// finalization leaves the durable launch-in-flight seat occupied.
 			finalCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
+			stopCancellation := context.AfterFunc(admitted, cancel)
+			defer stopCancellation()
 			finalErr := finishNativeCapacityStart(finalCtx, proof, startErr, m.now().UTC())
+			if finalErr != nil {
+				return errors.Join(startErr, CapacityAdmissionError(finalErr.Error()))
+			}
 			return errors.Join(startErr, finalErr)
 		}
 	}

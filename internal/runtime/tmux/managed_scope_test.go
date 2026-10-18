@@ -18,6 +18,10 @@ func TestManagedScopeWrapsFinalModelArgumentsAndLiteralPrompt(t *testing.T) {
 			dir := t.TempDir()
 			launcher := filepath.Join(dir, "systemd-run")
 			model := filepath.Join(dir, "codex")
+			entry := filepath.Join(dir, "gc-entry")
+			if err := os.WriteFile(entry, []byte("#!/bin/sh\n[ \"$1\" = exact-attempt ] || exit 97\nshift\nexec \"$@\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
 			// This is a tiny argv-preserving launcher spy, not a systemd/model
 			// process. It rejects omission of the dollar-expansion protection.
 			launchScript := "#!/bin/sh\nexpand=no\nfor arg do [ \"$arg\" != --expand-environment=no ] || expand=yes; done\n[ \"$expand\" = yes ] || exit 98\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n"
@@ -31,7 +35,7 @@ func TestManagedScopeWrapsFinalModelArgumentsAndLiteralPrompt(t *testing.T) {
 			if shape == "long-file" {
 				prompt = strings.Repeat(prompt+";", 40)
 			}
-			cfg := runtime.Config{WorkDir: dir, Command: shellquote.Quote(model) + " --base " + shellquote.Quote("$BASE_LITERAL"), PromptFlag: "--prompt", PromptSuffix: shellquote.Quote(prompt), CommandScope: &runtime.CommandScope{Launcher: launcher, Unit: "gc-managed-owned-argument-test.scope"}}
+			cfg := runtime.Config{WorkDir: dir, Command: shellquote.Quote(model) + " --base " + shellquote.Quote("$BASE_LITERAL"), PromptFlag: "--prompt", PromptSuffix: shellquote.Quote(prompt), CommandScope: &runtime.CommandScope{Launcher: launcher, Unit: "gc-managed-owned-argument-test.scope", EntryCommand: []string{entry, "exact-attempt"}}}
 			want := "--base\n$BASE_LITERAL\n--prompt\n" + prompt + "\ncolor:unset:unset\n"
 			if shape == "no-prompt" {
 				cfg.PromptSuffix = ""
@@ -65,7 +69,7 @@ func TestManagedScopeWrapsFinalModelArgumentsAndLiteralPrompt(t *testing.T) {
 
 func TestManagedScopeDescriptorAlsoWrapsRespawnAndInvalidScopeRefuses(t *testing.T) {
 	ops := &fakeStartOps{hasSessionResult: true}
-	cfg := runtime.Config{Command: "codex --base", PromptFlag: "--prompt", PromptSuffix: shellquote.Quote("${LITERAL}"), CommandScope: &runtime.CommandScope{Launcher: "/usr/bin/systemd-run", Unit: "gc-managed-owned-respawn.scope"}}
+	cfg := runtime.Config{Command: "codex --base", PromptFlag: "--prompt", PromptSuffix: shellquote.Quote("${LITERAL}"), CommandScope: &runtime.CommandScope{Launcher: "/usr/bin/systemd-run", Unit: "gc-managed-owned-respawn.scope", EntryCommand: []string{"/immutable/gc", "session", "capacity-enter", "/city", "sid", "attempt", "unit", "--"}}}
 	if err := doRelaunchSession(context.Background(), ops, "owned-respawn", cfg, DefaultConfig().SetupTimeout); err != nil {
 		t.Fatal(err)
 	}

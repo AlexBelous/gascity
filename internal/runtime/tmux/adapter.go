@@ -1902,7 +1902,12 @@ func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFil
 		if !filepath.IsAbs(scope.Launcher) || !strings.HasPrefix(scope.Unit, "gc-managed-") || !strings.HasSuffix(scope.Unit, ".scope") || strings.ContainsAny(scope.Unit, "/\x00\r\n\t ") {
 			return "", promptFile, fmt.Errorf("managed command scope invalid")
 		}
-		fullCommand = shellquote.Join([]string{scope.Launcher, "--user", "--scope", "--unit=" + scope.Unit, "--collect", "--quiet", "--no-ask-password", "--expand-environment=no", "--", "sh", "-c", fullCommand})
+		if len(scope.EntryCommand) == 0 || !filepath.IsAbs(scope.EntryCommand[0]) {
+			return "", promptFile, fmt.Errorf("managed command entry unavailable")
+		}
+		args := []string{scope.Launcher, "--user", "--scope", "--unit=" + scope.Unit, "--collect", "--quiet", "--no-ask-password", "--expand-environment=no", "--"}
+		args = append(args, scope.EntryCommand...)
+		fullCommand = shellquote.Join(append(args, "sh", "-c", fullCommand))
 	}
 	return fullCommand, promptFile, nil
 }

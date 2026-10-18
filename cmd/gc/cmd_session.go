@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -54,6 +56,7 @@ continuity.`,
 		},
 	}
 	cmd.AddCommand(
+		newSessionCapacityEnterCmd(),
 		newSessionCapacityContractCmd(stdout),
 		newSessionNewCmd(stdout, stderr),
 		newSessionListCmd(stdout, stderr),
@@ -74,6 +77,27 @@ continuity.`,
 		newSessionWaitCmd(stdout, stderr),
 	)
 	return cmd
+}
+
+func newSessionCapacityEnterCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "capacity-enter CITY SID ATTEMPT UNIT -- COMMAND [ARG...]",
+		Hidden: true,
+		Args:   cobra.MinimumNArgs(5),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.ArgsLenAtDash() != 4 {
+				return fmt.Errorf("native capacity entry arguments invalid")
+			}
+			if err := session.EnterNativeCapacityScope(cmd.Context(), args[0], args[1], args[2], args[3]); err != nil {
+				return err
+			}
+			binary, err := exec.LookPath(args[4])
+			if err != nil {
+				return err
+			}
+			return syscall.Exec(binary, args[4:], os.Environ())
+		},
+	}
 }
 
 // This read-only capability handshake lets an external dispatcher fail closed

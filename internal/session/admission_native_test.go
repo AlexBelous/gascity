@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,7 +59,11 @@ func (h *nativeTestHost) Resources(nativeCapacityConfig) error {
 func (h *nativeTestHost) Command(unit string) (runtime.CommandScope, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return runtime.CommandScope{Launcher: "/usr/bin/systemd-run", Unit: unit}, h.commandErr
+	return runtime.CommandScope{Launcher: "/usr/bin/systemd-run", Unit: unit, EntryCommand: []string{"/native-test-gc"}}, h.commandErr
+}
+
+func (h *nativeTestHost) SelfScope(unit string) (nativeScopeObservation, error) {
+	return h.Observe(nativeCapacitySeat{Unit: unit})
 }
 
 func (h *nativeTestHost) Observe(seat nativeCapacitySeat) (nativeScopeObservation, error) {
@@ -82,6 +87,9 @@ type nativeTestProvider struct {
 	started       []runtime.Config
 	registryErr   error
 	registryReads int
+	skipEntry     bool
+	reuseExisting bool
+	beforeSupport func()
 }
 
 func (p *nativeTestProvider) ListRunning(prefix string) ([]string, error) {
@@ -92,11 +100,30 @@ func (p *nativeTestProvider) ListRunning(prefix string) ([]string, error) {
 	return p.Fake.ListRunning(prefix)
 }
 
-func (p *nativeTestProvider) SupportsCommandScope(string) bool { return true }
+func (p *nativeTestProvider) SupportsCommandScope(string) bool {
+	if p.beforeSupport != nil {
+		p.beforeSupport()
+	}
+	return true
+}
+
 func (p *nativeTestProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	p.started = append(p.started, cfg)
+	if p.reuseExisting {
+		if err := p.Fake.Start(ctx, name, cfg); err != nil {
+			return err
+		}
+		return runtime.ErrSessionExists
+	}
 	if p.startErr != nil {
 		return p.startErr
+	}
+	if !p.skipEntry {
+		if proof, ok := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok && proof.native != nil {
+			if err := enterNativeCapacityScope(ctx, proof.city, proof.id, proof.native.attempt, nativeCapacityUnit(proof.city, proof.id, proof.native.attempt), proof.native.host); err != nil {
+				return err
+			}
+		}
 	}
 	return p.Fake.Start(ctx, name, cfg)
 }
@@ -296,7 +323,7 @@ func TestNativeProofStartsExactlyOnceWithoutSnapshotOrScanner(t *testing.T) {
 	}
 }
 
-func TestNativeFailedOrNeverWitnessedStartRetainsSeatAcrossRestart(t *testing.T) {
+func TestNativeOldProtocolUnwitnessedStartRetainsSeatAcrossRestart(t *testing.T) {
 	for _, failed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "fast-exit-before-witness", true: "failed-and-late-launch"}[failed], func(t *testing.T) {
 			city, c, host, sp, store := nativeTestFixture(t, 2)
@@ -306,11 +333,21 @@ func TestNativeFailedOrNeverWitnessedStartRetainsSeatAcrossRestart(t *testing.T)
 				t.Fatal(reason)
 			}
 			host.defaultPopulated = false
-			if failed {
-				sp.startErr = errors.New("ambiguous timeout")
+			proof := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+			if _, err := beginNativeCapacityStart(ctx, proof, b.Metadata["session_name"], runtime.Config{Command: "fake-command"}); err != nil {
+				t.Fatal(err)
 			}
-			mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
-			_ = mgr.startRuntime(ctx, b.Metadata["session_name"], runtime.Config{Command: "fake-command", Env: map[string]string{"GC_SESSION_ID": b.ID, "GC_TEMPLATE": "worker"}})
+			// An actual restored c178 row has no command-entry protocol.
+			if err := withNativeCapacityLedger(ctx, city, c, host, func(l *nativeCapacityLedger) error {
+				seat := l.Seats[b.ID]
+				seat.EntryState = ""
+				seat.State = "ambiguous"
+				seat.LaunchFinalized = !failed
+				l.Seats[b.ID] = seat
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
 			seat := readNativeTestLedger(t, city).Seats[b.ID]
 			if seat.State != "ambiguous" || (failed && seat.LaunchFinalized) {
 				t.Fatalf("uncertain start freed or finalized: %+v", seat)
@@ -480,9 +517,19 @@ func TestNativeUnknownOwnedSeatConsumesOneSeatWithoutVetoingOtherHeadroom(t *tes
 	if !allowed {
 		t.Fatal(reason)
 	}
-	sp.startErr = errors.New("unconfirmed owned attempt")
-	mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
-	_ = mgr.startRuntime(ctx, b.Metadata["session_name"], runtime.Config{Command: "fake-command", Env: map[string]string{"GC_SESSION_ID": b.ID, "GC_TEMPLATE": "worker"}})
+	proof := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+	if _, err := beginNativeCapacityStart(ctx, proof, b.Metadata["session_name"], runtime.Config{Command: "fake-command"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := withNativeCapacityLedger(ctx, city, c, host, func(l *nativeCapacityLedger) error {
+		seat := l.Seats[b.ID]
+		seat.EntryState = ""
+		seat.State = "ambiguous"
+		l.Seats[b.ID] = seat
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	host.observeErr = errors.New("diagnostic unavailable for prior owned scope")
 	other := nativeTestSession(t, store)
 	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", other.ID, time.Now(), c, host, sp, store); err != nil {
@@ -521,5 +568,285 @@ func TestNativeModePreservesUnusedLegacyConfigurationSemantics(t *testing.T) {
 		if allowed, reason := ClaimCapacityStart(city, "protected", "sid", time.Now(), nil, nil); !allowed || reason != "capacity_route_unmanaged" {
 			t.Fatalf("legacy route behavior changed: %v %s", allowed, reason)
 		}
+	}
+}
+
+func TestNativeProviderSuccessWithoutCommandEntryIsNotSuccessfulStart(t *testing.T) {
+	city, _, host, sp, store := nativeTestFixture(t, 0)
+	b := nativeTestSession(t, store)
+	sp.skipEntry = true
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	if !allowed {
+		t.Fatal(reason)
+	}
+	// A provider can return nil after reusing a pre-existing pane. Even a
+	// populated expected scope is not acknowledgement from our command gate.
+	proof := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+	if _, err := beginNativeCapacityStart(ctx, proof, b.Metadata["session_name"], runtime.Config{Command: "fake-command"}); err != nil {
+		t.Fatal(err)
+	}
+	// This timeout is the failed entry handshake being tested, not a timer
+	// racing process startup. No process or goroutine runs in this fixture.
+	deadline, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := finishNativeCapacityStart(deadline, proof, nil, time.Now()); err == nil {
+		t.Fatal("provider transport success became model-entry success without an ACK")
+	}
+	if _, present := readNativeTestLedger(t, city).Seats[b.ID]; present {
+		t.Fatal("sealed unentered attempt leaked capacity")
+	}
+	retired := readNativeTestLedger(t, city).Retired
+	if len(retired) != 1 || retired[0].Reason != "command_entry_revoked_before_model" {
+		t.Fatal("missing honest revocation retirement")
+	}
+	if err := enterNativeCapacityScope(context.Background(), city, b.ID, proof.native.attempt, nativeCapacityUnit(city, b.ID, proof.native.attempt), host); err == nil {
+		t.Fatal("late model entered after cancellation")
+	}
+}
+
+func TestNativeTeardownSerializesTerminalWriteAgainstClaim(t *testing.T) {
+	for _, terminal := range []string{"closed", "suspended"} {
+		for _, cached := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/cache=%v", terminal, cached), func(t *testing.T) {
+				city, c, host, sp, store := nativeTestFixture(t, 0)
+				var claimStore beads.Store = store
+				if cached {
+					claimStore = beads.NewCachingStoreForTest(store, nil)
+				}
+				b := nativeTestSession(t, store)
+				if err := claimStore.SetMetadata(b.ID, "state", "active"); err != nil {
+					t.Fatal(err)
+				}
+				// This deterministic barrier is reached after claim's initial Get but
+				// before it takes the ledger flock, as in an independent CLI process.
+				sp.beforeSupport = func() {
+					err := withNativeCapacityTeardown(context.Background(), city, b.ID, c, host, func() error {
+						if terminal == "closed" {
+							return store.Close(b.ID)
+						}
+						return store.SetMetadata(b.ID, "state", "suspended")
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, claimStore); err == nil {
+					t.Fatal("claim launched the stale target after completed teardown")
+				}
+				if len(readNativeTestLedger(t, city).Seats) != 0 {
+					t.Fatal("terminal target received a late reservation")
+				}
+			})
+		}
+	}
+}
+
+func TestNativeBrokenLedgerDoesNotPreventRuntimeStop(t *testing.T) {
+	for _, route := range []string{"worker", "mayor"} {
+		for _, op := range []string{"close", "suspend"} {
+			t.Run(route+"/"+op, func(t *testing.T) {
+				city, _, _, sp, store := nativeTestFixture(t, 0)
+				b := nativeTestSession(t, store)
+				if err := store.SetMetadataBatch(b.ID, map[string]string{"template": route, "state": "active"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := sp.Fake.Start(context.Background(), b.Metadata["session_name"], runtime.Config{}); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(nativeCapacityPath(city), nativeCapacityPath(city)+".saved"); err != nil {
+					t.Fatal(err)
+				}
+				mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
+				var err error
+				if op == "close" {
+					err = mgr.Close(b.ID)
+				} else {
+					err = mgr.Suspend(b.ID)
+				}
+				if route == "mayor" && err != nil {
+					t.Fatalf("protected target acquired a capacity stop gate: %v", err)
+				}
+				if route == "worker" && err == nil {
+					t.Fatal("managed cancellation uncertainty was hidden")
+				}
+				if sp.IsRunning(b.Metadata["session_name"]) {
+					t.Fatal("capacity ledger failure blocked normal runtime stop")
+				}
+			})
+		}
+	}
+}
+
+func TestNativeCommandEntryIsDurableOneShotAndFastExitRetires(t *testing.T) {
+	city, c, host, sp, store := nativeTestFixture(t, 0)
+	b := nativeTestSession(t, store)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	if !allowed {
+		t.Fatal(reason)
+	}
+	proof := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+	cfg, err := beginNativeCapacityStart(ctx, proof, b.Metadata["session_name"], runtime.Config{Command: "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CommandScope.EntryCommand) < 8 {
+		t.Fatal("scope missing exact immutable entry arguments")
+	}
+	seat := readNativeTestLedger(t, city).Seats[b.ID]
+	var wg sync.WaitGroup
+	results := make(chan error, 8)
+	for range 8 {
+		wg.Go(func() {
+			results <- enterNativeCapacityScope(context.Background(), city, b.ID, seat.Attempt, seat.Unit, host)
+		})
+	}
+	wg.Wait()
+	close(results)
+	entered := 0
+	for err := range results {
+		if err == nil {
+			entered++
+		}
+	}
+	if entered != 1 {
+		t.Fatalf("model entry count=%d", entered)
+	}
+	seat = readNativeTestLedger(t, city).Seats[b.ID]
+	if seat.EntryState != "entered" || !seat.LaunchFinalized || seat.CgroupPath == "" {
+		t.Fatalf("ACK not durable: %+v", seat)
+	}
+	// Simulate process death immediately after the committed ACK, before
+	// provider.Start returns. A restarted refresh needs no observing poll.
+	host.observations[seat.Unit] = nativeScopeObservation{Empty: true}
+	if err := withNativeCapacityLedger(context.Background(), city, c, host, func(l *nativeCapacityLedger) error { refreshNativeSeats(l, host, time.Now()); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := finishNativeCapacityStart(context.Background(), proof, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(readNativeTestLedger(t, city).Seats) != 0 {
+		t.Fatal("fast exit leaked a seat")
+	}
+	if err := enterNativeCapacityScope(context.Background(), city, b.ID, seat.Attempt, seat.Unit, host); err == nil {
+		t.Fatal("retired attempt re-entered")
+	}
+	if _, err := claimNativeCapacityStart(context.Background(), city, "worker", b.ID, time.Now(), c, host, sp, store); err != nil {
+		t.Fatal(err)
+	}
+	if err := enterNativeCapacityScope(context.Background(), city, b.ID, seat.Attempt, seat.Unit, host); err == nil {
+		t.Fatal("old attempt entered replacement seat")
+	}
+}
+
+func TestNativeCommandEntryRequiresOwnScopeAndResourceEvidence(t *testing.T) {
+	for _, failure := range []string{"outside", "resources"} {
+		t.Run(failure, func(t *testing.T) {
+			city, _, host, sp, store := nativeTestFixture(t, 0)
+			b := nativeTestSession(t, store)
+			ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+			if !allowed {
+				t.Fatal(reason)
+			}
+			proof := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+			if _, err := beginNativeCapacityStart(ctx, proof, b.Metadata["session_name"], runtime.Config{Command: "true"}); err != nil {
+				t.Fatal(err)
+			}
+			seat := readNativeTestLedger(t, city).Seats[b.ID]
+			if failure == "outside" {
+				host.observations[seat.Unit] = nativeScopeObservation{Populated: true, CgroupPath: "/tmux-spawn.scope", Device: 1, Inode: 10}
+			} else {
+				host.resourcesErr = errors.New("headroom disappeared while queued")
+			}
+			if err := enterNativeCapacityScope(ctx, city, b.ID, seat.Attempt, seat.Unit, host); err == nil {
+				t.Fatal("unsafe model entry acknowledged")
+			}
+			if readNativeTestLedger(t, city).Seats[b.ID].EntryState != "pending" {
+				t.Fatal("refused entry consumed command authority")
+			}
+		})
+	}
+}
+
+func TestNativeEnteredAttemptSurvivesProviderErrorAndReleasesWithoutDemand(t *testing.T) {
+	city, c, host, sp, store := nativeTestFixture(t, 0)
+	b := nativeTestSession(t, store)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	if !allowed {
+		t.Fatal(reason)
+	}
+	proof := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+	if _, err := beginNativeCapacityStart(ctx, proof, b.Metadata["session_name"], runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	seat := readNativeTestLedger(t, city).Seats[b.ID]
+	if err := enterNativeCapacityScope(ctx, city, b.ID, seat.Attempt, seat.Unit, host); err != nil {
+		t.Fatal(err)
+	}
+	// Transport error after entry cannot revoke the already committed model
+	// or erase its descendants. Restart reads the same consumed authority.
+	if err := finishNativeCapacityStart(ctx, proof, errors.New("connection lost after command entered"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := withNativeCapacityTeardown(ctx, city, b.ID, c, host, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := refreshNativeCapacityWithHost(ctx, city, c, host, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if readNativeTestLedger(t, city).Seats[b.ID].EntryState != "entered" {
+		t.Fatal("entered model lost its durable seat")
+	}
+	host.observations[seat.Unit] = nativeScopeObservation{Empty: true}
+	if err := refreshNativeCapacityWithHost(ctx, city, c, host, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(readNativeTestLedger(t, city).Seats) != 0 {
+		t.Fatal("periodic refresh required another start to release finished scope")
+	}
+}
+
+func TestNativeTeardownReleasesOnlyUnenteredNewProtocol(t *testing.T) {
+	city, c, host, sp, store := nativeTestFixture(t, 0)
+	b := nativeTestSession(t, store)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	if !allowed {
+		t.Fatal(reason)
+	}
+	proof := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+	if _, err := beginNativeCapacityStart(ctx, proof, b.Metadata["session_name"], runtime.Config{Command: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	seat := readNativeTestLedger(t, city).Seats[b.ID]
+	if err := withNativeCapacityTeardown(ctx, city, b.ID, c, host, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := enterNativeCapacityScope(ctx, city, b.ID, seat.Attempt, seat.Unit, host); err == nil {
+		t.Fatal("closed or suspended queued command entered later")
+	}
+	if err := refreshNativeCapacityWithHost(ctx, city, c, host, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(readNativeTestLedger(t, city).Seats) != 0 {
+		t.Fatal("provably revoked new-protocol entry leaked a seat")
+	}
+}
+
+func TestNativeResumeDoesNotConvergeOnUnacknowledgedExistingRuntime(t *testing.T) {
+	city, _, host, sp, store := nativeTestFixture(t, 0)
+	b := nativeTestSession(t, store)
+	ctx, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", b.ID, time.Now(), sp, store, host)
+	if !allowed {
+		t.Fatal(reason)
+	}
+	sp.reuseExisting = true
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
+	if err := mgr.Start(ctx, b.ID, "fake-command", runtime.Config{}); !runtime.IsProviderCapacity(err) {
+		t.Fatalf("uncontained reused runtime became a successful managed resume: %v", err)
+	}
+	if !sp.IsRunning(b.Metadata["session_name"]) {
+		t.Fatal("refusal killed the pre-existing runtime")
+	}
+	if _, present := readNativeTestLedger(t, city).Seats[b.ID]; present {
+		t.Fatal("unentered attempt was not sealed and retired")
 	}
 }

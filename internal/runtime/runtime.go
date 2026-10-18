@@ -757,6 +757,9 @@ const (
 type CommandScope struct {
 	Launcher string
 	Unit     string
+	// EntryCommand is the immutable gc executable and internal entry arguments.
+	// It runs inside the scope and must acknowledge this attempt before the model.
+	EntryCommand []string
 }
 
 // Config holds the parameters for starting a new session.

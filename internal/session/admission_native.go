@@ -141,6 +141,7 @@ type nativeCapacitySeat struct {
 	CgroupPath      string `json:"cgroup_path,omitempty"`
 	CgroupDevice    uint64 `json:"cgroup_device,omitempty"`
 	CgroupInode     uint64 `json:"cgroup_inode,omitempty"`
+	EntryState      string `json:"entry_state,omitempty"`
 }
 
 type nativeCapacityRetirement struct {
@@ -161,6 +162,7 @@ type nativeCapacityHost interface {
 	Resources(nativeCapacityConfig) error
 	Command(string) (runtime.CommandScope, error)
 	Observe(nativeCapacitySeat) (nativeScopeObservation, error)
+	SelfScope(string) (nativeScopeObservation, error)
 }
 
 type nativeCapacityProof struct {
@@ -201,6 +203,12 @@ func validNativeSeat(sid string, seat nativeCapacitySeat, city string, c nativeC
 	if seat.State != "reserved" && seat.State != "launching" && seat.State != "active" && seat.State != "ambiguous" {
 		return false
 	}
+	if seat.EntryState != "" && seat.EntryState != "pending" && seat.EntryState != "entered" && seat.EntryState != "revoked" {
+		return false
+	}
+	if seat.EntryState == "entered" && (!seat.LaunchFinalized || seat.CgroupPath == "") {
+		return false
+	}
 	if seat.CgroupPath != "" && (!strings.HasPrefix(seat.CgroupPath, "/") || filepath.Clean(seat.CgroupPath) != seat.CgroupPath || filepath.Base(seat.CgroupPath) != seat.Unit || seat.CgroupDevice == 0 || seat.CgroupInode == 0) {
 		return false
 	}
@@ -210,6 +218,10 @@ func validNativeSeat(sid string, seat nativeCapacitySeat, city string, c nativeC
 // The baseline must be published explicitly during a quiesced cutover. Missing,
 // corrupt, foreign-boot or foreign-city state is never initialized to zero.
 func withNativeCapacityLedger(ctx context.Context, city string, c nativeCapacityConfig, host nativeCapacityHost, fn func(*nativeCapacityLedger) error) error {
+	return withNativeCapacityLedgerWriter(ctx, city, c, host, func(ledger *nativeCapacityLedger, _ func() error) error { return fn(ledger) })
+}
+
+func withNativeCapacityLedgerWriter(ctx context.Context, city string, c nativeCapacityConfig, host nativeCapacityHost, fn func(*nativeCapacityLedger, func() error) error) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if ctx.Err() != nil {
@@ -260,9 +272,14 @@ func withNativeCapacityLedger(ctx context.Context, city string, c nativeCapacity
 	if ctx.Err() != nil {
 		return fmt.Errorf("native capacity canceled")
 	}
-	if err := fn(&ledger); err != nil {
+	persist := func() error { return persistNativeCapacityLedger(ctx, path, lock, &ledger) }
+	if err := fn(&ledger, persist); err != nil {
 		return err
 	}
+	return persist()
+}
+
+func persistNativeCapacityLedger(ctx context.Context, path string, lock *os.File, ledger *nativeCapacityLedger) error {
 	held, err := lock.Stat()
 	current, statErr := os.Lstat(path + ".lock")
 	if err != nil || statErr != nil || !os.SameFile(held, current) || ctx.Err() != nil {
@@ -364,6 +381,13 @@ func claimNativeCapacityStart(ctx context.Context, city, route, sid string, now 
 	attempt := NewInstanceToken()[:32]
 	proof := &nativeCapacityProof{c, host, attempt}
 	err = withNativeCapacityLedger(ctx, city, c, host, func(ledger *nativeCapacityLedger) error {
+		// Teardown holds this same flock through its terminal write. Bypass
+		// the eventual cache so an independent CLI close cannot be resurrected.
+		persisted, err := beads.HandlesFor(store).Live.Get(sid)
+		current := infoFromPersistedBead(persisted)
+		if err != nil || current.Closed || current.Template != route || current.SessionName != info.SessionName || current.MetadataState != info.MetadataState || current.Generation != info.Generation || current.InstanceToken != info.InstanceToken {
+			return fmt.Errorf("native capacity target changed before reservation")
+		}
 		refreshNativeSeats(ledger, host, now)
 		if _, exists := ledger.Seats[sid]; exists {
 			return fmt.Errorf("native capacity session occupied")
@@ -400,8 +424,13 @@ func beginNativeCapacityStart(ctx context.Context, proof *capacityAdmissionProof
 		if err != nil {
 			return fmt.Errorf("native capacity scope unavailable")
 		}
+		if len(scope.EntryCommand) == 0 || !filepath.IsAbs(scope.EntryCommand[0]) {
+			return fmt.Errorf("native capacity entry executable unavailable")
+		}
+		scope.EntryCommand = append(scope.EntryCommand, "session", "capacity-enter", proof.city, proof.id, seat.Attempt, seat.Unit, "--")
 		cfg.CommandScope = &scope
 		seat.State = "launching"
+		seat.EntryState = "pending"
 		ledger.Seats[proof.id] = seat
 		return nil
 	})
@@ -409,19 +438,179 @@ func beginNativeCapacityStart(ctx context.Context, proof *capacityAdmissionProof
 }
 
 func finishNativeCapacityStart(ctx context.Context, proof *capacityAdmissionProof, startErr error, now time.Time) error {
+	ctx, cancelWait := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelWait()
 	native := proof.native
-	return withNativeCapacityLedger(ctx, proof.city, native.config, native.host, func(ledger *nativeCapacityLedger) error {
+	pending := errors.New("native capacity command entry pending")
+	for ctx.Err() == nil {
+
+		err := withNativeCapacityLedger(ctx, proof.city, native.config, native.host, func(ledger *nativeCapacityLedger) error {
+			seat, ok := ledger.Seats[proof.id]
+			if !ok || seat.Attempt != native.attempt {
+				for _, retired := range ledger.Retired {
+					if retired.SessionID == proof.id && retired.Attempt == native.attempt && retired.Reason == "kernel_cgroup_empty" {
+						return nil // Entry was durable even if the model already exited.
+					}
+				}
+			}
+			if !ok || seat.Attempt != native.attempt {
+				return fmt.Errorf("native capacity finalization identity mismatch")
+			}
+			if seat.EntryState != "entered" {
+				return pending
+			}
+			refreshNativeSeats(ledger, native.host, now)
+			return nil
+		})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, pending) {
+			if ctx.Err() != nil {
+				break
+			}
+			return err
+		}
+		if startErr != nil || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Millisecond):
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	// Serialize revocation with command entry. A delayed tmux invocation cannot
+	// execute the model after this write, even across controller restarts.
+	revokeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	acknowledged := false
+	err := withNativeCapacityLedger(revokeCtx, proof.city, native.config, native.host, func(ledger *nativeCapacityLedger) error {
 		seat, ok := ledger.Seats[proof.id]
-		if !ok || seat.Attempt != native.attempt || seat.State != "launching" {
+		if !ok || seat.Attempt != native.attempt {
 			return fmt.Errorf("native capacity finalization identity mismatch")
 		}
-		// A failed/timeout Start can have an unconfirmed queued launch. It
-		// never seals the attempt or frees its seat, even if a scope vanished.
-		seat.LaunchFinalized, seat.State = startErr == nil, "ambiguous"
-		ledger.Seats[proof.id] = seat
-		refreshNativeSeats(ledger, native.host, now)
+		if seat.EntryState == "entered" {
+			acknowledged = true
+			refreshNativeSeats(ledger, native.host, now)
+			return nil
+		}
+		if seat.EntryState == "pending" {
+			retireNativeSeat(ledger, proof.id, "command_entry_revoked_before_model", now)
+		} // Old unacknowledged protocol remains occupied.
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if acknowledged {
+		return nil
+	}
+	return fmt.Errorf("native capacity model command did not acknowledge scope entry")
+}
+
+// EnterNativeCapacityScope is the internal model-command boundary. It records
+// this process's kernel cgroup durably before the CLI execs any model command.
+func EnterNativeCapacityScope(ctx context.Context, city, sid, attempt, unit string) error {
+	return enterNativeCapacityScope(ctx, city, sid, attempt, unit, newNativeCapacityHost())
+}
+
+func enterNativeCapacityScope(ctx context.Context, city, sid, attempt, unit string, host nativeCapacityHost) error {
+	c, enabled, err := readNativeCapacityConfig(city)
+	if err != nil || !enabled {
+		return fmt.Errorf("native capacity entry policy unavailable")
+	}
+	return withNativeCapacityLedger(ctx, city, c, host, func(ledger *nativeCapacityLedger) error {
+		seat, ok := ledger.Seats[sid]
+		if !ok || seat.Attempt != attempt || seat.Unit != unit || seat.State != "launching" || seat.EntryState != "pending" {
+			return fmt.Errorf("native capacity entry revoked or already consumed")
+		}
+		observed, err := host.SelfScope(unit)
+		if err != nil || !observed.Populated || observed.Empty || observed.CgroupPath == "" || filepath.Base(observed.CgroupPath) != unit || observed.Device == 0 || observed.Inode == 0 {
+			return fmt.Errorf("native capacity command is outside its owned scope")
+		}
+		if seat.CgroupPath != "" && (seat.CgroupPath != observed.CgroupPath || seat.CgroupDevice != observed.Device || seat.CgroupInode != observed.Inode) {
+			return fmt.Errorf("native capacity entry cgroup incarnation changed")
+		}
+		if err := host.Resources(c); err != nil {
+			return fmt.Errorf("native capacity resources unavailable at command entry")
+		}
+		seat.CgroupPath, seat.CgroupDevice, seat.CgroupInode = observed.CgroupPath, observed.Device, observed.Inode
+		seat.EntryState, seat.State, seat.LaunchFinalized = "entered", "active", true
+		ledger.Seats[sid] = seat
+		return nil
+	})
+}
+
+// RefreshNativeCapacity refreshes only already-owned exact scopes. It is used
+// by the existing controller tick and teardown paths, without new demand.
+func RefreshNativeCapacity(ctx context.Context, city string, now time.Time) error {
+	c, enabled, err := readNativeCapacityConfig(city)
+	if err != nil || !enabled {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return refreshNativeCapacityWithHost(ctx, city, c, newNativeCapacityHost(), now)
+}
+
+func refreshNativeCapacityWithHost(ctx context.Context, city string, c nativeCapacityConfig, host nativeCapacityHost, now time.Time) error {
+	return withNativeCapacityLedger(ctx, city, c, host, func(ledger *nativeCapacityLedger) error {
+		refreshNativeSeats(ledger, host, now)
+		return nil
+	})
+}
+
+// withNativeCapacityTeardown serializes managed target teardown with claim
+// and command entry using the existing cross-process ledger lock. Revocation
+// is persisted before Stop; even a failed/slow terminal write cannot re-enable
+// a queued command. Unknown ledger state never prevents normal runtime stop.
+func withNativeCapacityTeardown(ctx context.Context, city, sid string, c nativeCapacityConfig, host nativeCapacityHost, action func() error) error {
+	invoked := false
+	err := withNativeCapacityLedgerWriter(ctx, city, c, host, func(ledger *nativeCapacityLedger, persist func() error) error {
+		revokeNativeSeatEntry(ledger, sid, time.Now())
+		if err := persist(); err != nil {
+			return err
+		}
+		invoked = true
+		actionErr := action()
+		refreshNativeSeats(ledger, host, time.Now())
+		if err := persist(); err != nil {
+			return errors.Join(actionErr, err)
+		}
+		return actionErr
+	})
+	if !invoked {
+		return errors.Join(err, action())
+	}
+	return err
+}
+
+func revokeNativeSeatEntry(ledger *nativeCapacityLedger, sid string, now time.Time) {
+	seat, ok := ledger.Seats[sid]
+	if !ok || seat.Kind != "scope" {
+		return
+	}
+	if seat.State == "reserved" {
+		retireNativeSeat(ledger, sid, "canceled_before_provider_start", now)
+	} else if seat.EntryState == "pending" {
+		retireNativeSeat(ledger, sid, "command_entry_revoked_before_model", now)
+	}
+}
+
+func (m *Manager) withNativeCapacityTeardown(id, route string, action func() error) error {
+	c, enabled, err := readNativeCapacityConfig(m.cityPath)
+	if err != nil {
+		return errors.Join(err, action())
+	}
+	if !enabled || !managedCapacityRoute(route, c.Queue.Exact, c.Queue.Prefixes) {
+		// An invalid capacity policy cannot become a city-wide stop veto.
+		return action()
+	}
+	return withNativeCapacityTeardown(context.Background(), m.cityPath, id, c, newNativeCapacityHost(), action)
 }
 
 // AbandonCapacityStart cancels only an invocation-local, never-launched native

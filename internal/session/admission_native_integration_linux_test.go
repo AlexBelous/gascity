@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +18,45 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
+type nativeIntegrationEntryHost struct{ nativeCapacityHost }
+
+func (h nativeIntegrationEntryHost) Command(unit string) (runtime.CommandScope, error) {
+	scope, err := h.nativeCapacityHost.Command(unit)
+	if err != nil {
+		return scope, err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return scope, err
+	}
+	scope.EntryCommand = []string{"/usr/bin/env", "GC_NATIVE_SCOPE_ENTRY_HELPER=1", exe, "-test.run=^TestOwnedNativeScopeEntryHelper$", "--"}
+	return scope, nil
+}
+
+// This child executes inside the real scope, using the same domain entry
+// command as gc. The parent test binary is the fixture's immutable executable.
+func TestOwnedNativeScopeEntryHelper(t *testing.T) {
+	if os.Getenv("GC_NATIVE_SCOPE_ENTRY_HELPER") != "1" {
+		return
+	}
+	var args []string
+	for i, arg := range os.Args {
+		if arg == "--" {
+			args = os.Args[i+1:]
+			break
+		}
+	}
+	if len(args) < 9 || args[0] != "session" || args[1] != "capacity-enter" || args[6] != "--" {
+		t.Fatal("invalid entry helper arguments")
+	}
+	if err := EnterNativeCapacityScope(context.Background(), args[2], args[3], args[4], args[5]); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Exec("/bin/sh", args[7:], os.Environ()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // This opt-in operational test uses one isolated tmux socket, a temporary
 // MemStore/city and an owned sleep process. It never opens a real city DB,
 // calls an LLM, touches the shared tmux server or runs the global observer.
@@ -25,7 +65,7 @@ func TestOwnedNativeScopeLinuxIntegration(t *testing.T) {
 		t.Skip("requires explicit owned systemd-user scope integration")
 	}
 	city, c, _, _, store := nativeTestFixture(t, 0)
-	host := newNativeCapacityHost()
+	host := nativeIntegrationEntryHost{newNativeCapacityHost()}
 	identity, err := host.Identity()
 	if err != nil {
 		t.Fatal(err)
@@ -49,8 +89,16 @@ func TestOwnedNativeScopeLinuxIntegration(t *testing.T) {
 	mgr := NewManagerWithOptions(store, sp, WithCityPath(city))
 	// The model stand-in exits after one second; its setsid child outlives
 	// both the main command and tmux pane but remains inside the owned cgroup.
-	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Command: "sh -c '/usr/bin/setsid /usr/bin/sleep 4 >/dev/null 2>&1 </dev/null & /usr/bin/sleep 1'", WorkDir: city, Provider: "owned-sleep-test"})
+	command := "sh -c '/usr/bin/setsid /usr/bin/sleep 4 >/dev/null 2>&1 </dev/null & /usr/bin/sleep 1'"
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Command: command, WorkDir: city, Provider: "owned-sleep-test", BeadOnly: true})
 	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, allowed, reason := admitCapacityStartWithHost(context.Background(), city, "worker", info.ID, time.Now(), sp, store, host)
+	if !allowed {
+		t.Fatal(reason)
+	}
+	if err := mgr.startRuntime(admitted, info.SessionName, runtime.Config{Command: command, WorkDir: city, Env: map[string]string{"GC_SESSION_ID": info.ID, "GC_TEMPLATE": "worker"}}); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = sp.Stop(info.SessionName) }()

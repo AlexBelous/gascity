@@ -726,6 +726,12 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // the roots the scan did surface are still killed, and matching the started
 // replacement is impossible because it does not exist yet.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
+	// A native proof was minted only after the previous exact owned scope was
+	// retired. Its mandatory scope contains this attempt's model descendants;
+	// a second whole-host census is neither needed nor allowed on this path.
+	if proof, ok := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok && proof.native != nil && proof.city == m.cityPath && proof.id == sessionID && !proof.used.Load() {
+		return nil
+	}
 	_ = ctx
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {

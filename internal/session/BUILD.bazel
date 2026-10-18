@@ -6,6 +6,9 @@ go_library(
         "address_directory.go",
         "admission.go",
         "admission_census.go",
+        "admission_native.go",
+        "admission_native_linux.go",
+        "admission_native_other.go",
         "admission_runtime.go",
         "alias.go",
         "assignee_identities.go",
@@ -83,6 +86,9 @@ go_test(
     name = "session_test",
     srcs = [
         "address_directory_test.go",
+        "admission_native_integration_linux_test.go",
+        "admission_native_linux_test.go",
+        "admission_native_test.go",
         "admission_start_test.go",
         "assignee_identities_test.go",
         "canonical_identity_test.go",
@@ -199,6 +205,7 @@ go_test(
         ],
         "@rules_go//go/platform:linux": [
             "//internal/runtime/proctable",
+            "//internal/runtime/tmux",
         ],
         "//conditions:default": [],
     }),

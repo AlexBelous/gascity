@@ -215,6 +215,12 @@ func TestParsePruneDuration(t *testing.T) {
 }
 
 func TestSessionCapacityContractReportsExactDedicatedReservation(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	city := t.TempDir()
+	writeNamedSessionCityTOML(t, city)
+	t.Setenv("GC_CITY", city)
+	t.Setenv("GC_CITY_PATH", city)
 	var stdout bytes.Buffer
 	cmd := newSessionCapacityContractCmd(&stdout)
 	cmd.SetArgs([]string{"--json"})
@@ -229,6 +235,52 @@ func TestSessionCapacityContractReportsExactDedicatedReservation(t *testing.T) {
 		got["dedicated_alias_reservation"] != session.DedicatedClerkReservationContract ||
 		got["native_actual_start"] != true {
 		t.Fatalf("unexpected contract: %v", got)
+	}
+}
+
+func TestSessionCapacityContractNativeModeDoesNotAdvertiseLegacyReservation(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	city := t.TempDir()
+	writeNamedSessionCityTOML(t, city)
+	t.Setenv("GC_CITY", city)
+	t.Setenv("GC_CITY_PATH", city)
+	if err := os.MkdirAll(filepath.Join(city, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `[admission]
+mode="native-managed-v1"
+[queue]
+managed_exact_routes=["worker"]
+[limits]
+max_managed_workers=3
+[thresholds]
+mem_green_gib=6
+memory_psi_green=1
+io_psi_green=10
+`
+	path := filepath.Join(city, "config/capacity-scheduler-v2.toml")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	cmd := newSessionCapacityContractCmd(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["admission_mode"] != "native-managed-v1" || got["dedicated_alias_reservation"] != "" || got["native_actual_start"] != true {
+		t.Fatalf("false legacy capability: %v", got)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(config, "native-managed-v1", "unknown-mode", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := newSessionCapacityContractCmd(&stdout).Execute(); err == nil || stdout.Len() != 0 {
+		t.Fatal("unknown mode advertised compatibility")
 	}
 }
 

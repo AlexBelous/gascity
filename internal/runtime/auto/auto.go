@@ -104,6 +104,12 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	return p.route(name).Start(ctx, name, cfg)
 }
 
+// SupportsCommandScope reports the routed backend's local command containment.
+func (p *Provider) SupportsCommandScope(name string) bool {
+	sp, ok := p.route(name).(runtime.CommandScopeProvider)
+	return ok && sp.SupportsCommandScope(name)
+}
+
 // Stop delegates to the routed backend and cleans up the route entry
 // only on success. If the routed backend fails, tries the other backend
 // to handle stale/missing route entries (e.g., after controller restart).

@@ -3555,6 +3555,9 @@ func executePlannedStartsTraced(
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver)
 				if err != nil {
+					if releaseErr := sessionpkg.AbandonCapacityStart(admittedCtx); releaseErr != nil {
+						fmt.Fprintf(stderr, "session reconciler: abandon unlaunched capacity: %v\n", releaseErr) //nolint:errcheck
+					}
 					clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
 					if release != nil {
 						release()

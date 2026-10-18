@@ -85,11 +85,24 @@ func newSessionCapacityContractCmd(stdout io.Writer) *cobra.Command {
 		Short: "Report the native exact-session capacity admission contract",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return json.NewEncoder(stdout).Encode(map[string]any{
+			city, err := resolveCity()
+			if err != nil {
+				return err
+			}
+			mode, err := session.CapacityAdmissionMode(city)
+			if err != nil {
+				return err
+			}
+			contract := map[string]any{
 				"schema":                      "gc.session-capacity-contract/v1",
 				"dedicated_alias_reservation": session.DedicatedClerkReservationContract,
 				"native_actual_start":         true,
-			})
+			}
+			if mode == "native-managed-v1" {
+				contract["admission_mode"] = mode
+				contract["dedicated_alias_reservation"] = ""
+			}
+			return json.NewEncoder(stdout).Encode(contract)
 		},
 	}
 	cmd.Flags().Bool("json", false, "JSON output (the only supported format)")
@@ -1349,6 +1362,11 @@ func (p *attachmentCachingProvider) Relaunch(ctx context.Context, name string, c
 		return rp.Relaunch(ctx, name, cfg)
 	}
 	return runtime.ErrRelaunchUnsupported
+}
+
+func (p *attachmentCachingProvider) SupportsCommandScope(name string) bool {
+	sp, ok := p.Provider.(runtime.CommandScopeProvider)
+	return ok && sp.SupportsCommandScope(name)
 }
 
 func (p *attachmentCachingProvider) Pending(name string) (*runtime.PendingInteraction, error) {

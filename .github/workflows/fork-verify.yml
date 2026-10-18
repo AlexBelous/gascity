@@ -109,6 +109,14 @@ jobs:
         run: |
           set -euo pipefail
           go test -p 1 ./internal/session -run '^(TestCapacityCapThreeBoundary|TestManagedStartAdmissionSpendsGrantAtActualBoundary|TestCapacityAdmissionProofIsBoundedAndOneShot)$' -count=1 -json | tee "$RUNNER_TEMP/clerk-pair/native-tests.jsonl"
+      - name: Native-owned admission and final model argument tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -p 1 ./internal/session -run '^TestNative' -count=1 -json | tee "$RUNNER_TEMP/clerk-pair/managed-native-tests.jsonl"
+          go test -p 1 ./internal/runtime/tmux -run '^TestManagedScope' -count=1 -json | tee "$RUNNER_TEMP/clerk-pair/managed-model-tests.jsonl"
+          go test -p 1 ./cmd/gc -run '^TestSessionCapacityContract' -count=1 -json | tee "$RUNNER_TEMP/clerk-pair/managed-contract-tests.jsonl"
+          go test -p 1 -c -ldflags='-s -w' -o "$RUNNER_TEMP/clerk-pair/native-session.test" ./internal/session
       - name: Owned-child comm capture and real C-to-Go wire
         shell: bash
         run: |
@@ -156,7 +164,7 @@ jobs:
           import hashlib,json,os,pathlib,subprocess
           out=pathlib.Path(os.environ['RUNNER_TEMP'])/'clerk-pair'
           source=os.environ['EXPECTED_SOURCE']
-          for log,required in [('native-tests.jsonl',{'TestCapacityCapThreeBoundary','TestManagedStartAdmissionSpendsGrantAtActualBoundary','TestCapacityAdmissionProofIsBoundedAndOneShot'}),('comm-go-tests.jsonl',{'TestCensusV3ManagedBirthCommRefresh','TestCensusV3ManagedBirthCommOwnedVector'})]:
+          for log,required in [('native-tests.jsonl',{'TestCapacityCapThreeBoundary','TestManagedStartAdmissionSpendsGrantAtActualBoundary','TestCapacityAdmissionProofIsBoundedAndOneShot'}),('comm-go-tests.jsonl',{'TestCensusV3ManagedBirthCommRefresh','TestCensusV3ManagedBirthCommOwnedVector'}),('managed-native-tests.jsonl',{'TestNativeConcurrentLastSeatIsAtomic','TestNativeProofStartsExactlyOnceWithoutSnapshotOrScanner','TestNativeFailedOrNeverWitnessedStartRetainsSeatAcrossRestart','TestNativeKnownEmptyScopeReleasesButDescendantAndUnknownDoNot'}),('managed-model-tests.jsonl',{'TestManagedScopeWrapsFinalModelArgumentsAndLiteralPrompt','TestManagedScopeDescriptorAlsoWrapsRespawnAndInvalidScopeRefuses'}),('managed-contract-tests.jsonl',{'TestSessionCapacityContractReportsExactDedicatedReservation','TestSessionCapacityContractNativeModeDoesNotAdvertiseLegacyReservation'})]:
               events=[json.loads(line) for line in (out/log).read_text().splitlines() if line.strip()]
               assert not any(e.get('Action') in ('skip','fail','build-fail') for e in events)
               passed={e.get('Test') for e in events if e.get('Action')=='pass'}
@@ -165,7 +173,7 @@ jobs:
           version=json.loads((out/'gc-version.json').read_text())
           assert version['commit']==source and version['version']==source
           members=[]
-          for name in ('gc','gc-process-observer-helper','native-tests.jsonl','comm-go-tests.jsonl','comm-birth-vector.json','gc-buildinfo.txt','gc-version.json','native-dependencies.txt'):
+          for name in ('gc','gc-process-observer-helper','native-session.test','native-tests.jsonl','managed-native-tests.jsonl','managed-model-tests.jsonl','managed-contract-tests.jsonl','comm-go-tests.jsonl','comm-birth-vector.json','gc-buildinfo.txt','gc-version.json','native-dependencies.txt'):
               p=out/name
               members.append({'path':name,'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
           m={'schema':1,'source':source,'source_tree':(out/'source-tree.txt').read_text().strip(),'go':'1.26.6','target':'linux/amd64','icu_major':74,'helper_source_revision':source,'code_and_build_only':True,'full_suite_complete':False,'production_effects':False,'native_live_admission':False,'members':members}

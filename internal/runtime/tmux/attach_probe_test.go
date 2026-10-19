@@ -288,8 +288,8 @@ func TestNudgeSessionAttachProbeErrorKeepsInput(t *testing.T) {
 			enters++
 		}
 	}
-	// Only the confirm window's submits; staged-draft recovery adds more.
-	if enters != submitEnterMaxSends {
-		t.Fatalf("submit Enter sends = %d, want %d (no staged-draft resubmit)", enters, submitEnterMaxSends)
+	// One initial Codex submit; the failed attachment probe forbids recovery.
+	if enters != 1 {
+		t.Fatalf("submit Enter sends = %d, want 1 (no staged-draft resubmit)", enters)
 	}
 }

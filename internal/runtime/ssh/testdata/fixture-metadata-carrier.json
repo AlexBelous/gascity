@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "key": "GC_DRAIN_ACK",
+      "value": "1",
+      "calls": [
+        {
+          "argv": [
+            "sh"
+          ],
+          "stdin": "umask 077\nt=\"${TMPDIR:-/tmp}\"\nfind \"$t\" -maxdepth 1 -type d -name 'gc-session-*' -mmin +60 -exec rm -rf {} + 2\u003e/dev/null\nd=$(mktemp -d \"$t/gc-session-XXXXXX\") || exit 1\nfail() { rm -rf \"$d\"; exit 1; }\ncat \u003e \"$d/env.sh\" \u003c\u003c'GC_EOF_FIXTURE' || fail\nGC_DRAIN_ACK='1'\nexport GC_DRAIN_ACK\nGC_EOF_FIXTURE\n[ \"$(wc -c \u003c \"$d/env.sh\")\" -eq 37 ] || fail\ncat \u003e \"$d/session.tmux\" \u003c\u003c'GC_EOF_FIXTURE' || fail\n'set-environment' '-t' '=queue-fixture-runtime' 'GC_DRAIN_ACK' '1'\nGC_EOF_FIXTURE\n[ \"$(wc -c \u003c \"$d/session.tmux\")\" -eq 67 ] || fail\nchmod 700 \"$d\" \u0026\u0026 chmod 600 \"$d\"/* || fail\nprintf '%s\\n' \"$d\"\n"
+        },
+        {
+          "argv": [
+            "tmux",
+            "source-file",
+            "/tmp/gc-session-test/session.tmux"
+          ],
+          "stdin": ""
+        },
+        {
+          "argv": [
+            "rm",
+            "-rf",
+            "/tmp/gc-session-test"
+          ],
+          "stdin": ""
+        }
+      ]
+    },
+    {
+      "key": "GC_DRAIN_ACK_SOURCE",
+      "value": "agent",
+      "calls": [
+        {
+          "argv": [
+            "sh"
+          ],
+          "stdin": "umask 077\nt=\"${TMPDIR:-/tmp}\"\nfind \"$t\" -maxdepth 1 -type d -name 'gc-session-*' -mmin +60 -exec rm -rf {} + 2\u003e/dev/null\nd=$(mktemp -d \"$t/gc-session-XXXXXX\") || exit 1\nfail() { rm -rf \"$d\"; exit 1; }\ncat \u003e \"$d/env.sh\" \u003c\u003c'GC_EOF_FIXTURE' || fail\nGC_DRAIN_ACK_SOURCE='agent'\nexport GC_DRAIN_ACK_SOURCE\nGC_EOF_FIXTURE\n[ \"$(wc -c \u003c \"$d/env.sh\")\" -eq 55 ] || fail\ncat \u003e \"$d/session.tmux\" \u003c\u003c'GC_EOF_FIXTURE' || fail\n'set-environment' '-t' '=queue-fixture-runtime' 'GC_DRAIN_ACK_SOURCE' 'agent'\nGC_EOF_FIXTURE\n[ \"$(wc -c \u003c \"$d/session.tmux\")\" -eq 78 ] || fail\nchmod 700 \"$d\" \u0026\u0026 chmod 600 \"$d\"/* || fail\nprintf '%s\\n' \"$d\"\n"
+        },
+        {
+          "argv": [
+            "tmux",
+            "source-file",
+            "/tmp/gc-session-test/session.tmux"
+          ],
+          "stdin": ""
+        },
+        {
+          "argv": [
+            "rm",
+            "-rf",
+            "/tmp/gc-session-test"
+          ],
+          "stdin": ""
+        }
+      ]
+    },
+    {
+      "key": "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "calls": [
+        {
+          "argv": [
+            "sh"
+          ],
+          "stdin": "umask 077\nt=\"${TMPDIR:-/tmp}\"\nfind \"$t\" -maxdepth 1 -type d -name 'gc-session-*' -mmin +60 -exec rm -rf {} + 2\u003e/dev/null\nd=$(mktemp -d \"$t/gc-session-XXXXXX\") || exit 1\nfail() { rm -rf \"$d\"; exit 1; }\ncat \u003e \"$d/env.sh\" \u003c\u003c'GC_EOF_FIXTURE' || fail\nGC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\nexport GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN\nGC_EOF_FIXTURE\n[ \"$(wc -c \u003c \"$d/env.sh\")\" -eq 150 ] || fail\ncat \u003e \"$d/session.tmux\" \u003c\u003c'GC_EOF_FIXTURE' || fail\n'set-environment' '-t' '=queue-fixture-runtime' 'GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\nGC_EOF_FIXTURE\n[ \"$(wc -c \u003c \"$d/session.tmux\")\" -eq 155 ] || fail\nchmod 700 \"$d\" \u0026\u0026 chmod 600 \"$d\"/* || fail\nprintf '%s\\n' \"$d\"\n"
+        },
+        {
+          "argv": [
+            "tmux",
+            "source-file",
+            "/tmp/gc-session-test/session.tmux"
+          ],
+          "stdin": ""
+        },
+        {
+          "argv": [
+            "rm",
+            "-rf",
+            "/tmp/gc-session-test"
+          ],
+          "stdin": ""
+        }
+      ]
+    }
+  ]
+}

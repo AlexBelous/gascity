@@ -1,0 +1,47 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "fixtureseed_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/contrib/remote-admission/fixtureseed",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/beads",
+        "//internal/config",
+        "//internal/coordclass",
+        "//internal/runtime",
+        "//internal/storebinding",
+        "//internal/storebinding/sqlite",
+    ],
+)
+
+go_binary(
+    name = "fixtureseed",
+    embed = [":fixtureseed_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "fixtureseed_test",
+    srcs = ["main_test.go"],
+    embed = [":fixtureseed_lib"],
+    deps = [
+        "//internal/beads",
+        "//internal/coordclass",
+        "//internal/session",
+        "//internal/storebinding",
+        "//internal/storebinding/sqlite",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

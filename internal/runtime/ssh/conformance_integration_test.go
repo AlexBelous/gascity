@@ -230,6 +230,10 @@ func TestSSHProviderProcessAliveAndNamesOnRealTmux(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(shadow, "ps"), []byte("#!/bin/sh\necho 'ps: unknown option' >&2\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	realPS, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := os.Getenv("PATH")
 	t.Setenv("PATH", shadow+string(os.PathListSeparator)+path)
 	if !p.ProcessAlive("worker-1", []string{"sleep"}) {
@@ -237,6 +241,21 @@ func TestSSHProviderProcessAliveAndNamesOnRealTmux(t *testing.T) {
 	}
 	if p.ProcessAlive("worker-404", []string{"sleep"}) {
 		t.Error("ProcessAlive of a missing session with a failing ps = true, want false")
+	}
+	// Each individual ps pass must also retain unknown liveness. The other
+	// pass succeeds and reports cat, which cannot prove the requested sleep
+	// is absent when one process identity channel is unavailable.
+	for _, column := range []string{"comm", "args"} {
+		script := "#!/bin/sh\nfor arg do\nif [ \"$arg\" = '" + column + "=' ]; then exit 1; fi\ndone\nexec " + shellQuote([]string{realPS}) + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(shadow, "ps"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !p.ProcessAlive("worker-1", []string{"sleep"}) {
+			t.Errorf("ProcessAlive with failed %s pass = false, want conservative alive", column)
+		}
+		if p.ProcessAlive("worker-404", []string{"sleep"}) {
+			t.Errorf("ProcessAlive missing session with failed %s pass = true", column)
+		}
 	}
 	t.Setenv("PATH", path)
 

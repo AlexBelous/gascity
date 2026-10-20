@@ -550,7 +550,7 @@ func processTable(panes string, rows ...string) string {
 		}
 		paneRows = append(paneRows, pane)
 	}
-	return strings.Join(paneRows, "\n") + "\n" + processSectionComm + "\n" + comm.String() + processSectionArgs + "\n" + args.String()
+	return strings.Join(paneRows, "\n") + "\n" + processSectionComm + "\n" + comm.String() + processSectionCommDone + "\n" + processSectionArgs + "\n" + args.String() + processSectionArgsDone + "\n"
 }
 
 // ProcessAlive is scoped to the session's pane process trees. A box-wide
@@ -609,8 +609,8 @@ func TestProvider_ProcessAliveScriptTargetsSessionExactly(t *testing.T) {
 	script := processAliveScript("worker-1")
 	for _, want := range []string{
 		"tmux list-panes -s -t '=worker-1:' -F '" + runtime.TmuxAgentPaneMarkerFormat + " #{pane_pid}') || exit 3",
-		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=",
-		"ps -A -o pid= -o ppid= -o args= | awk -v roots=",
+		"ps -A -o pid= -o ppid= -o comm=; status=$?;",
+		"ps -A -o pid= -o ppid= -o args=; status=$?;",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script lacks %q:\n%s", want, script)

@@ -20,6 +20,7 @@ go_library(
 go_test(
     name = "ssh_test",
     srcs = [
+        "provider_partial_snapshot_test.go",
         "provider_test.go",
         "seams_test.go",
         "session_env_file_test.go",

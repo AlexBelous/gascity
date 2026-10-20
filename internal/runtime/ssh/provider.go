@@ -549,16 +549,25 @@ func processAliveScript(name string) string {
 	return "panes=$(tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F " + shellQuote([]string{runtime.TmuxAgentPaneMarkerFormat + " #{pane_pid}"}) + ") || exit 3\n" +
 		"echo \"$panes\"\n" +
 		"roots=$(echo \"$panes\" | awk '{printf \"%s \", $2}')\n" +
-		"echo " + processSectionComm + "\n" +
-		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n" +
-		"echo " + processSectionArgs + "\n" +
-		"ps -A -o pid= -o ppid= -o args= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n"
+		processSnapshotPass(processSectionComm, "comm") + processSnapshotPass(processSectionArgs, "args")
+}
+
+// processSnapshotPass proves both sides of the POSIX pipeline succeeded. Its
+// completion marker is absent when ps fails, even after printing partial rows,
+// or when the tree filter fails. No full process table crosses the connection.
+func processSnapshotPass(section, column string) string {
+	return "echo " + section + "\n" +
+		"if { ps -A -o pid= -o ppid= -o " + column + "=; status=$?; printf '\\n" + processPassStatus + " %s\\n' \"$status\"; } | " +
+		"awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "; then echo " + strings.TrimSuffix(section, "--") + "-ok--; fi\n"
 }
 
 // processTreeAwk prints the "pid ppid ..." rows of the processes in the trees
 // rooted at the space-separated roots, down to maxProcessDepth (POSIX awk).
-const processTreeAwk = `{ row[$1] = $0; kids[$2] = kids[$2] " " $1 }
+// A successful filter also requires exactly one successful ps completion.
+const processTreeAwk = `$1 == "` + processPassStatus + `" { statuses++; if (NF != 2 || $2 != "0") failed = 1; next }
+{ row[$1] = $0; kids[$2] = kids[$2] " " $1 }
 END {
+	if (statuses != 1 || failed) exit 1
 	n = split(roots, r, " ")
 	for (i = 1; i <= n; i++) { want[r[i]] = 0; stack[++top] = r[i] }
 	while (top > 0) {
@@ -571,52 +580,77 @@ END {
 }`
 
 const (
-	processSectionComm = "--gc-comm--"
-	processSectionArgs = "--gc-args--"
-	maxProcessDepth    = 10 // matches the local provider's descendant bound
+	processSectionComm     = "--gc-comm--"
+	processSectionArgs     = "--gc-args--"
+	processPassStatus      = "--gc-ps-status--"
+	processSectionCommDone = "--gc-comm-ok--"
+	processSectionArgsDone = "--gc-args-ok--"
+	maxProcessDepth        = 10 // matches the local provider's descendant bound
 )
 
 // paneTreeRunsNames evaluates processAliveScript's output: whether a pane pid,
 // or a descendant within maxProcessDepth, matches names. degraded reports a
-// session whose panes exist but whose process rows could not be read (ps
-// failed or printed nothing), which reads alive.
+// session whose panes exist but whose required process passes or selected
+// roots were not completely observed, which conservatively reads alive.
 func paneTreeRunsNames(out string, names map[string]struct{}) (alive, degraded bool) {
-	type proc struct{ ppid, comm, args string }
-	// Pane rows are "<agent|orphan|pane> <pid>". A marked session is judged
-	// by its agent pane only, so a human running the agent's CLI in a split
-	// cannot make a dead agent read alive; with its agent pane gone it reads
-	// dead. An unmarked session (from before the marker) is judged by every
-	// pane. Two agent panes (ambiguous) are both judged.
+	type proc struct {
+		ppid, comm, args   string
+		commSeen, argsSeen bool
+	}
+	// A marked session is judged only by its agent panes. A positively gone
+	// agent pane is dead; a partial process snapshot proves no death.
 	var agents, all []string
-	marked := false
+	marked, invalid := false, false
 	procs := map[string]*proc{}
 	children := map[string][]string{}
+	headers, completed := map[string]bool{}, map[string]bool{}
 	section := ""
+	validPID := func(value string, allowZero bool) bool {
+		n, err := strconv.ParseUint(value, 10, 32)
+		return err == nil && (n > 0 || allowZero)
+	}
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case line == "":
 			continue
 		case line == processSectionComm || line == processSectionArgs:
-			section = line
+			if headers[line] || section != "" || (line == processSectionArgs && !completed[processSectionComm]) {
+				invalid = true
+			}
+			headers[line], section = true, line
+			continue
+		case line == processSectionCommDone || line == processSectionArgsDone:
+			key := strings.TrimSuffix(line, "-ok--") + "--"
+			if section != key || completed[key] {
+				invalid = true
+			}
+			completed[key], section = true, ""
 			continue
 		case section == "":
-			mark, pid, ok := strings.Cut(line, " ")
-			if !ok {
+			fields := strings.Fields(line)
+			if len(headers) != 0 || len(fields) != 2 || !validPID(fields[1], false) {
+				invalid = true
 				continue
 			}
-			all = append(all, pid)
+			mark, pid := fields[0], fields[1]
 			switch mark {
 			case runtime.TmuxAgentPaneMarked:
 				agents = append(agents, pid)
 				marked = true
 			case runtime.TmuxAgentPaneOrphan:
 				marked = true
+			case "pane":
+			default:
+				invalid = true
+				continue
 			}
+			all = append(all, pid)
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) < 3 {
+		if len(fields) < 3 || !validPID(fields[0], false) || !validPID(fields[1], true) {
+			invalid = true
 			continue
 		}
 		pid, ppid := fields[0], fields[1]
@@ -626,25 +660,39 @@ func paneTreeRunsNames(out string, names map[string]struct{}) (alive, degraded b
 			pr = &proc{ppid: ppid}
 			procs[pid] = pr
 			children[ppid] = append(children[ppid], pid)
+		} else if pr.ppid != ppid {
+			invalid = true
 		}
 		if section == processSectionComm {
-			pr.comm = rest
+			invalid = invalid || pr.commSeen
+			pr.comm, pr.commSeen = rest, true
 		} else {
-			pr.args = rest
+			invalid = invalid || pr.argsSeen
+			pr.args, pr.argsSeen = rest, true
 		}
 	}
 	if len(all) == 0 {
-		return false, false // no panes: the session is gone
+		return invalid, invalid // no panes means gone unless the reply was malformed
 	}
 	roots := all
 	if marked {
 		roots = agents
 	}
-	if len(roots) == 0 {
-		return false, false // a marked session whose agent pane is gone
+	if len(roots) == 0 && !invalid {
+		return false, false // a marked session whose agent pane is positively gone
 	}
-	if len(procs) == 0 {
-		return true, true // the panes exist but the process table is unreadable
+	if invalid || !completed[processSectionComm] || !completed[processSectionArgs] {
+		return true, true
+	}
+	for _, pr := range procs {
+		if !pr.commSeen || !pr.argsSeen {
+			return true, true // the passes disagree about the process inventory
+		}
+	}
+	for _, root := range roots {
+		if procs[root] == nil {
+			return true, true // the selected pane exists but its process was not observed
+		}
 	}
 	visited := map[string]bool{}
 	var walk func(pid string, depth int) bool

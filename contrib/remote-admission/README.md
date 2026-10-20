@@ -8,6 +8,11 @@ The implementation is Python standard library code. Run its tests unprivileged:
 python3 -B -m unittest discover -v -s contrib/remote-admission/tests
 ```
 
+Operator-only bounded persistent HOME migration is documented in
+[BOUNDED_HOME.md](BOUNDED_HOME.md). `provision_bounded_home.py` defaults to a read-only
+plan and requires an accepted root manifest; its separate unprivileged tests are
+under `provision_tests`. Never execute mutable development sources as root.
+
 ## Authority and execution
 
 The controller calls a fixed root SSH forced-command endpoint with one bounded JSON

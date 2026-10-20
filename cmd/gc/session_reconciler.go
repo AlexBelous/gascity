@@ -1697,6 +1697,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// values without re-reading the bead (the coherence the old raw mirror
 	// provided for the later re-projection).
 	for i := range rows {
+		if rows[i].RemoteAdmissionPending {
+			reconcileRemoteAdmissionSourceHold(ctx, rows[i].Info.ID, sessFront, sp, stderr)
+		}
 		rows[i].Info = healExpiredTimersInfo(rows[i].Info, sessFront, clk)
 	}
 	// Phase 0b: retire duplicate configured-named sessions — Info twin over the

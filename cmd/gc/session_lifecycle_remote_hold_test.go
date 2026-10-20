@@ -21,12 +21,13 @@ func remoteHoldControllerFixture(t *testing.T) (*beads.MemStore, *runtime.Fake, 
 	store := beads.NewMemStore()
 	store.HonorExplicitIDs = true
 	clk := &clock.Fake{Time: time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)}
-	binding := runtime.RuntimeBinding{Selector: "ssh:repairer@vm328699", Endpoint: "repairer@vm328699", ResourceDomain: "vm328699", PolicyDigest: strings.Repeat("f", 64)}
+	binding := runtime.RuntimeBinding{Selector: "ssh:transport@fixture-vm", Endpoint: "transport@fixture-vm", ResourceDomain: "fixture-vm", PolicyDigest: strings.Repeat("f", 64)}
 	bindingJSON, err := json.Marshal(binding)
 	if err != nil {
 		t.Fatal(err)
 	}
 	recordJSON, err := json.Marshal(map[string]any{
+		"launch_command_prefix": "/usr/bin/sudo -n /usr/local/libexec/gc-entry enter", "launch_work_dir": "/fixture",
 		"version": 1, "city": "/fixture", "session_id": "gc-held", "template": "worker", "runtime_handle": "worker-gc-held", "generation": "2", "attempt": strings.Repeat("a", 32), "binding": binding,
 		"source_commit": strings.Repeat("b", 40), "manifest_sha256": strings.Repeat("c", 64), "unit_prefix": "gc-remote", "cgroup_parent": "/system.slice", "model_uid": 997, "transport_uid": 998, "phase": "prepare_intent",
 	})

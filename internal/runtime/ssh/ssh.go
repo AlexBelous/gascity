@@ -39,6 +39,7 @@ type Endpoint struct {
 	Port           int    // ssh port; 0 means ssh's default (22)
 	KeyPath        string // private key path; empty uses ssh's default resolution
 	KnownHostsPath string // known_hosts path; empty uses ssh's default
+	Strict         bool   // Isolate trusted operator endpoints from ambient SSH configuration.
 }
 
 // target returns the user@host (or bare host) form ssh addresses.
@@ -164,7 +165,14 @@ func (c *Conn) execScript(ctx context.Context, script []byte) ([]byte, int, erro
 type shellRunner struct{}
 
 func (shellRunner) run(ctx context.Context, ep Endpoint, remoteArgv []string, stdin []byte) ([]byte, int, error) {
-	cmd := exec.CommandContext(ctx, "ssh", sshArgs(ep, remoteArgv)...)
+	if ep.Strict && (ep.KeyPath == "" || ep.KnownHostsPath == "") {
+		return nil, -1, errors.New("strict SSH endpoint requires explicit key and known hosts")
+	}
+	executable := "ssh"
+	if ep.Strict {
+		executable = "/usr/bin/ssh"
+	}
+	cmd := exec.CommandContext(ctx, executable, sshArgs(ep, remoteArgv)...)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -214,6 +222,9 @@ func sshArgs(ep Endpoint, remoteArgv []string) []string {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=accept-new",
+	}
+	if ep.Strict {
+		args = []string{"-F", "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "ConnectionAttempts=1", "-o", "ConnectTimeout=10"}
 	}
 	if ep.KnownHostsPath != "" {
 		args = append(args, "-o", "UserKnownHostsFile="+ep.KnownHostsPath)

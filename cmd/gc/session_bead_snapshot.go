@@ -23,7 +23,7 @@ import (
 // See gastownhall/gascity#2148 for the named-session lookup-error visibility
 // regression this field exists to surface.
 type sessionBeadSnapshot struct {
-	// mu guards openInfos/openCircuits + the four lookup maps. addInfo() (called
+	// mu guards openInfos/openCircuits/openRemoteAdmissionPending + the four lookup maps. addInfo() (called
 	// from the pool create/reuse path) can fire from multiple goroutines when
 	// realizePoolDesiredSessions parallelizes pool session bead creates across
 	// distinct aliases — see gastownhall/gascity#2319. All read methods take RLock;
@@ -38,12 +38,15 @@ type sessionBeadSnapshot struct {
 	// openInfos so the circuit cluster — deliberately off session.Info — reaches
 	// Phase 0.5 without a per-id store Get. An Info-fed snapshot (FromInfos) has no
 	// backing circuit metadata, so its entries are the zero CircuitState.
-	openCircuits              []sessionpkg.CircuitState
-	beadIDByAgentName         map[string]string
-	beadIDByTemplateHint      map[string]string
-	sessionNameByAgentName    map[string]string
-	sessionNameByTemplateHint map[string]string
-	loadErr                   error
+	// The read-only pending hint follows the same row lockstep as circuits;
+	// it never substitutes for an uncached admission/cleanup fence.
+	openRemoteAdmissionPending []bool
+	openCircuits               []sessionpkg.CircuitState
+	beadIDByAgentName          map[string]string
+	beadIDByTemplateHint       map[string]string
+	sessionNameByAgentName     map[string]string
+	sessionNameByTemplateHint  map[string]string
+	loadErr                    error
 	// fingerprint is the config-change cache key (sessionBeadSnapshotFingerprint):
 	// a hash of every open bead's ID + Status + Assignee + ALL metadata keys. It is
 	// computed at the store edge from the raw beads — session.Info deliberately drops
@@ -126,7 +129,7 @@ func loadSessionBeadSnapshotLive(store beads.Store, live bool) (*sessionBeadSnap
 // an index-precedence divergence (which strands named sessions invisibly) fails the
 // build. Circuits are zero-valued (an Info-only feed carries no circuit metadata).
 func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapshot {
-	return newSessionBeadSnapshotFromInfosAndCircuits(infos, nil)
+	return newSessionBeadSnapshotFromInfosAndCircuits(infos, nil, nil)
 }
 
 // newSessionBeadSnapshotFromReconcileRows builds a snapshot from a typed
@@ -138,11 +141,13 @@ func newSessionBeadSnapshotFromInfos(infos []sessionpkg.Info) *sessionBeadSnapsh
 func newSessionBeadSnapshotFromReconcileRows(rows []sessionpkg.ReconcileSession) *sessionBeadSnapshot {
 	infos := make([]sessionpkg.Info, len(rows))
 	circuits := make([]sessionpkg.CircuitState, len(rows))
+	pending := make([]bool, len(rows))
 	for i := range rows {
 		infos[i] = rows[i].Info
 		circuits[i] = rows[i].Circuit
+		pending[i] = rows[i].RemoteAdmissionPending
 	}
-	return newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+	return newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits, pending)
 }
 
 // newSessionBeadSnapshotFromInfosAndCircuits is the shared index-map builder
@@ -150,7 +155,8 @@ func newSessionBeadSnapshotFromReconcileRows(rows []sessionpkg.ReconcileSession)
 // circuits, when non-nil, is parallel to infos (same length, same order) and is
 // filtered in lockstep with the closed-drop; a nil circuits yields the zero
 // CircuitState for every open row (an Info-fed snapshot has no circuit metadata).
-func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuits []sessionpkg.CircuitState) *sessionBeadSnapshot {
+// pending follows the same order and closed-row filtering; nil means no hint.
+func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuits []sessionpkg.CircuitState, pending []bool) *sessionBeadSnapshot {
 	beadIDByAgentName := make(map[string]string)
 	beadIDByTemplateHint := make(map[string]string)
 	sessionNameByAgentName := make(map[string]string)
@@ -158,12 +164,18 @@ func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuit
 
 	openInfos := make([]sessionpkg.Info, 0, len(infos))
 	openCircuits := make([]sessionpkg.CircuitState, 0, len(infos))
+	openPending := make([]bool, 0, len(infos))
 
 	for i, in := range infos {
 		if in.Closed {
 			continue
 		}
 		openInfos = append(openInfos, in)
+		isPending := false
+		if pending != nil {
+			isPending = pending[i]
+		}
+		openPending = append(openPending, isPending)
 		if circuits != nil {
 			openCircuits = append(openCircuits, circuits[i])
 		} else {
@@ -212,12 +224,13 @@ func newSessionBeadSnapshotFromInfosAndCircuits(infos []sessionpkg.Info, circuit
 	}
 
 	return &sessionBeadSnapshot{
-		openInfos:                 openInfos,
-		openCircuits:              openCircuits,
-		beadIDByAgentName:         beadIDByAgentName,
-		beadIDByTemplateHint:      beadIDByTemplateHint,
-		sessionNameByAgentName:    sessionNameByAgentName,
-		sessionNameByTemplateHint: sessionNameByTemplateHint,
+		openInfos:                  openInfos,
+		openCircuits:               openCircuits,
+		openRemoteAdmissionPending: openPending,
+		beadIDByAgentName:          beadIDByAgentName,
+		beadIDByTemplateHint:       beadIDByTemplateHint,
+		sessionNameByAgentName:     sessionNameByAgentName,
+		sessionNameByTemplateHint:  sessionNameByTemplateHint,
 	}
 }
 
@@ -247,9 +260,11 @@ func (s *sessionBeadSnapshot) addInfo(info sessionpkg.Info) {
 	circuits := make([]sessionpkg.CircuitState, 0, len(s.openCircuits)+1)
 	circuits = append(circuits, s.openCircuits...)
 	circuits = append(circuits, sessionpkg.CircuitState{})
-	rebuilt := newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits)
+	pending := append(append([]bool(nil), s.openRemoteAdmissionPending...), false)
+	rebuilt := newSessionBeadSnapshotFromInfosAndCircuits(infos, circuits, pending)
 	s.openInfos = rebuilt.openInfos
 	s.openCircuits = rebuilt.openCircuits
+	s.openRemoteAdmissionPending = rebuilt.openRemoteAdmissionPending
 	s.beadIDByAgentName = rebuilt.beadIDByAgentName
 	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
 	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
@@ -307,7 +322,11 @@ func (s *sessionBeadSnapshot) OpenForReconcile() []sessionpkg.ReconcileSession {
 		if i < len(s.openCircuits) {
 			circuit = s.openCircuits[i]
 		}
-		result[i] = sessionpkg.ReconcileSession{Info: s.openInfos[i], Circuit: circuit}
+		pending := false
+		if i < len(s.openRemoteAdmissionPending) {
+			pending = s.openRemoteAdmissionPending[i]
+		}
+		result[i] = sessionpkg.ReconcileSession{Info: s.openInfos[i], Circuit: circuit, RemoteAdmissionPending: pending}
 	}
 	return result
 }

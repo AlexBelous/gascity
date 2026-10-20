@@ -76,7 +76,7 @@ func TestAgentRuntimeRoutingDefaultIdentityAndRemotePolicy(t *testing.T) {
 	}
 }
 
-func TestAgentRuntimeRoutingReloadAddsRouterAndRefusesUnavailableRoutes(t *testing.T) {
+func TestAgentRuntimeRoutingReloadRefusesUnavailableStoreOrOperatorPolicy(t *testing.T) {
 	for _, unavailable := range []bool{false, true} {
 		name := "new-route"
 		if unavailable {
@@ -119,17 +119,10 @@ func TestAgentRuntimeRoutingReloadAddsRouterAndRefusesUnavailableRoutes(t *testi
 			if local.CountCalls("Stop", "existing-local") != 0 {
 				t.Fatal("routing overlay stopped a shared local session")
 			}
-			if unavailable {
-				if reply.Outcome != reloadOutcomeFailed || cr.sp != local || cr.cfg != cfg {
-					t.Fatalf("unsafe route reload accepted: %+v", reply)
-				}
-			} else {
-				if reply.Outcome != reloadOutcomeApplied {
-					t.Fatalf("route reload failed: %+v", reply)
-				}
-				if _, ok := cr.sp.(runtime.SessionRuntimeProvider); !ok {
-					t.Fatalf("agent Runtime reload kept local provider %T", cr.sp)
-				}
+			// Explicit remotes need a root-owned operator policy at reload time;
+			// neither a missing store nor an unregistered endpoint is accepted.
+			if reply.Outcome != reloadOutcomeFailed || cr.sp != local || cr.cfg != cfg {
+				t.Fatalf("unsafe route reload accepted: %+v", reply)
 			}
 		})
 	}

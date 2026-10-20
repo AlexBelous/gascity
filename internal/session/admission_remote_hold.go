@@ -54,7 +54,7 @@ func validRemoteRecord(r remoteHoldRecord) bool {
 	n, e := strconv.ParseUint(r.Generation, 10, 63)
 	return (r.Phase == "prepare_intent" || r.Phase == string(RemoteAdmissionPrepared) || r.Phase == string(RemoteAdmissionEntered) || r.Phase == string(RemoteAdmissionExited)) && r.City != "" && r.Version == 1 && r.SessionID != "" && r.Template != "" && r.RuntimeHandle != "" && e == nil && n > 0 && strconv.FormatUint(n, 10) == r.Generation &&
 		remoteHex(r.Attempt, 32) && r.Binding.Selector != "" && r.Binding.Endpoint != "" && r.Binding.ResourceDomain != "" && remoteHex(r.Binding.PolicyDigest, 64) &&
-		remoteHex(r.SourceCommit, 40) && remoteHex(r.ManifestSHA256, 64) && r.ModelUID != 0 && r.TransportUID != 0 && r.ModelUID != r.TransportUID && validRemoteSystemdProfile(recordProfile(r))
+		remoteHex(r.SourceCommit, 40) && remoteHex(r.ManifestSHA256, 64) && r.ModelUID != 0 && r.TransportUID != 0 && r.ModelUID != r.TransportUID && validRemoteSystemdProfile(recordProfile(r)) && validRemoteLaunchDescriptor(recordProfile(r).Launch)
 }
 
 // RemoteAdmissionHeld rereads the uncached source. Malformed/lost metadata and
@@ -73,6 +73,18 @@ func (s *Store) RemoteAdmissionHeld(id string) (bool, error) {
 func (s *Store) HeldRemoteAdmissionRequest(id string) (RemoteAdmissionRequest, bool, error) {
 	_, _, request, held, err := s.readRemoteHeldSource(id)
 	return request, held, err
+}
+
+// ValidatePreparedRemoteAdmissionObservation confirms that a fresh root
+// prepared observation describes this exact still-reserved source incarnation.
+// It proves no model entry, not empty capacity, and never changes the hold.
+func (s *Store) ValidatePreparedRemoteAdmissionObservation(receipt RemoteAdmissionReceipt) error {
+	bead, record, current, held, err := s.readRemoteHeldSource(receipt.Request.SessionID)
+	identity := receipt.Identity
+	if err != nil || !held || bead.Status == "closed" || bead.Metadata[remoteAdmissionStopMetadataKey] != "" || record.Phase != string(RemoteAdmissionPrepared) || receipt.Phase != RemoteAdmissionPrepared || current != receipt.Request || record.AuthorityReceiptID == "" || record.AuthorityReceiptID != receipt.AuthorityReceiptID || receipt.JournalRevision < record.JournalRevision || record.JournalRevision == 0 || identity != record.Identity || !validRemoteProfileIdentity(identity, recordProfile(record)) || identity.ScopeEmpty || identity.NeverEntered || identity.Unit != "" || identity.InvocationID != "" || identity.CgroupPath != "" || identity.CgroupDevice != 0 || identity.CgroupInode != 0 {
+		return errors.New("remote prepared observation unconfirmed")
+	}
+	return nil
 }
 
 func (s *Store) readRemoteHeldSource(id string) (beads.Bead, remoteHoldRecord, RemoteAdmissionRequest, bool, error) {
@@ -366,4 +378,17 @@ func sameRemoteStopSource(a, b beads.Bead) bool {
 		}
 	}
 	return true
+}
+
+// remoteAdmissionPendingHint projects only the need for a canonical reread.
+// The local fast path performs no journal decode or store lookup.
+func remoteAdmissionPendingHint(b beads.Bead) bool {
+	if b.Metadata[remoteAdmissionHoldMetadataKey] != "" || b.Metadata[remoteAdmissionStopMetadataKey] != "" {
+		return true
+	}
+	if b.Metadata[remoteAdmissionEverMetadataKey] == "" && b.Metadata[remoteAdmissionTerminalMetadataKey] == "" {
+		return false
+	}
+	_, _, _, held, err := decodeRemoteHeldBead(b, b.ID)
+	return held || err != nil
 }

@@ -3573,7 +3573,7 @@ func executePlannedStartsTraced(
 				}
 
 				admittedCtx, remote, allowed, reason := sessionpkg.PreflightRemoteAdmission(ctx, sp, candidate.info.ID, candidate.logicalTemplate(cfg))
-				if allowed && remote && remoteAdmissionSourceHeld(candidate.info.ID, sessFront, stderr) {
+				if allowed && remote && reconcileRemoteAdmissionSourceHold(admittedCtx, candidate.info.ID, sessFront, sp, stderr) {
 					allowed = false
 					reason = "remote_admission_held"
 				}

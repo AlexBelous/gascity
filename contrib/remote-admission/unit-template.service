@@ -1,0 +1,30 @@
+# Documentation only: helper generates the transient unit from a strict root profile.
+# This file has no approved resource values and MUST NOT be installed as-is.
+[Unit]
+Description=Finite root-admitted remote attempt
+
+[Service]
+Type=exec
+# User/Group/Slice/ExecStart/WorkingDirectory are exact operator profile values.
+Restart=no
+RemainAfterExit=yes
+KillMode=control-group
+OOMPolicy=kill
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+Delegate=no
+PrivateTmp=no
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# ReadWritePaths=<rootstate> <bounded persistent modelHOME>
+# TemporaryFileSystem=/tmp:rw,nosuid,nodev,size=<required>,mode=1777 /var/tmp:rw,nosuid,nodev,size=<required>,mode=1777 <work>:rw,nosuid,nodev,size=<required>,mode=0700,uid=<model>,gid=<model>
+# CPUQuota/MemoryMax/MemorySwapMax/TasksMax/RuntimeMaxSec/LimitFSIZE are REQUIRED.
+# StandardInput=file:<root600 stagedprompt>
+# StandardOutput=append:<root600 boundedoutput>
+# StandardError=append:<same boundedoutput>
+# ExecStartPre=+/usr/bin/python3 -I -B <immutable-helper> unit-pre <attempt>
+# ExecStartPost=+/usr/bin/python3 -I -B <immutable-helper> unit-post <attempt>
+# ExecStart=<immutable model executable and exact fixed argv>

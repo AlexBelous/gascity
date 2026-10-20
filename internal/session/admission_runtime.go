@@ -22,6 +22,7 @@ type capacityAdmissionProof struct {
 	minted, deadline time.Time
 	used             atomic.Bool
 	native           *nativeCapacityProof
+	remote           *remoteAdmissionProof
 }
 
 // AdmitCapacityStart spends at most one SID grant before start preparation.
@@ -38,6 +39,14 @@ func AdmitCapacityStart(ctx context.Context, city, route, id string, now time.Ti
 }
 
 func admitCapacityStartWithHost(ctx context.Context, city, route, id string, now time.Time, sp runtime.Provider, store beads.Store, host nativeCapacityHost) (context.Context, bool, string) {
+	binding, err := remoteBinding(ctx, sp, id, route)
+	if err != nil {
+		return ctx, false, "runtime_binding_invalid"
+	}
+	existing, _ := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof)
+	if binding != (runtime.RuntimeBinding{}) || existing != nil && existing.remote != nil {
+		return admitRemoteCapacity(ctx, city, route, id, now, binding, store)
+	}
 	if proof, ok := ctx.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok {
 		if !pathutil.SamePath(city, proof.city) || route != proof.route || id != proof.id {
 			return ctx, false, "capacity_claim_identity_mismatch"
@@ -72,10 +81,14 @@ func admitCapacityStartWithHost(ctx context.Context, city, route, id string, now
 }
 
 // WithCapacityAdmission transfers only the private admission proof to an
-// execution context, preserving that context's cancellation and deadlines.
+// execution context, preserving that context's cancellation and deadlines. A remote source-effect
+// marker survives independently when Prepare had no trustworthy reply/proof.
 func WithCapacityAdmission(ctx, admitted context.Context) context.Context {
 	if admitted == nil {
 		return ctx
+	}
+	if effect, ok := admitted.Value(remoteSourceEffectKey{}).(RemoteAdmissionRequest); ok {
+		ctx = context.WithValue(ctx, remoteSourceEffectKey{}, effect)
 	}
 	if proof, ok := admitted.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok {
 		return context.WithValue(ctx, capacityAdmissionKey{}, proof)
@@ -86,7 +99,7 @@ func WithCapacityAdmission(ctx, admitted context.Context) context.Context {
 func (m *Manager) admitRuntime(ctx context.Context, id, route string) (context.Context, error) {
 	admitted, allowed, reason := AdmitCapacityStart(ctx, m.cityPath, route, id, m.now().UTC(), m.sp, m.store)
 	if !allowed {
-		return ctx, CapacityAdmissionError(reason)
+		return admitted, remoteSourceHold(admitted, CapacityAdmissionError(reason))
 	}
 	return admitted, nil
 }
@@ -102,6 +115,21 @@ func (m *Manager) startRuntime(ctx context.Context, name string, cfg runtime.Con
 	if proof, ok := admitted.Value(capacityAdmissionKey{}).(*capacityAdmissionProof); ok {
 		if !proof.used.CompareAndSwap(false, true) {
 			return CapacityAdmissionError("capacity_session_already_claimed")
+		}
+		if proof.remote != nil {
+			begin, beginErr := beginRemoteCapacityStart(admitted, proof.remote, name, cfg)
+			if beginErr != nil {
+				return remoteSourceHold(admitted, CapacityAdmissionError(beginErr.Error()))
+			}
+			startErr := m.sp.Start(admitted, name, cfg)
+			// Cancellation is not VM exit evidence. Observe using an independent,
+			// bounded context; ambiguous authority results retain their VM seat.
+			finalCtx, cancel := context.WithTimeout(context.WithoutCancel(admitted), 10*time.Second)
+			defer cancel()
+			if finalErr := finishRemoteCapacityStart(finalCtx, proof.remote, begin, startErr); finalErr != nil {
+				return remoteSourceHold(admitted, errors.Join(startErr, CapacityAdmissionError(finalErr.Error())))
+			}
+			return remoteSourceHold(admitted, startErr)
 		}
 		if proof.native != nil {
 			cfg, err = beginNativeCapacityStart(admitted, proof, name, cfg)

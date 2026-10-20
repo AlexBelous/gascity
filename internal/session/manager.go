@@ -993,6 +993,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 
 		unroute := m.routeACPIfNeeded(provider, transport, sessName)
 		rollbackFailedCreate := func() error {
+			if remoteSourceEffect(ctx) {
+				return remoteSourceHold(ctx, CapacityAdmissionError("remote_source_reconciliation_required"))
+			}
 			if unroute != nil {
 				unroute()
 			}
@@ -1013,13 +1016,13 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		}
 
 		admittedCtx, admitErr := m.admitRuntime(ctx, b.ID, template)
+		ctx = admittedCtx
 		if admitErr != nil {
 			if rbErr := rollbackFailedCreate(); rbErr != nil {
 				return errors.Join(admitErr, rbErr)
 			}
 			return admitErr
 		}
-		ctx = admittedCtx
 
 		// If the provider supports Generate & Pass, inject --session-id into command.
 		startCommand := command
@@ -1054,6 +1057,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
 		if err := m.startRuntime(ctx, sessName, cfg); err != nil {
+			if remoteSourceEffect(ctx) {
+				return remoteSourceHold(ctx, err)
+			}
 			if !runtime.IsProviderCapacity(err) && runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
 				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
 					return metaErr
@@ -1073,6 +1079,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("starting session: %w", err)
 		}
 		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+			if remoteSourceEffect(ctx) {
+				return remoteSourceHold(ctx, metaErr)
+			}
 			if stopErr := m.sp.Stop(sessName); stopErr != nil {
 				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
 			}

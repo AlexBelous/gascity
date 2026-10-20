@@ -162,6 +162,8 @@ func stampRemoteAdmissionHold(store beads.Store, request RemoteAdmissionRequest,
 }
 
 func persistRemoteReceipt(proof *remoteAdmissionProof, receipt RemoteAdmissionReceipt) error {
+	proof.mu.Lock()
+	defer proof.mu.Unlock()
 	request := proof.reservation.Request
 	b, record, current, held, err := NewStore(beads.SessionStore{Store: proof.store}).readRemoteHeldSource(request.SessionID)
 	if err != nil || !held || current != request || b.Metadata[remoteAdmissionHoldMetadataKey] != proof.fence.Hold {
@@ -328,57 +330,16 @@ func (m *Manager) suspendRemoteSource(id, name string, observed beads.Bead, bind
 			return err
 		}
 	}
-	writer, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: m.store})
-	if err != nil || writer == nil {
-		return CapacityAdmissionError("remote_stop_writer_unavailable")
-	}
-	front := NewStore(beads.SessionStore{Store: m.store})
-	if err := front.PinRuntimeBinding(id, binding); err != nil {
-		return err
-	}
-	b, err := beads.HandlesFor(m.store).Live.Get(id)
+	stopped, err := m.stopRemoteSource(id, name, observed, binding)
 	if err != nil {
 		return err
-	}
-	bound, pinned, err := decodeRuntimeBinding(id, b.Metadata[runtimeBindingMetadataKey])
-	if err != nil || !pinned || bound != binding {
-		return CapacityAdmissionError("remote_stop_binding_changed")
-	}
-	// ResolveRuntime may select an as-yet unpinned virgin source. The canonical
-	// write-once pin above closes that window before Stop; it never changes an
-	// existing pin. Compare every original incarnation field as well.
-	originalPin := observed.Metadata[runtimeBindingMetadataKey]
-	if originalPin == "" {
-		copyMeta := make(map[string]string, len(observed.Metadata))
-		for key, value := range observed.Metadata {
-			copyMeta[key] = value
-		}
-		copyMeta[runtimeBindingMetadataKey] = b.Metadata[runtimeBindingMetadataKey]
-		observed.Metadata = copyMeta
-	}
-	if !sameRemoteStopSource(observed, b) {
-		return CapacityAdmissionError("remote_stop_source_changed")
-	}
-	intent := NewInstanceToken()
-	if err := writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{remoteAdmissionStopMetadataKey: intent}}); err != nil {
-		return CapacityAdmissionError("remote_stop_intent_cas_changed")
-	}
-	if err := m.sp.Stop(name); err != nil {
-		return err
-	}
-	after, err := beads.HandlesFor(m.store).Live.Get(id)
-	if err != nil {
-		return err
-	}
-	if !sameRemoteStopSource(b, after) || after.Metadata[remoteAdmissionStopMetadataKey] != intent {
-		return CapacityAdmissionError("remote_stop_source_changed")
 	}
 	now := m.now().UTC()
 	patch := map[string]string{
 		"state": string(StateSuspended), "held_until": now.Add(indefiniteSuspendHoldDuration).Format(time.RFC3339),
 		"sleep_intent": "user-hold", "slept_at": "", "sleep_reason": "", "suspended_at": now.Format(time.RFC3339), remoteAdmissionStopMetadataKey: "",
 	}
-	if err := writer.UpdateIfMatch(id, after.Revision, beads.UpdateOpts{Metadata: patch}); err != nil {
+	if err := stopped.writer.UpdateIfMatch(id, stopped.source.Revision, beads.UpdateOpts{Metadata: patch}); err != nil {
 		return CapacityAdmissionError("remote_stop_completion_cas_changed")
 	}
 	return nil

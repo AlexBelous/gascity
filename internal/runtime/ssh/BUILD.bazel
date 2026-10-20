@@ -11,12 +11,16 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/ssh",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/runtime"],
+    deps = [
+        "//internal/runtime",
+        "//internal/runtime/proctable",
+    ],
 )
 
 go_test(
     name = "ssh_test",
     srcs = [
+        "provider_partial_snapshot_test.go",
         "provider_test.go",
         "seams_test.go",
         "session_env_file_test.go",

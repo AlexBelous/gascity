@@ -14,7 +14,7 @@ spec.loader.exec_module(g)
 
 
 def configuration(directory):
-    return dict(schema_version=1, profile_id="test", city="city", template="role", binding=dict(selector="ssh", endpoint="test", resource_domain="test", policy_digest="a"*64), source_sha="a"*40, manifest_sha256="b"*64, transport_uid=987, model_uid=988, model_gid=982, unit_prefix="test", cgroup_parent="/test.slice", state_dir=str(directory), helper_path="/opt/immutable/helper.py", helper_sha256="c"*64, model_argv=["/opt/immutable/model", "exec", "--model", "test"], model_exe_sha256="d"*64, environment={"PATH":"/usr/bin:/bin","HOME":"/var/lib/test-model"}, environment_keys=["LANG"], resources=dict(cpu_quota_percent=1, memory_max_bytes=1, memory_swap_max_bytes=0, tasks_max=1, runtime_max_seconds=1,output_max_bytes=1048576,tmp_max_bytes=1048576,work_max_bytes=1048576), thresholds=dict(min_mem_available_bytes=1,max_memory_psi_full_avg10=0,max_io_psi_full_avg10=0,min_disk_available_bytes=1,min_free_inodes=1), disk_path="/srv", model_home="/var/lib/test-model", transport_home="/var/lib/test-transport", working_directory="/var/lib/test-work",home_mount=dict(source="/dev/loop0",device_major=7,device_minor=0,max_bytes=1048576,backing_file="/var/lib/test.img",backing_device=1,backing_inode=2))
+    return dict(schema_version=1, max_consumed_attempts=2, profile_id="test", city="city", template="role", binding=dict(selector="ssh", endpoint="test", resource_domain="test", policy_digest="a"*64), source_sha="a"*40, manifest_sha256="b"*64, transport_uid=987, model_uid=988, model_gid=982, unit_prefix="test", cgroup_parent="/test.slice", state_dir=str(directory), helper_path="/opt/immutable/helper.py", helper_sha256="c"*64, model_argv=["/opt/immutable/model", "exec", "--model", "test"], model_exe_sha256="d"*64, environment={"PATH":"/usr/bin:/bin","HOME":"/var/lib/test-model"}, environment_keys=["LANG"], resources=dict(cpu_quota_percent=1, memory_max_bytes=1, memory_swap_max_bytes=0, tasks_max=1, runtime_max_seconds=1,output_max_bytes=1048576,tmp_max_bytes=1048576,work_max_bytes=1048576), thresholds=dict(min_mem_available_bytes=1,max_memory_psi_full_avg10=0,max_io_psi_full_avg10=0,min_disk_available_bytes=1,min_free_inodes=1), disk_path="/srv", model_home="/var/lib/test-model", transport_home="/var/lib/test-transport", working_directory="/var/lib/test-work",home_mount=dict(source="/dev/loop0",device_major=7,device_minor=0,max_bytes=1048576,backing_file="/var/lib/test.img",backing_device=1,backing_inode=2))
 
 
 class FakeHost:
@@ -486,5 +486,70 @@ class GuardTests(unittest.TestCase):
     def test_fresh_authority_requires_operator_provisioned_ledger(self):
         (self.directory/"ledger.json").rename(self.directory/"operator-empty-retained.json")
         self.refuses(self.a.prepare,self.req)
+
+    def test_total_budget_profile_requires_explicit_limit(self):
+        config=copy.deepcopy(self.config)
+        config.pop("max_consumed_attempts",None)
+        self.refuses(g.Profile,config)
+
+    def budget(self,limit):
+        self.config["max_consumed_attempts"]=limit
+        self.profile=g.Profile(self.config,owner=os.getuid())
+        self.host=FakeHost(self.profile)
+        self.a=g.Authority(self.profile,self.host)
+    def finish_first(self):
+        self.entered();self.host.phase="exited";self.host.sc["empty"]=True
+        self.assertEqual(self.a.observe(self.req)["phase"],"exited")
+    def test_total_budget_one_refuses_second_after_terminal(self):
+        self.budget(1);self.finish_first()
+        req=copy.deepcopy(self.req);req["attempt"]="2"*32
+        self.refuses(self.a.prepare,req)
+        self.assertEqual(self.host.started,1)
+    def test_total_budget_preconsume_cancel_does_not_charge(self):
+        self.budget(1);self.stage();self.a.cancel(self.req)
+        req=copy.deepcopy(self.req);req["attempt"]="2"*32
+        self.a.prepare(req);self.a.stage_prompt(req,"second",{})
+        self.a.enter(req["attempt"],987)
+        self.assertEqual(self.host.started,1)
+    def test_total_budget_enter_rechecks_retained_history(self):
+        self.budget(1);self.stage()
+        # Simulate a retained historical consumed record appearing before entry.
+        with self.a.locked() as state:
+            row=copy.deepcopy(state["attempts"][self.req["attempt"]])
+            row["request"]["attempt"]="2"*32
+            row.update(phase="exited",ever_consumed=True,attested=True,never_entered=False)
+            state["attempts"]["2"*32]=row
+            g.atomic(self.directory/"ledger.json",state)
+        self.refuses(self.a.enter,self.req["attempt"],987)
+        self.assertEqual(self.host.started,0)
+    def test_total_budget_two_allows_explicit_second(self):
+        self.budget(2);self.finish_first()
+        req=copy.deepcopy(self.req);req["attempt"]="2"*32
+        self.a.prepare(req);self.a.stage_prompt(req,"second",{})
+        self.a.enter(req["attempt"],987)
+        self.assertEqual(self.host.started,2)
+    def test_total_budget_same_consumed_never_reenters(self):
+        self.budget(1);self.finish_first()
+        receipt=self.a.prepare(self.req)
+        self.assertEqual(receipt["phase"],"exited")
+        self.refuses(self.a.enter,self.req["attempt"],987)
+        self.assertEqual(self.host.started,1)
+    def test_total_budget_profile_rejects_boolean_zero_negative(self):
+        for limit in (True,0,-1,"1"):
+            config=copy.deepcopy(self.config);config["max_consumed_attempts"]=limit
+            self.refuses(g.Profile,config)
+    def test_total_budget_missing_malformed_history_refuses(self):
+        self.budget(1);self.finish_first()
+        for malformed in (None,False,"true"):
+            with self.a.locked() as state:
+                row=state["attempts"][self.req["attempt"]]
+                if malformed is None:row.pop("ever_consumed")
+                else:row["ever_consumed"]=malformed
+                g.atomic(self.directory/"ledger.json",state)
+            req=copy.deepcopy(self.req);req["attempt"]="2"*32
+            self.refuses(self.a.prepare,req)
+            # Restore exact positive history directly as an operator fixture only.
+            state["attempts"][self.req["attempt"]]["ever_consumed"]=True
+            g.atomic(self.directory/"ledger.json",state)
 
 if __name__ == "__main__":unittest.main()

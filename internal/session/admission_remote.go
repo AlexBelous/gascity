@@ -60,13 +60,15 @@ type RemoteBeginReceipt struct {
 // permit is consumed inside the future provider transport, not by this API.
 // Opaque permits stay private to that backend/transport, never in receipts.
 type RemoteAdmissionProfile struct {
+	Launch                    RemoteLaunchDescriptor
 	UnitPrefix, CgroupParent  string
 	Binding                   runtime.RuntimeBinding
 	SourceSHA, ManifestSHA256 string
 	ModelUID, TransportUID    uint32
 	Prepare                   func(context.Context, RemoteAdmissionRequest) (RemoteAdmissionReceipt, error)
-	Begin                     func(context.Context, RemoteAdmissionReceipt) (RemoteBeginReceipt, error)
-	Finish                    func(context.Context, RemoteBeginReceipt, error) (RemoteAdmissionReceipt, error)
+	// Begin stages literal input and returns only the fixed guarded launch config.
+	Begin  func(context.Context, RemoteAdmissionReceipt, runtime.Config) (RemoteBeginReceipt, runtime.Config, error)
+	Finish func(context.Context, RemoteBeginReceipt, error) (RemoteAdmissionReceipt, error)
 }
 
 type (
@@ -82,7 +84,7 @@ func WithRemoteAdmissionProfiles(ctx context.Context, profiles ...RemoteAdmissio
 		if p.Binding.Selector == "" || p.Binding.Endpoint == "" || p.Binding.ResourceDomain == "" ||
 			!remoteHex(p.Binding.PolicyDigest, 64) || !remoteHex(p.SourceSHA, 40) || !remoteHex(p.ManifestSHA256, 64) ||
 			p.ModelUID == 0 || p.TransportUID == 0 || p.ModelUID == p.TransportUID ||
-			!validRemoteSystemdProfile(p) ||
+			!validRemoteSystemdProfile(p) || !validRemoteLaunchDescriptor(p.Launch) ||
 			p.Prepare == nil || p.Begin == nil || p.Finish == nil {
 			return ctx, errors.New("remote admission profile invalid")
 		}
@@ -192,19 +194,28 @@ func remoteProofCurrent(proof *remoteAdmissionProof) bool {
 	return err == nil && current == r && fence == proof.fence
 }
 
-func beginRemoteCapacityStart(ctx context.Context, proof *remoteAdmissionProof, name string, cfg runtime.Config) (RemoteBeginReceipt, error) {
+func beginRemoteCapacityStart(ctx context.Context, proof *remoteAdmissionProof, name string, cfg runtime.Config) (RemoteBeginReceipt, runtime.Config, error) {
 	r := proof.reservation.Request
 	if ctx.Err() != nil || name != r.RuntimeHandle || cfg.Command == "" || cfg.CommandScope != nil ||
 		cfg.Env["GC_SESSION_ID"] != r.SessionID || cfg.Env["GC_TEMPLATE"] != r.Template ||
 		cfg.Env["GC_SESSION_NAME"] != r.RuntimeHandle || cfg.Env["GC_RUNTIME_EPOCH"] != r.Generation ||
 		cfg.Env["GC_INSTANCE_TOKEN"] != r.InstanceToken || !remoteProofCurrent(proof) {
-		return RemoteBeginReceipt{}, errors.New("remote_admission_begin_identity_changed")
+		return RemoteBeginReceipt{}, runtime.Config{}, errors.New("remote_admission_begin_identity_changed")
 	}
-	begin, err := proof.profile.Begin(ctx, proof.reservation)
+	expected, err := guardedRemoteLaunchConfig(proof.profile.Launch, r, cfg)
+	if err != nil {
+		return RemoteBeginReceipt{}, runtime.Config{}, err
+	}
+	begin, launchCfg, err := proof.profile.Begin(ctx, proof.reservation, cloneRemoteLaunchInput(cfg))
 	if err != nil || begin.Reservation != proof.reservation || begin.IntentID == "" || !remoteProofCurrent(proof) || ctx.Err() != nil {
-		return RemoteBeginReceipt{}, errors.New("remote_admission_begin_unknown")
+		return RemoteBeginReceipt{}, runtime.Config{}, errors.New("remote_admission_begin_unknown")
 	}
-	return begin, nil
+	if err := validateRemoteLaunchConfig(expected, launchCfg); err != nil {
+		return RemoteBeginReceipt{}, runtime.Config{}, err
+	}
+	// Keep SDK ownership after validation; callback-held maps/slices cannot
+	// mutate the transport identity between this check and Provider.Start.
+	return begin, expected, nil
 }
 
 func finishRemoteCapacityStart(ctx context.Context, proof *remoteAdmissionProof, begin RemoteBeginReceipt, startErr error) error {

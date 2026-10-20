@@ -1206,6 +1206,7 @@ func buildPreparedStartWithWorkDirResolver(
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
 		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+		agentCfg.PromptText = runtime.PromptTextFromLiteral(agentCfg.Nudge)
 		if agentCfg.Env != nil {
 			delete(agentCfg.Env, startupPromptDeliveredEnv)
 		}
@@ -1224,17 +1225,15 @@ func buildPreparedStartWithWorkDirResolver(
 	if msg, ok := sessionOverrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
 		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
 			agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
+			agentCfg.PromptText = runtime.PromptTextFromLiteral(agentCfg.Nudge)
 		} else {
-			existing := ""
-			if agentCfg.PromptSuffix != "" {
-				parts := shellquote.Split(agentCfg.PromptSuffix)
-				if len(parts) > 0 {
-					existing = parts[0]
-				}
-			}
+			// Keep literal delivery independent of shell-quoted command text.
+			existing := agentCfg.PromptText.Literal()
 			if existing != "" {
-				agentCfg.PromptSuffix = shellquote.Quote(existing + "\n\n---\n\nUser message:\n" + msg)
+				agentCfg.PromptText = runtime.PromptTextFromLiteral(existing + "\n\n---\n\nUser message:\n" + msg)
+				agentCfg.PromptSuffix = shellquote.Quote(agentCfg.PromptText.Literal())
 			} else {
+				agentCfg.PromptText = runtime.PromptTextFromLiteral(msg)
 				agentCfg.PromptSuffix = shellquote.Quote(msg)
 			}
 		}

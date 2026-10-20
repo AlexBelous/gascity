@@ -117,11 +117,11 @@ func (m *Manager) startRuntime(ctx context.Context, name string, cfg runtime.Con
 			return CapacityAdmissionError("capacity_session_already_claimed")
 		}
 		if proof.remote != nil {
-			begin, beginErr := beginRemoteCapacityStart(admitted, proof.remote, name, cfg)
+			begin, launchCfg, beginErr := beginRemoteCapacityStart(admitted, proof.remote, name, cfg)
 			if beginErr != nil {
 				return remoteSourceHold(admitted, CapacityAdmissionError(beginErr.Error()))
 			}
-			startErr := m.sp.Start(admitted, name, cfg)
+			startErr := m.sp.Start(admitted, name, launchCfg)
 			// Cancellation is not VM exit evidence. Observe using an independent,
 			// bounded context; ambiguous authority results retain their VM seat.
 			finalCtx, cancel := context.WithTimeout(context.WithoutCancel(admitted), 10*time.Second)

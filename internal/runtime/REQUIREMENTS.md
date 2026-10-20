@@ -155,3 +155,9 @@ move into the ledger above only together with the tests that prove them.
 | RUNTIME-ROUTE-002 | Policy/template changes after SID binding | Reads, cleanup and observation use the persisted binding; a new Start/Relaunch must revalidate exact SID/template and current launch policy. Removed policy and changed digest refuse launches. | `internal/runtime/routing/routing_test.go`; `cmd/gc/agent_runtime_routing_test.go` |
 | RUNTIME-ROUTE-003 | Explicit runtime resolution fails | No city-default tmux fallback; lookup failures preserve unavailable observations and do not issue local verbs. Remote routes never advertise local command containment. | `internal/runtime/routing/routing_test.go`; `cmd/gc/agent_runtime_routing.go` |
 | RUNTIME-ROUTE-004 | Accepted config reload with explicit or pinned routes | Refresh routing policy from the new generation while reusing the exact local backend; do not enter city-provider stop-all for overlay-only changes. An unavailable routing store refuses the reload and preserves the prior config/provider. | `cmd/gc/agent_runtime_routing_test.go` `TestAgentRuntimeRoutingReloadAddsRouterAndRefusesUnavailableRoutes`; `cmd/gc/city_runtime.go` |
+
+## Literal guarded startup payload
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| RUNTIME-PROMPT-001 | Guarded transport stages startup text | Preserve the chosen literal argv/flag/nudge payload through render, resume and initial-message decisions without shell parsing or evaluation. Missing and explicitly empty carriers are distinguishable. The invocation-local carrier is omitted from JSON, redacted in ordinary formatting/structured logs, and excluded from desired fingerprints. Existing local delivery remains unchanged. | `prompt_text_test.go`; `cmd/gc/remote_prompt_text_test.go` |

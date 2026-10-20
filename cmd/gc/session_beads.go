@@ -2924,7 +2924,7 @@ func reapStaleSessionBeads(
 		// or on an API error), and closing releases the identity lease so a
 		// successor mints under a new name, leaving this box unaddressed. Hold
 		// the row; the next pass retries.
-		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+		if !releaseBeadScopedPoolRuntime(info, sp, sessionFrontDoor(store), stderr) {
 			continue
 		}
 		if closeBead(store, info.ID, "stale-session", now.UTC(), stderr) {
@@ -3200,6 +3200,9 @@ func cleanupDeadRuntimeSessionCorpses(
 		if claimsLive && !deadRuntimeBelongsToRow(info, name, sp, deadChecker, stderr) {
 			continue
 		}
+		if remoteAdmissionSourceHeld(info.ID, sessionFrontDoor(store), stderr) {
+			continue
+		}
 		if err := sp.Stop(name); err != nil {
 			if runtime.IsSessionGone(err) {
 				continue
@@ -3331,6 +3334,9 @@ func reapRuntimesBoundToClosedBeads(
 			continue
 		}
 
+		if remoteAdmissionSourceHeld(liveID, sessionFrontDoor(store), stderr) {
+			continue
+		}
 		if err := sp.Stop(name); err != nil {
 			if runtime.IsSessionGone(err) {
 				continue
@@ -3640,6 +3646,9 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // pool reconciler can re-pick them. Without this, work orphaned by a
 // reap stays orphaned until someone clears the assignee by hand.
 func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
+	if remoteAdmissionSourceHeld(id, sessionFrontDoor(store), stderr) {
+		return false
+	}
 	return closeBeadPreservingAssignees(store, id, reason, nil, now, stderr)
 }
 

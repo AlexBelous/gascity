@@ -143,7 +143,7 @@ func TestPoolSessionCreate_TeardownFailureHoldsTheSlot(t *testing.T) {
 	// The backend recovers: the level-triggered rollback retries the teardown,
 	// the row closes, and only then may the slot mint a successor.
 	delete(sp.StopErrors, first.SessionNameMetadata)
-	if !releaseBeadScopedPoolRuntime(first, sp, io.Discard) {
+	if !releaseBeadScopedPoolRuntime(first, sp, sessionFrontDoor(store), io.Discard) {
 		t.Fatal("teardown still refused after the backend recovered")
 	}
 	rollbackPendingCreate(first, sessionFrontDoor(store), now, io.Discard)

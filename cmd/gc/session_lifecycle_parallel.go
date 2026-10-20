@@ -1960,6 +1960,9 @@ func commitAsyncStartResultWithContext(
 		refreshed.rollbackPending = false
 	}
 	if ctx != nil && ctx.Err() != nil {
+		if remoteAdmissionSourceHeld(refreshed.prepared.candidate.info.ID, sessFront, stderr) {
+			return false
+		}
 		if startOutcomeDefersCommit(refreshed.outcome) {
 			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace) == startCommitSucceeded
 		}
@@ -1972,8 +1975,8 @@ func commitAsyncStartResultWithContext(
 		// again. A held row keeps its pending claim and falls through to the
 		// lease-expired rollback, which retries the teardown.
 		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) &&
-			releaseBeadScopedPoolRuntime(refreshed.prepared.candidate.info, sp, stderr) {
-			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
+			releaseBeadScopedPoolRuntime(refreshed.prepared.candidate.info, sp, sessFront, stderr) {
+			stopStaleAsyncStartRuntime(refreshed, sp, sessFront, stderr)
 			rollbackPendingCreate(refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
@@ -1987,7 +1990,7 @@ func commitAsyncStartResultWithContext(
 		// The atomic commit can lose to rollback after the earlier refresh.
 		// Cleanup is outside the lock and checks the attempted runtime identity,
 		// never the identity of a replacement read from the store.
-		stopStaleAsyncStartRuntime(result, sp, stderr)
+		stopStaleAsyncStartRuntime(result, sp, sessFront, stderr)
 	}
 	return verdict == startCommitSucceeded
 }
@@ -2000,13 +2003,19 @@ func commitAsyncStartResultWithContext(
 // close a bead and free an alias from. It keeps the lease handling below and
 // retries next tick.
 func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVerdict, sp runtime.Provider, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) string {
+	if remoteAdmissionSourceHeld(result.prepared.candidate.info.ID, sessFront, stderr) {
+		if refresh.releaseInFlight {
+			clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
+		}
+		return "remote_admission_held"
+	}
 	deferred := startOutcomeDefersCommit(result.outcome)
 	switch {
 	case refresh.rollbackPendingCreate && !deferred:
 		// The rollback frees the alias, so it waits until the runtime this
 		// start spawned is confirmed gone. When it survives or cannot be
 		// observed, the row keeps the discard below and retries.
-		if pendingCreateRuntimeClearedForRollback(result, sp, stderr) {
+		if pendingCreateRuntimeClearedForRollback(result, sp, sessFront, stderr) {
 			switch rollbackPendingCreateConfirmed(result.prepared.candidate.info, refresh.current, sessFront, clk.Now().UTC(), stderr) {
 			case pendingCreateRolledBack:
 				// The rollback cleared last_woke_at in its own terminal write.
@@ -2017,7 +2026,7 @@ func settleUncommittedAsyncStart(result startResult, refresh asyncStartRefreshVe
 			}
 		}
 	case refresh.cleanupRuntime && !deferred:
-		stopStaleAsyncStartRuntime(result, sp, stderr)
+		stopStaleAsyncStartRuntime(result, sp, sessFront, stderr)
 	}
 	if refresh.releaseInFlight {
 		clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
@@ -2106,6 +2115,12 @@ func clearPendingStartInFlightLease(handle string, sessFront *sessionpkg.Store, 
 	if strings.TrimSpace(handle) == "" || sessFront == nil {
 		return
 	}
+	// A positive held source retains its advisory lease. A failed read still
+	// forbids Stop/close/identity cleanup, but clearing this retry timestamp is
+	// harmless: the durable admission journal remains the VM authority gate.
+	if held, err := sessFront.RemoteAdmissionHeld(handle); held && err == nil {
+		return
+	}
 	setMeta(sessFront, handle, "last_woke_at", "", stderr) //nolint:errcheck
 }
 
@@ -2121,7 +2136,10 @@ func clearPendingStartInFlightLease(handle string, sessFront *sessionpkg.Store, 
 // exec pack without get-meta, a k8s pod whose tmux is not up yet — still
 // stops by name. Only a runtime that positively reports a different
 // generation of the same bead (a newer instance token) is left alone.
-func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr io.Writer) {
+func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, sessFront *sessionpkg.Store, stderr io.Writer) {
+	if remoteAdmissionSourceHeld(result.prepared.candidate.info.ID, sessFront, stderr) {
+		return
+	}
 	if sp == nil || strings.TrimSpace(result.prepared.candidate.info.ID) == "" {
 		return
 	}
@@ -2235,6 +2253,9 @@ func startPreparedStartCandidate(
 			// provider rate-limit screen in the pane is not counted as a crash.
 			crashOutput, peekErr := sp.Peek(name, rateLimitPeekLines)
 			recycleBegin := time.Now()
+			if remoteAdmissionSourceHeld(item.candidate.info.ID, sessionFrontDoor(store), io.Discard) {
+				return false, sessionpkg.CapacityAdmissionError("remote_source_reconciliation_required")
+			}
 			stopErr := sp.Stop(name)
 			if phases != nil {
 				phases.ZombieRecycle = time.Since(recycleBegin)
@@ -2660,6 +2681,10 @@ func commitStartResultTraced(
 // out of commitStartResultTraced to keep the success path legible; the caller
 // returns startCommitFailed after invoking it.
 func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, wave int, stderr io.Writer, trace *sessionReconcilerTraceCycle) {
+	if sessionpkg.IsRemoteAdmissionHeld(result.err) || remoteAdmissionSourceHeld(result.prepared.candidate.info.ID, sessFront, stderr) {
+		logLifecycleOutcome(stderr, "start", wave, result.prepared.candidate.name(), result.prepared.candidate.tp.TemplateName, "remote_admission_held", result.started, result.finished, result.err, result.phases)
+		return
+	}
 	info := result.prepared.candidate.info
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
@@ -2679,7 +2704,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// arm below) never reached gc.agent.starts.total at all.
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), result.err)
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
-		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, sessFront, stderr) {
 			// The runtime teardown could not be confirmed, so the row must stay
 			// OPEN in its pending-create state: marking the terminal error would
 			// park it asleep with its claim cleared, where neither reconciler
@@ -2784,7 +2809,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// here: it actually launched and exited, so the stale pending-create
 			// must clear for a fresh attempt next tick, matching base's fast
 			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
-			if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+			if releaseBeadScopedPoolRuntime(info, result.provider, sessFront, stderr) {
 				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 			}
 		}
@@ -3075,6 +3100,9 @@ func runningSessionMatchesPendingCreateInfo(info sessionpkg.Info, sessionName st
 // failed. The session_name clear is left out of the returned clears when the
 // row was reopened before it could land.
 func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, commitMsg string, preClose map[string]string, stderr io.Writer) (map[string]string, bool) {
+	if remoteAdmissionSourceHeld(info.ID, sessFront, stderr) {
+		return nil, false
+	}
 	store := sessFront.Store()
 	preCloseClears := map[string]string{"last_woke_at": ""}
 	for k, v := range preClose {
@@ -3246,7 +3274,10 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 // (named sessions, tmux_alias pools, legacy identity-derived names) re-target
 // the same name on retry and are left to the existing provider-level cleanup.
 // A nil provider (test-built results) keeps the previous close-only behavior.
-func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer) bool {
+func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, sessFront *sessionpkg.Store, stderr io.Writer) bool {
+	if remoteAdmissionSourceHeld(info.ID, sessFront, stderr) {
+		return false
+	}
 	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
 		return true
 	}
@@ -3542,7 +3573,14 @@ func executePlannedStartsTraced(
 					}
 				}
 
-				admittedCtx, allowed, reason := sessionpkg.AdmitCapacityStart(ctx, cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, store)
+				admittedCtx, remote, allowed, reason := sessionpkg.PreflightRemoteAdmission(ctx, sp, candidate.info.ID, candidate.logicalTemplate(cfg))
+				if allowed && remote && remoteAdmissionSourceHeld(candidate.info.ID, sessFront, stderr) {
+					allowed = false
+					reason = "remote_admission_held"
+				}
+				if allowed && !remote {
+					admittedCtx, allowed, reason = sessionpkg.AdmitCapacityStart(admittedCtx, cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, store)
+				}
 				if !allowed {
 					if release != nil {
 						release()
@@ -3568,6 +3606,19 @@ func executePlannedStartsTraced(
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "failed", time.Time{}, time.Time{}, err)
 					continue
+				}
+				if remote {
+					admittedCtx, allowed, reason = sessionpkg.AdmitCapacityStart(admittedCtx, cityPath, candidate.logicalTemplate(cfg), candidate.info.ID, clk.Now().UTC(), sp, store)
+					if !allowed {
+						if release != nil {
+							release()
+						}
+						if done != nil {
+							done()
+						}
+						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), reason, time.Time{}, time.Time{}, nil)
+						continue
+					}
 				}
 				item.admissionContext = admittedCtx
 				if startOpts.async {
@@ -3620,7 +3671,7 @@ func executePlannedStartsTraced(
 				case startCommitSucceeded:
 					wakeCount++
 				case startCommitStale:
-					stopStaleAsyncStartRuntime(result, sp, stderr)
+					stopStaleAsyncStartRuntime(result, sp, sessFront, stderr)
 				}
 			}
 			if startOpts.async && asyncFollowUpRequired {

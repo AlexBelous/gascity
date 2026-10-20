@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -26,7 +27,9 @@ type remoteAdmissionTestProvider struct {
 
 func (p *remoteAdmissionTestProvider) BindRuntime(_ context.Context, id, _ string) (runtime.RuntimeBinding, error) {
 	if p.store != nil {
-		p.lastSID = id
+		if p.lastSID == "" {
+			p.lastSID = id
+		}
 		if err := NewStore(beads.SessionStore{Store: p.store}).PinRuntimeBinding(id, p.binding); err != nil {
 			return runtime.RuntimeBinding{}, err
 		}
@@ -70,7 +73,7 @@ func newRemoteAdmissionTestAuthority(binding runtime.RuntimeBinding) *remoteAdmi
 		a.occupied = true
 		a.prepared = RemoteAdmissionReceipt{
 			Request: r, AuthorityReceiptID: "vm-receipt", JournalRevision: 1, Phase: RemoteAdmissionPrepared,
-			Identity: RemoteVMIdentity{BootID: strings.Repeat("c", 32), SourceSHA: a.profile.SourceSHA, ManifestSHA256: a.profile.ManifestSHA256, ModelUID: 997, TransportUID: 998},
+			Identity: RemoteVMIdentity{ScopeIdentity: RemoteScopeIdentity{BootID: strings.Repeat("c", 32), CgroupPath: a.profile.CgroupParent, Device: 1, Inode: 9}, BootID: strings.Repeat("c", 32), SourceSHA: a.profile.SourceSHA, ManifestSHA256: a.profile.ManifestSHA256, ModelUID: 997, TransportUID: 998},
 		}
 		return a.prepared, nil
 	}
@@ -100,14 +103,14 @@ func newRemoteAdmissionTestAuthority(binding runtime.RuntimeBinding) *remoteAdmi
 func remoteAdmissionFixture(t *testing.T) (string, *beads.MemStore, beads.Bead, *remoteAdmissionTestProvider, *remoteAdmissionTestAuthority) {
 	t.Helper()
 	city := t.TempDir()
-	store := beads.NewMemStore()
+	store := runtimeBindingMemStore(t)
 	b := nativeTestSession(t, store)
 	if err := store.SetMetadataBatch(b.ID, map[string]string{"generation": "7", "instance_token": strings.Repeat("e", 32)}); err != nil {
 		t.Fatal(err)
 	}
 	b, _ = store.Get(b.ID)
 	binding := runtime.RuntimeBinding{Selector: "ssh:executor@example", Endpoint: "executor@example", ResourceDomain: "remote-domain", PolicyDigest: strings.Repeat("f", 64)}
-	p := &remoteAdmissionTestProvider{Fake: runtime.NewFake(), binding: binding}
+	p := &remoteAdmissionTestProvider{Fake: runtime.NewFake(), binding: binding, store: store}
 	return city, store, b, p, newRemoteAdmissionTestAuthority(binding)
 }
 
@@ -126,7 +129,12 @@ func remoteAdmissionContext(t *testing.T, a *remoteAdmissionTestAuthority) conte
 
 func TestRemoteAdmissionFullLocalCapDoesNotSpendLocalSeat(t *testing.T) {
 	city, _, host, _, store := nativeTestFixture(t, 3)
+	_, casErr := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{Provider: "file", ConditionalWrites: gate.Require, OpenFileStore: func() (beads.Store, error) { return store, nil }})
+	if casErr != nil {
+		t.Fatal(casErr)
+	}
 	_, _, b, p, a := remoteAdmissionFixture(t)
+	p.store = store
 	b.ID = ""
 	b, err := store.Create(b)
 	if err != nil {
@@ -493,6 +501,9 @@ func TestRemoteAdmissionStrictFinishMutationMatrix(t *testing.T) {
 		{"cgroup-dirty", func(r *RemoteAdmissionReceipt) { r.Identity.CgroupPath = "/system.slice/../" + r.Identity.Unit }},
 		{"cgroup-device", func(r *RemoteAdmissionReceipt) { r.Identity.CgroupDevice = 0 }},
 		{"cgroup-inode", func(r *RemoteAdmissionReceipt) { r.Identity.CgroupInode = 0 }},
+		{"never-entered-is-not-started", func(r *RemoteAdmissionReceipt) { r.Identity.NeverEntered = true }},
+		{"parent-inode-replaced", func(r *RemoteAdmissionReceipt) { r.Identity.ScopeIdentity.Inode++ }},
+		{"parent-device-replaced", func(r *RemoteAdmissionReceipt) { r.Identity.ScopeIdentity.Device++ }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

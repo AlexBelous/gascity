@@ -996,6 +996,13 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			if remoteSourceEffect(ctx) {
 				return remoteSourceHold(ctx, CapacityAdmissionError("remote_source_reconciliation_required"))
 			}
+			if handled, rollbackErr := NewStore(beads.SessionStore{Store: m.store}).rollbackRemoteCreatedSource(b.ID, explicitName != ""); handled {
+				if rollbackErr == nil && unroute != nil {
+					unroute()
+				}
+				return rollbackErr
+			}
+
 			if unroute != nil {
 				unroute()
 			}
@@ -1303,6 +1310,16 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
+		}
+		// Reads/Stop use the immutable historical route, even after policy reload.
+		if resolver, ok := m.sp.(runtime.SessionRuntimeProvider); ok {
+			binding, resolveErr := resolver.ResolveRuntime(sessName)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			if binding != (runtime.RuntimeBinding{}) {
+				return m.suspendRemoteSource(id, sessName, b, binding)
+			}
 		}
 		return m.withNativeCapacityTeardown(id, b.Metadata["template"], func() error {
 			// Closed beads are terminal; mutating lifecycle metadata after

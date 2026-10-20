@@ -77,7 +77,10 @@ func asyncStartDriftRollbackEligibleInfo(prepared, current sessionpkg.Info) bool
 // replacement start would fail on the name. So this fails closed:
 // stopStaleAsyncStartRuntime alone is not enough, because it returns silently
 // when it cannot attribute the runtime and it swallows Stop errors.
-func pendingCreateRuntimeClearedForRollback(result startResult, sp runtime.Provider, stderr io.Writer) bool {
+func pendingCreateRuntimeClearedForRollback(result startResult, sp runtime.Provider, sessFront *sessionpkg.Store, stderr io.Writer) bool {
+	if remoteAdmissionSourceHeld(result.prepared.candidate.info.ID, sessFront, stderr) {
+		return false
+	}
 	if sp == nil {
 		// No provider, so this start never reached a runtime this process can
 		// see. There is nothing to strand.

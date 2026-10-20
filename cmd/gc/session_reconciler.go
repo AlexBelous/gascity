@@ -1818,7 +1818,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// the close is store-only, so a raw re-projection of *session still sees it
 	// open — the fold must match that.
 	attemptRollbackPendingCreate := func(info sessionpkg.Info, templateName, name, action, detail string, clearClaim bool) map[string]string {
-		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+		if !releaseBeadScopedPoolRuntime(info, sp, sessFront, stderr) {
 			return nil
 		}
 		rollbacksThisTick++
@@ -2113,7 +2113,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					closedFailedCreate := releaseBeadScopedPoolRuntime(infoByID[id], sp, stderr) &&
+					closedFailedCreate := releaseBeadScopedPoolRuntime(infoByID[id], sp, sessFront, stderr) &&
 						closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false)
 					if closedFailedCreate {
 						// Reflect the in-memory close on the snapshot: the cross-session

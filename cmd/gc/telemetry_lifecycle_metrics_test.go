@@ -441,7 +441,7 @@ func TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric(t *testing.T) {
 			},
 		}
 		var stderr bytes.Buffer
-		stopStaleAsyncStartRuntime(result, sp, &stderr)
+		stopStaleAsyncStartRuntime(result, sp, nil, &stderr)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
 		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "stale-async-start", "status": "ok"}) {
@@ -470,7 +470,7 @@ func TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric(t *testing.T) {
 			},
 		}
 		var stderr bytes.Buffer
-		stopStaleAsyncStartRuntime(result, sp, &stderr)
+		stopStaleAsyncStartRuntime(result, sp, nil, &stderr)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when there is no matching stale runtime to stop", points)

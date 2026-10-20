@@ -31,9 +31,20 @@ type RemoteAdmissionRequest struct {
 	Binding                                                                      runtime.RuntimeBinding
 }
 
-// RemoteVMIdentity carries root-profile pins and observed kernel identity.
+// RemoteScopeIdentity is fresh root-observed identity of the persistent parent.
+type RemoteScopeIdentity struct {
+	BootID, CgroupPath string
+	Device, Inode      uint64
+}
+
+// RemoteVMIdentity carries root-profile pins and attested historical child identity.
 // SourceSHA is a 40-hex Git commit, ManifestSHA256 a 64-hex byte digest.
+// ScopeIdentity/ScopeEmpty describe a fresh recursive parent-scope observation.
+// NeverEntered is explicit root revocation-before-consume evidence, never inference.
 type RemoteVMIdentity struct {
+	ScopeIdentity                                                     RemoteScopeIdentity
+	NeverEntered                                                      bool
+	ScopeEmpty                                                        bool
 	BootID, Unit, InvocationID, CgroupPath, SourceSHA, ManifestSHA256 string
 	CgroupDevice, CgroupInode                                         uint64
 	ModelUID, TransportUID                                            uint32
@@ -61,6 +72,7 @@ type RemoteBeginReceipt struct {
 // Opaque permits stay private to that backend/transport, never in receipts.
 type RemoteAdmissionProfile struct {
 	Launch                    RemoteLaunchDescriptor
+	Reconcile                 func(context.Context, RemoteAdmissionRequest) (RemoteAdmissionReceipt, error)
 	UnitPrefix, CgroupParent  string
 	Binding                   runtime.RuntimeBinding
 	SourceSHA, ManifestSHA256 string
@@ -133,6 +145,9 @@ func readRemoteRequest(store beads.Store, city, route, id string, binding runtim
 		b.Metadata["template"] != route || route == "" || b.Metadata["session_name"] == "" {
 		return RemoteAdmissionRequest{}, remoteStartFence{}, errors.New("remote identity unavailable")
 	}
+	if b.Metadata[remoteAdmissionStopMetadataKey] != "" {
+		return RemoteAdmissionRequest{}, remoteStartFence{}, errors.New("remote stop intent fenced")
+	}
 	if KillPendingMetadata(b.Metadata["state"], b.Metadata["state_reason"], b.Metadata["sleep_reason"], b.Metadata["slept_at"], time.Now().UTC()) {
 		return RemoteAdmissionRequest{}, remoteStartFence{}, errors.New("remote start kill fenced")
 	}
@@ -166,8 +181,20 @@ func admitRemoteCapacity(ctx context.Context, city, route, id string, now time.T
 	if err != nil || ctx.Err() != nil {
 		return ctx, false, "remote_admission_identity_invalid"
 	}
+	if fence.Hold != "" {
+		return context.WithValue(ctx, remoteSourceEffectKey{}, request), false, "remote_admission_held"
+	}
 	request.Attempt = NewInstanceToken()
-	ctx = context.WithValue(ctx, remoteSourceEffectKey{}, request)
+	raw, attempted, stampErr := stampRemoteAdmissionHold(store, request, profile, fence)
+	if attempted || raw != "" {
+		ctx = context.WithValue(ctx, remoteSourceEffectKey{}, request)
+	}
+	if stampErr != nil {
+		return ctx, false, "remote_admission_hold_unconfirmed"
+	}
+	fence.Hold = raw
+	fence.Terminal = ""
+	fence.Ever = "v1"
 	receipt, err := profile.Prepare(ctx, request)
 	if err != nil || receipt.Request != request || receipt.AuthorityReceiptID == "" || receipt.JournalRevision == 0 ||
 		receipt.Phase != RemoteAdmissionPrepared || !validRemoteProfileIdentity(receipt.Identity, profile) {
@@ -175,6 +202,9 @@ func admitRemoteCapacity(ctx context.Context, city, route, id string, now time.T
 		return ctx, false, "remote_admission_prepare_unknown"
 	}
 	proof := &capacityAdmissionProof{city: city, route: route, id: id, minted: now, remote: &remoteAdmissionProof{profile: profile, reservation: receipt, store: store, fence: fence}}
+	if err := persistRemoteReceipt(proof.remote, receipt); err != nil {
+		return ctx, false, "remote_admission_receipt_unconfirmed"
+	}
 	ctx = context.WithValue(ctx, capacityAdmissionKey{}, proof)
 	if !remoteProofCurrent(proof.remote) {
 		return ctx, false, "remote_admission_target_changed"
@@ -183,7 +213,10 @@ func admitRemoteCapacity(ctx context.Context, city, route, id string, now time.T
 }
 
 func validRemoteProfileIdentity(identity RemoteVMIdentity, profile RemoteAdmissionProfile) bool {
-	return remoteHex(identity.BootID, 32) && identity.SourceSHA == profile.SourceSHA &&
+	scope := identity.ScopeIdentity
+	return remoteHex(identity.BootID, 32) && scope.BootID == identity.BootID &&
+		scope.CgroupPath == profile.CgroupParent && scope.Device > 0 && scope.Inode > 0 &&
+		identity.SourceSHA == profile.SourceSHA &&
 		identity.ManifestSHA256 == profile.ManifestSHA256 && identity.ModelUID == profile.ModelUID && identity.TransportUID == profile.TransportUID
 }
 
@@ -226,23 +259,25 @@ func finishRemoteCapacityStart(ctx context.Context, proof *remoteAdmissionProof,
 		receipt.AuthorityReceiptID != previous.AuthorityReceiptID || receipt.JournalRevision <= previous.JournalRevision ||
 		(receipt.Phase != RemoteAdmissionEntered && receipt.Phase != RemoteAdmissionExited) ||
 		!validRemoteProfileIdentity(identity, proof.profile) || identity.BootID != previous.Identity.BootID ||
+		identity.ScopeIdentity != previous.Identity.ScopeIdentity ||
+		identity.NeverEntered ||
 		identity.Unit != remoteExpectedUnit(proof.profile, previous.Request) ||
 		identity.CgroupPath != proof.profile.CgroupParent+"/"+identity.Unit ||
 		!remoteHex(identity.InvocationID, 32) || !path.IsAbs(identity.CgroupPath) || path.Clean(identity.CgroupPath) != identity.CgroupPath ||
 		identity.CgroupPath == "/" || identity.CgroupDevice == 0 || identity.CgroupInode == 0 {
 		return errors.New("remote_admission_finish_unknown_hold")
 	}
-	return nil
+	return persistRemoteReceipt(proof, receipt)
 }
 
 // remoteStartFence binds lifecycle launch intent independently of incarnation.
 // Unrelated continuation/prompt changes do not revoke a reservation.
 type remoteStartFence struct {
-	State, Reason, SleepReason, SleptAt, SleepIntent, HeldUntil, PendingCreate, PendingStarted string
+	State, Reason, SleepReason, SleptAt, SleepIntent, HeldUntil, PendingCreate, PendingStarted, Hold, Terminal, Ever string
 }
 
 func remoteFenceFromMetadata(meta map[string]string) remoteStartFence {
-	return remoteStartFence{meta["state"], meta["state_reason"], meta["sleep_reason"], meta["slept_at"], meta["sleep_intent"], meta["held_until"], meta["pending_create_claim"], meta["pending_create_started_at"]}
+	return remoteStartFence{meta["state"], meta["state_reason"], meta["sleep_reason"], meta["slept_at"], meta["sleep_intent"], meta["held_until"], meta["pending_create_claim"], meta["pending_create_started_at"], meta[remoteAdmissionHoldMetadataKey], meta[remoteAdmissionTerminalMetadataKey], meta[remoteAdmissionEverMetadataKey]}
 }
 
 type remoteSourceEffectKey struct{}

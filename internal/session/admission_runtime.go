@@ -29,6 +29,11 @@ type capacityAdmissionProof struct {
 // The returned context carries an opaque one-shot proof for that same attempt.
 // Unmanaged targets and cities with no scheduler retain existing behavior.
 func AdmitCapacityStart(ctx context.Context, city, route, id string, now time.Time, sp runtime.Provider, store beads.Store) (context.Context, bool, string) {
+	var profileErr error
+	ctx, profileErr = ContextWithProviderRemoteAdmission(ctx, sp)
+	if profileErr != nil {
+		return ctx, false, "remote_admission_profile_invalid"
+	}
 	if resolver, ok := sp.(runtime.SessionRuntimeProvider); ok {
 		if _, err := resolver.BindRuntime(ctx, id, route); err != nil {
 			return ctx, false, "runtime_binding_invalid"

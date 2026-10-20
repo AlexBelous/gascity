@@ -41,6 +41,27 @@ func (s *Store) ApplyPatch(id string, patch MetadataPatch) error {
 	if len(patch) == 0 {
 		return nil
 	}
+	if remotePatchChangesIdentity(patch) {
+		b, err := beads.HandlesFor(s.store.Store).Live.Get(id)
+		if err != nil {
+			return err
+		}
+		if remoteHeldBeadBlocks(b) {
+			return CapacityAdmissionError("remote_source_reconciliation_required")
+		}
+		// Fence even a virgin source when capability exists: the first runtime
+		// pin/reservation may race this read in a different controller.
+		writer, _, err := beads.ResolveConditionalWriter(s.store)
+		if err != nil {
+			return err
+		}
+		if writer != nil {
+			return writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string(patch)})
+		}
+		if remoteUnfencedCloseUnsafe(b) {
+			return CapacityAdmissionError("remote_identity_patch_writer_unavailable")
+		}
+	}
 	// Return the bare store error: this method confines the write codec, it does
 	// not re-message failures. Callers (the reconciler, setMetaBatch, the circuit
 	// breaker) log/wrap the error themselves, and several tests assert their exact
@@ -78,6 +99,14 @@ func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool
 func (s *Store) WithPendingCreateRollback(expected Info, fn func() error) (bool, error) {
 	applied := false
 	err := WithSessionMutationLock(expected.ID, func() error {
+		b, readErr := beads.HandlesFor(s.store.Store).Live.Get(expected.ID)
+		if readErr != nil {
+			return readErr
+		}
+		// Unconditional fallback cannot fence a first remote Prepare against close.
+		if remoteUnfencedCloseUnsafe(b) {
+			return CapacityAdmissionError("remote_source_reconciliation_required")
+		}
 		current, _, err := s.GetPersistedResponse(expected.ID)
 		if err != nil {
 			return err
@@ -133,6 +162,9 @@ func (s *Store) ApplyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatc
 	}
 	if bead.Status == "closed" {
 		return false, nil
+	}
+	if remotePatchChangesIdentity(patch) && remoteHeldBeadBlocks(bead) {
+		return false, CapacityAdmissionError("remote_source_reconciliation_required")
 	}
 	if !sameLifecycleFacts(expected, infoFromPersistedBead(bead)) {
 		return false, nil
@@ -367,6 +399,14 @@ func (s *Store) CurrentClaimBeadID(id string) (string, error) {
 // then closes the bead. It emits a single Close op, byte-identical to the raw
 // write.
 func (s *Store) CloseWithoutReason(id string) error {
+	b, err := beads.HandlesFor(s.store.Store).Live.Get(id)
+	if err != nil {
+		return err
+	}
+	if remoteUnfencedCloseUnsafe(b) {
+		return CapacityAdmissionError("remote_source_reconciliation_required")
+	}
+
 	// Bare store error — callers own their diagnostic text (see ApplyPatch).
 	return s.store.Close(id)
 }
@@ -498,6 +538,14 @@ func (s *Store) Close(id, stateCode string, now time.Time) (bool, error) {
 			return closed, err
 		}
 	}
+	latest, readErr := beads.HandlesFor(s.store.Store).Live.Get(id)
+	if readErr != nil {
+		return false, readErr
+	}
+	if remoteUnfencedCloseUnsafe(latest) {
+		return false, CapacityAdmissionError("remote_source_reconciliation_required")
+	}
+
 	if err := s.ApplyPatch(id, patch); err != nil {
 		return false, err
 	}
@@ -519,6 +567,9 @@ func (s *Store) closeAtomically(closer beads.AtomicConditionalCloser, bead beads
 	id := bead.ID
 	var conflict error
 	for attempt := 1; ; attempt++ {
+		if remoteHeldBeadBlocks(bead) {
+			return false, CapacityAdmissionError("remote_source_reconciliation_required")
+		}
 		if guard != nil {
 			if err := guard(bead); err != nil {
 				return false, err
@@ -598,6 +649,14 @@ func (s *Store) CloseWithTerminalPatch(id string, patch MetadataPatch, commitMsg
 			return closed, err
 		}
 	}
+	latest, readErr := beads.HandlesFor(s.store.Store).Live.Get(id)
+	if readErr != nil {
+		return false, readErr
+	}
+	if remoteUnfencedCloseUnsafe(latest) {
+		return false, CapacityAdmissionError("remote_source_reconciliation_required")
+	}
+
 	if err := s.store.Tx(commitMsg, func(tx beads.Tx) error {
 		if err := tx.SetMetadataBatch(id, map[string]string(patch)); err != nil {
 			return err
@@ -665,6 +724,9 @@ func (s *Store) RollbackPendingCreateAtomically(expected Info, closePatch, postC
 			return nil
 		}
 		closed, err = s.closeAtomically(closer, bead, closePatch, func(open beads.Bead) error {
+			if remoteHeldBeadBlocks(open) {
+				return CapacityAdmissionError("remote_source_reconciliation_required")
+			}
 			if !lease.CanRollback(LeaseFromInfo(infoFromPersistedBead(open))) {
 				return errPendingCreateRollbackSuperseded
 			}
@@ -700,6 +762,9 @@ func (s *Store) applyPatchIfClosed(id string, patch MetadataPatch) (bool, error)
 		}
 		if bead.Status != "closed" {
 			return false, nil
+		}
+		if remoteHeldBeadBlocks(bead) {
+			return false, CapacityAdmissionError("remote_source_reconciliation_required")
 		}
 		if writer == nil {
 			if err := s.ApplyPatch(id, patch); err != nil {

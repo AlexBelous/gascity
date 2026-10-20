@@ -544,9 +544,11 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // (processTreeAwk), so only those rows cross the connection, not the whole
 // table of a busy box.
 func processAliveScript(name string) string {
+	// BSD awk rejects literal newlines in -v values; keep multiple pane roots
+	// on one space-separated line before passing them to each tree filter.
 	return "panes=$(tmux list-panes -s -t " + shellQuote([]string{paneTarget(name)}) + " -F " + shellQuote([]string{runtime.TmuxAgentPaneMarkerFormat + " #{pane_pid}"}) + ") || exit 3\n" +
 		"echo \"$panes\"\n" +
-		"roots=$(echo \"$panes\" | awk '{print $2}')\n" +
+		"roots=$(echo \"$panes\" | awk '{printf \"%s \", $2}')\n" +
 		"echo " + processSectionComm + "\n" +
 		"ps -A -o pid= -o ppid= -o comm= | awk -v roots=\"$roots\" " + shellQuote([]string{processTreeAwk}) + "\n" +
 		"echo " + processSectionArgs + "\n" +

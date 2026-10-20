@@ -23,7 +23,10 @@ go_binary(
 
 go_test(
     name = "fixtureseed_test",
-    srcs = ["main_test.go"],
+    srcs = [
+        "main_test.go",
+        "testenv_import_test.go",
+    ],
     embed = [":fixtureseed_lib"],
     deps = [
         "//internal/beads",
@@ -31,6 +34,7 @@ go_test(
         "//internal/session",
         "//internal/storebinding",
         "//internal/storebinding/sqlite",
+        "//internal/testenv",
     ],
 )
 

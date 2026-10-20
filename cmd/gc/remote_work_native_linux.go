@@ -84,7 +84,7 @@ func (n *remoteWorkNative) Validate(ctx context.Context) error {
 	return nil
 }
 
-func (n *remoteWorkNative) storeFor(id string) (beads.Store, error) {
+func (n *remoteWorkNative) resolveOwnedBeadStore(id string) (beads.Store, error) {
 	if n.resolveStore != nil {
 		return n.resolveStore(id)
 	}
@@ -107,7 +107,7 @@ func (n *remoteWorkNative) owned(id string, allowClosed bool) (beads.Store, bead
 	if e != nil || current != id {
 		return nil, beads.Bead{}, errRemoteWorkDenied
 	}
-	store, e := n.storeFor(id)
+	store, e := n.resolveOwnedBeadStore(id)
 	if e != nil {
 		return nil, beads.Bead{}, errRemoteWorkDenied
 	}

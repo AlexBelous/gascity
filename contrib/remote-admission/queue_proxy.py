@@ -335,6 +335,8 @@ def socket_parent(path,gid):
     if not p.is_absolute() or str(p)!=os.path.normpath(str(p)):raise Denied()
     fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
     try:
+        info=os.fstat(fd)
+        if info.st_uid!=0 or info.st_mode&0o022:raise Denied()
         for component in p.parts[1:]:
             child=os.open(component,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
             os.close(fd);fd=child

@@ -167,8 +167,12 @@ class QueueTransportTests(unittest.TestCase):
   # No root setup effects: fake open descriptors model root->unsafe->root750.
   for uid,mode in [(1201,0o40755),(0,0o40777)]:
    info=type('Stat',(),{'st_uid':uid,'st_gid':1201,'st_mode':mode})()
-   with mock.patch.object(q.os,'open',side_effect=[10,11]),mock.patch.object(q.os,'close'),mock.patch.object(q.os,'fstat',return_value=info):
+   with mock.patch.object(q.os,'open',side_effect=[10,11]),mock.patch.object(q.os,'close'),mock.patch.object(q.os,'fstat',side_effect=[type('Root',(),{'st_uid':0,'st_mode':0o40755})(),info]):
     with self.assertRaises(q.Denied):q.socket_parent('/unsafe/socket',1201)
+ def test_socket_parent_checks_root_directory_itself(self):
+  info=type('Root',(),{'st_uid':0,'st_mode':0o40777})()
+  with mock.patch.object(q.os,'open',return_value=10),mock.patch.object(q.os,'close'),mock.patch.object(q.os,'fstat',return_value=info):
+   with self.assertRaises(q.Denied):q.socket_parent('/safe/socket',1201)
  def test_socket_mode_refuses_symlink_before_any_ownership_effect(self):
   info=type('Stat',(),{'st_uid':0,'st_mode':0o120777})()
   with mock.patch.object(q.os,'open',return_value=20),mock.patch.object(q.os,'close'),mock.patch.object(q.os,'fstat',return_value=info),mock.patch.object(q.os,'chown') as chown,mock.patch.object(q.os,'chmod') as chmod:

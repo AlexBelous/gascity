@@ -243,7 +243,11 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 }
 
 func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	return resolveSessionTransportProvider(ctx, sessionBeads)
+	local, err := resolveSessionTransportProvider(ctx, sessionBeads)
+	if err != nil {
+		return nil, err
+	}
+	return withAgentRuntimeRouting(ctx, local)
 }
 
 func withSessionProviderConstructionContext(sp runtime.Provider, err error) (runtime.Provider, error) {

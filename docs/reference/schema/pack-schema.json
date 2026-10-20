@@ -59,6 +59,10 @@
           ],
           "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
         },
+        "runtime": {
+          "type": "string",
+          "description": "Runtime selects an execution runtime; empty preserves the city default."
+        },
         "provider": {
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
@@ -442,6 +446,10 @@
         "session": {
           "type": "string",
           "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
+        },
+        "runtime": {
+          "type": "string",
+          "description": "Runtime selects the execution runtime independently of the session transport."
         },
         "provider": {
           "type": "string",

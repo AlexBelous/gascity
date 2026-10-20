@@ -146,3 +146,12 @@ move into the ledger above only together with the tests that prove them.
 | ID | Scenario | Required behavior | Tracking |
 |---|---|---|---|
 | RUNTIME-PLAN-005 | Staging relocation | `staging.go` moves out of the contract package (or overlay staging becomes protocol data) and the import-boundary exemption is deleted. | `ga-1symz6` epic |
+
+## Pinned per-agent runtime routing
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| RUNTIME-ROUTE-001 | Agent selects execution runtime independently of transport | `Agent.Runtime` patches/overrides independently of `Agent.Session`; empty runtime preserves the original local provider object and launch configuration. | `internal/config/agent_runtime_test.go`; `cmd/gc/agent_runtime_routing_test.go` |
+| RUNTIME-ROUTE-002 | Policy/template changes after SID binding | Reads, cleanup and observation use the persisted binding; a new Start/Relaunch must revalidate exact SID/template and current launch policy. Removed policy and changed digest refuse launches. | `internal/runtime/routing/routing_test.go`; `cmd/gc/agent_runtime_routing_test.go` |
+| RUNTIME-ROUTE-003 | Explicit runtime resolution fails | No city-default tmux fallback; lookup failures preserve unavailable observations and do not issue local verbs. Remote routes never advertise local command containment. | `internal/runtime/routing/routing_test.go`; `cmd/gc/agent_runtime_routing.go` |
+| RUNTIME-ROUTE-004 | Accepted config reload with explicit or pinned routes | Refresh routing policy from the new generation while reusing the exact local backend; do not enter city-provider stop-all for overlay-only changes. An unavailable routing store refuses the reload and preserves the prior config/provider. | `cmd/gc/agent_runtime_routing_test.go` `TestAgentRuntimeRoutingReloadAddsRouterAndRefusesUnavailableRoutes`; `cmd/gc/city_runtime.go` |

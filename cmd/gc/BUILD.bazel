@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "adoption_barrier.go",
         "agent_build_params.go",
+        "agent_runtime_routing.go",
         "agent_home_worktree_cleanup.go",
         "api_state.go",
         "api_state_conditional_writes.go",
@@ -565,6 +566,7 @@ go_library(
         "//internal/runtime/procobserver",
         "//internal/runtime/proctable",
         "//internal/runtime/registry",
+        "//internal/runtime/routing",
         "//internal/runtime/rppcheck",
         "//internal/runtime/runtimecapability",
         "//internal/runtime/runtimecontract",
@@ -1485,6 +1487,7 @@ go_test(
         "synthetic_cache_verifier_test.go",
         "telemetry_lifecycle_metrics_test.go",
         "template_resolve_env_test.go",
+        "agent_runtime_routing_test.go",
         "template_resolve_mcp_test.go",
         "template_resolve_phase2_test.go",
         "template_resolve_prompt_test.go",

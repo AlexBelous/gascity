@@ -2214,12 +2214,30 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if v := os.Getenv("GC_SESSION"); v != "" {
 		newProviderName = v
 	}
-	if newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName) {
-		newSp, spErr := newSessionProviderForCityByName(nextCfg, newProviderName, nextCfg.Session, cr.cityName, cr.cityPath)
+	baseProviderChanged := newProviderName != *lastProviderName || packRuntimeDeclarationChanged(cr.cfg, nextCfg, newProviderName)
+	routingActive := agentRuntimeRoutingActive(cr.sp, cr.cfg, nextCfg)
+	if baseProviderChanged || routingActive {
+		var newSp runtime.Provider
+		var spErr error
+		if baseProviderChanged {
+			newSp, spErr = newSessionProviderForCity(nextCfg, cr.cityPath)
+		} else {
+			newSp, spErr = refreshAgentRuntimeRouting(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), cr.sp)
+		}
 		if spErr != nil {
+			if routingActive {
+				err := fmt.Errorf("config reload: runtime routing unavailable: %w", spErr)
+				telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+				if trace != nil {
+					trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+				}
+				return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Revision: result.Revision, Warnings: warnings}
+			}
 			appendWarning(fmt.Sprintf("new session provider %q: %v (keeping old provider)", newProviderName, spErr))
 		} else {
-			providerChanged = true
+			// Routing-only refresh reuses the exact local backend and does not
+			// enter the city-provider stop-all branch below.
+			providerChanged = baseProviderChanged
 			nextSp = newSp
 			nextDops = newDrainOps(nextSp)
 			pendingProviderName = newProviderName

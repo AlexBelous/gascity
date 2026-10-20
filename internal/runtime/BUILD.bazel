@@ -4,6 +4,7 @@ go_library(
     name = "runtime",
     srcs = [
         "beacon.go",
+        "binding.go",
         "carrier.go",
         "dialog.go",
         "dialog_midsession.go",

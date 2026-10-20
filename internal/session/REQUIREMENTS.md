@@ -180,6 +180,13 @@ unless the row names how they map to the canonical projection.
 | SESSION-RUNTIME-010 | Attachment uncertainty holds destructive gates | Error-aware attachment probes remain direct and fresh even when ordinary fleet observations are cached. Probe failures defer config-drift, autosuspend, drain escalation, and input clearing; they do not mean detached. Exact missing targets remain distinguishable from unavailable runtimes. | `internal/runtime/tmux/attach_probe_test.go`; `cmd/gc/session_reconciler_observation_regression_test.go`; `cmd/gc/drain_ack_escalation_test.go`; `cmd/gc/chat_autosuspend_test.go`; upstream #6882/#6900; gascity-kb#32 |
 | SESSION-RUNTIME-011 | Fleet attachment and activity batching | Ordinary tmux attachment and last-activity reads share the short-lived fleet snapshot. Activity is the maximum window activity including corpse windows, with the poke discount retained. Unknown/evicted/stale sessions use direct probes, and corpse-only rows never become running. | `internal/runtime/tmux/adapter_unit_test.go`; `internal/runtime/tmux/state_cache_test.go`; upstream #5599; gascity-kb#32 |
 
+## Durable runtime binding
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-ROUTE-001 | First explicit runtime launch | Bind exact SID/template before resource admission; Store owns immutable runtime binding metadata under its mutation lock and an exact conditional-write revision fence. Off/unavailable conditional writes refuse the first pin. A binding is routing identity and never admission proof. | `runtime_binding.go`; `admission_runtime.go`; `runtime_binding_test.go` |
+| SESSION-ROUTE-002 | Closed record or duplicate provider name | Preserve closed SID pins for cleanup/restart reconstruction; reject ambiguous names and non-SID metadata writes. | `runtime_binding_test.go` |
+
 ## Maintenance Rules
 
 - Add one row per behavior scenario, not one paragraph per file.

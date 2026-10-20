@@ -45,6 +45,13 @@ Any ambiguous start/observation retains an unknown occupied attempt. Only one
 attempt can occupy the locked durable ledger. Retry never issues another start
 for a consumed attempt. Cancellation journals revocation before its effect. There
 is no TTL release, background scheduler, automatic retry or cleanup policy.
+The required root profile `max_consumed_attempts` is a durable lifetime limit,
+separate from concurrent cap1. The pilot must explicitly set it to **1**. Both new
+prepare and entry count all retained `ever_consumed` rows under the journal lock,
+including exited and unknown attempts. Pre-consumption cancellation does not spend
+the budget. Existing prepare is idempotent but cannot grant another entry. History
+is never expired or reset; missing or inconsistent consumption markers refuse.
+Generic multi-attempt test fixtures explicitly use 2, which is no pilot approval.
 Atomic journal publication fsyncs the file and parent directory. Missing/corrupt
 state, mismatched profile, reboot, inaccessible proc/cgroup, changed invocation,
 partial proof and nonempty scope all deny or retain the seat.
@@ -75,6 +82,7 @@ Every field is required; no numeric example is an approved resource policy:
 | Fields | Meaning |
 | --- | --- |
 | schema_version, profile_id, city, template | Version 1 and exact operator scope |
+| max_consumed_attempts | Explicit positive integer lifetime consumed-attempt budget; pilot 1 |
 | binding | selector, endpoint, resource_domain, policy_digest; exact request match |
 | source_sha, manifest_sha256 | Git commit 40 lowercase hex and manifest 64 lowercase hex |
 | transport_uid, model_uid, model_gid | Explicit separate nonzero UIDs and model GID |

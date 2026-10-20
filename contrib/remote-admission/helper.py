@@ -108,8 +108,9 @@ def atomic(path, value):
 
 class Profile:
     def __init__(self, value, owner=0):
-        keys(value, "schema_version profile_id city template binding source_sha manifest_sha256 transport_uid model_uid model_gid unit_prefix cgroup_parent state_dir helper_path helper_sha256 model_argv model_exe_sha256 environment environment_keys resources thresholds disk_path model_home transport_home working_directory home_mount")
+        keys(value, "schema_version profile_id city template binding source_sha manifest_sha256 transport_uid model_uid model_gid unit_prefix cgroup_parent state_dir helper_path helper_sha256 model_argv model_exe_sha256 environment environment_keys resources thresholds disk_path model_home transport_home working_directory home_mount max_consumed_attempts")
         require(type(value["schema_version"]) is int and value["schema_version"] == 1, "version")
+        integer(value["max_consumed_attempts"])
         for field in ("profile_id", "city", "template"):
             require(type(value[field]) is str and 0 < len(value[field]) <= 256, "profile_string")
         keys(value["binding"], "selector endpoint resource_domain policy_digest")
@@ -185,8 +186,20 @@ class Authority:
             for attempt, row in state["attempts"].items():
                 require(type(row) is dict and row.get("request", {}).get("attempt") == attempt and HEX32.fullmatch(attempt) is not None, "ledger_attempt")
                 require(row.get("phase") in ("prepared", "staged", "consumed", "entered", "exited", "unknown") and type(row.get("ever_consumed")) is bool and type(row.get("revoked")) is bool, "ledger_phase")
+                require(type(row.get("attested")) is bool and type(row.get("never_entered")) is bool, "ledger_history")
                 if row["phase"] in ("prepared", "staged"):
-                    require(row["ever_consumed"] is False, "ledger_consumed")
+                    require(not row["ever_consumed"] and not row["attested"] and not row["never_entered"], "ledger_consumed")
+                elif row["phase"] == "exited":
+                    if row["ever_consumed"]:
+                        require(row["attested"] and not row["never_entered"], "ledger_terminal")
+                    else:
+                        require(not row["attested"] and row["never_entered"] and row["revoked"], "ledger_never_entered")
+                else:
+                    require(row["ever_consumed"] and not row["never_entered"], "ledger_consumed")
+                    if row["phase"] == "entered":
+                        require(row["attested"], "ledger_attestation")
+                    if row["phase"] == "consumed":
+                        require(not row["attested"], "ledger_attestation")
             occupied = [attempt for attempt, row in state["attempts"].items() if row.get("phase") != "exited"]
             require(occupied == ([state["current"]] if state["current"] is not None else []), "ledger_ambiguous")
             yield state
@@ -208,12 +221,18 @@ class Authority:
         require(row is not None and row["request"] == request and row["profile_digest"] == self.profile.digest, "reservation_mismatch")
         return row
 
+    def require_budget(self, state):
+        # Retained consumed history is lifetime authority, independent of current seat.
+        consumed = sum(row["ever_consumed"] is True for row in state["attempts"].values())
+        require(consumed < self.profile.data["max_consumed_attempts"], "consumed_budget")
+
     def prepare(self, request):
         request = self.profile.request(request)
         with self.locked() as state:
             if request["attempt"] in state["attempts"]:
                 return self.receipt(self.exact(state, request))
             require(state["current"] is None, "occupied")
+            self.require_budget(state)
             self.host.resources()
             scope = self.host.scope()
             require(scope["empty"] is True, "scope_occupied")
@@ -250,6 +269,7 @@ class Authority:
             require(type(environment) is dict and set(environment) <= set(self.profile.data["environment_keys"]) and all(type(value) is str and "\0" not in value and "\n" not in value for value in environment.values()), "entry_environment")
             require(hashlib.sha256(canonical({"prompt": raw.decode("utf-8", "strict"), "environment": environment})).hexdigest() == row["frame_sha"], "frame_changed")
             self.exact(state, row["request"])
+            self.require_budget(state)
             self.host.resources()
             require(self.host.scope() == row["scope"], "scope_changed")
             row["phase"] = "consumed"

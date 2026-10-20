@@ -1,22 +1,28 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+
 go_library(
- name = "routing",
- srcs = ["routing.go"],
- importpath = "github.com/gastownhall/gascity/internal/runtime/routing",
- visibility = ["//:__subpackages__"],
- deps = ["//internal/runtime"],
+    name = "routing",
+    srcs = ["routing.go"],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/routing",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
 )
+
 go_test(
- name = "routing_test",
- srcs = ["routing_test.go"],
- embed = [":routing"],
- deps = ["//internal/runtime"],
+    name = "routing_test",
+    srcs = ["routing_test.go"],
+    embed = [":routing"],
+    deps = ["//internal/runtime"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(
     name = "bazel_repo_srcs",
-    srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
     visibility = ["//visibility:public"],
 )

@@ -37,6 +37,7 @@ type remoteWorkNative struct {
 	resolveStore func(string) (beads.Store, error)
 	claim        func() ([]byte, int)
 	drain        func() error
+	drainMeta    func(string, string) (string, error)
 }
 
 func newRemoteWorkNative(p remoteWorkPolicy, profile remoteWorkProfile, f remoteWorkFrame) (*remoteWorkNative, error) {
@@ -251,10 +252,44 @@ func (n *remoteWorkNative) Execute(ctx context.Context, r remoteWorkRequest) (re
 		} else if code := cmdRuntimeDrainAck(nil, true, &stdout, &stderr); code != 0 {
 			return out, errRemoteWorkDenied
 		}
+		if n.verifyDrainAck(ctx) != nil {
+			return out, errRemoteWorkDenied
+		}
 		out.State = "drain_acknowledged"
 		return out, nil
 	}
 	return out, errRemoteWorkDenied
+}
+
+// verifyDrainAck reads the selected runtime after the canonical handler. Some
+// providers deliberately make metadata writes best-effort; exit zero alone is
+// therefore not evidence that this incarnation's acknowledgement landed.
+func (n *remoteWorkNative) verifyDrainAck(ctx context.Context) error {
+	if n.Validate(ctx) != nil {
+		return errRemoteWorkDenied
+	}
+	read := n.drainMeta
+	if read == nil {
+		provider, e := newSessionProviderForCity(n.cfg, n.profile.CityPath)
+		if e != nil {
+			return errRemoteWorkDenied
+		}
+		read = provider.GetMeta
+	}
+	expected := []struct{ key, value string }{
+		{"GC_DRAIN_ACK", "1"},
+		{reconcilerDrainAckSourceKey, drainAckSourceAgentValue},
+		{drainAckRequesterInstanceTokenKey, drainAckInstanceTokenDigest(n.frame.Identity.InstanceToken)},
+	}
+	for _, marker := range expected {
+		actual, e := read(n.frame.Identity.Handle, marker.key)
+		if e != nil || actual != marker.value {
+			return errRemoteWorkDenied
+		}
+	}
+	// Bind the observed markers to the same persisted SID, generation, token and
+	// immutable runtime route after all transport round trips. Never log values.
+	return n.Validate(ctx)
 }
 
 func (n *remoteWorkNative) Reconcile(ctx context.Context, r remoteWorkRequest) (remoteWorkResponse, error) {

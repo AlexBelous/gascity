@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
@@ -173,7 +174,7 @@ func TestRemoteWorkCanonicalByIDWritesUseRevisionFenceAndAtomicClose(t *testing.
 	if e != nil {
 		t.Fatal(e)
 	}
-	guard := &remoteWorkOwnedGraph{GraphStore: graph, store: store, revision: b.Revision, metadata: map[string]string{remoteWorkRequestMetadata: "close1"}}
+	guard := &remoteWorkOwnedGraph{GraphStore: graph, store: store, revision: b.Revision, metadata: map[string]string{beadmeta.RemoteWorkRequestMetadataKey: "close1"}}
 	if code := doBdByIDUpdate(guard, bdByIDOp{ID: b.ID, JSON: true, Update: beads.UpdateOpts{Metadata: map[string]string{"result": "checked"}}}, "fixture", io.Discard, io.Discard); code != 0 {
 		t.Fatal("canonical update failed")
 	}
@@ -181,7 +182,7 @@ func TestRemoteWorkCanonicalByIDWritesUseRevisionFenceAndAtomicClose(t *testing.
 		t.Fatal("stale revision closed bead")
 	}
 	actual, _ := store.Get(b.ID)
-	if actual.Status == "closed" || actual.Metadata[remoteWorkRequestMetadata] != "" {
+	if actual.Status == "closed" || actual.Metadata[beadmeta.RemoteWorkRequestMetadataKey] != "" {
 		t.Fatal("partial stale close", actual)
 	}
 	guard.revision = actual.Revision
@@ -189,7 +190,7 @@ func TestRemoteWorkCanonicalByIDWritesUseRevisionFenceAndAtomicClose(t *testing.
 		t.Fatal("atomic close failed")
 	}
 	actual, _ = store.Get(b.ID)
-	if actual.Status != "closed" || actual.Metadata[remoteWorkRequestMetadata] != "close1" {
+	if actual.Status != "closed" || actual.Metadata[beadmeta.RemoteWorkRequestMetadataKey] != "close1" {
 		t.Fatal("close and receipt separated")
 	}
 }
@@ -342,7 +343,7 @@ func remoteWorkNativeFixture(t *testing.T) remoteWorkNativeHarness {
 	if e != nil {
 		t.Fatal(e)
 	}
-	wb, e := work.Create(beads.Bead{Type: "task", Status: "in_progress", Assignee: sb.ID, Metadata: map[string]string{"gc.routed_to": "worker", "gc.session_id": sb.ID}})
+	wb, e := work.Create(beads.Bead{Type: "task", Status: "in_progress", Assignee: sb.ID, Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", beadmeta.SessionIDMetadataKey: sb.ID}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -385,7 +386,7 @@ func TestRemoteWorkNativeIdentityChangesDenyBeforeClaimOrWrite(t *testing.T) {
 				t.Fatal("stale identity wrote result")
 			}
 			b, _ := h.work.Get(h.bid)
-			if b.Metadata[remoteWorkResultMetadata] != "" {
+			if b.Metadata[beadmeta.RemoteWorkResultMetadataKey] != "" {
 				t.Fatal("stale write persisted")
 			}
 		})
@@ -393,7 +394,7 @@ func TestRemoteWorkNativeIdentityChangesDenyBeforeClaimOrWrite(t *testing.T) {
 }
 
 func TestRemoteWorkNativeOwnedScopeMatrix(t *testing.T) {
-	for _, key := range []string{"assignee", "gc.routed_to", "gc.session_id", "status", "current_claim"} {
+	for _, key := range []string{"assignee", beadmeta.RoutedToMetadataKey, beadmeta.SessionIDMetadataKey, "status", "current_claim"} {
 		t.Run(key, func(t *testing.T) {
 			h := remoteWorkNativeFixture(t)
 			n := h.n
@@ -427,7 +428,7 @@ func TestRemoteWorkNativeResultCloseAndPostLeaseFence(t *testing.T) {
 		t.Fatal("native close", e)
 	}
 	b, _ := h.work.Get(h.bid)
-	if b.Status != "closed" || b.Metadata["gc.work_outcome"] != "no-op" {
+	if b.Status != "closed" || b.Metadata[beadmeta.WorkOutcomeMetadataKey] != "no-op" {
 		t.Fatal("canonical result/close missing")
 	}
 	h = remoteWorkNativeFixture(t)
@@ -441,7 +442,7 @@ func TestRemoteWorkNativeResultCloseAndPostLeaseFence(t *testing.T) {
 		t.Fatal("post-lease incarnation drift wrote")
 	}
 	b, _ = h.work.Get(h.bid)
-	if b.Metadata[remoteWorkResultMetadata] != "" {
+	if b.Metadata[beadmeta.RemoteWorkResultMetadataKey] != "" {
 		t.Fatal("post-lease effect")
 	}
 }
@@ -453,8 +454,8 @@ func TestRemoteWorkNativeCloseWithoutResultAndInvalidOutcomeDeny(t *testing.T) {
 	if _, e := n.Execute(context.Background(), r); e == nil {
 		t.Fatal("closed without result")
 	}
-	_ = h.work.SetMetadata(h.bid, remoteWorkResultMetadata, "unverified")
-	_ = h.work.SetMetadata(h.bid, remoteWorkEvidenceMetadata, r.EvidenceSHA)
+	_ = h.work.SetMetadata(h.bid, beadmeta.RemoteWorkResultMetadataKey, "unverified")
+	_ = h.work.SetMetadata(h.bid, beadmeta.RemoteWorkEvidenceSHAMetadataKey, r.EvidenceSHA)
 	if _, e := n.Execute(context.Background(), r); e == nil {
 		t.Fatal("closed without canonical work outcome")
 	}

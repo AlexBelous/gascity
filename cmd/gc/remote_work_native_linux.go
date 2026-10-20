@@ -13,17 +13,11 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
-)
-
-const (
-	remoteWorkRequestMetadata  = "gc.remote_work_request"
-	remoteWorkDigestMetadata   = "gc.remote_work_digest"
-	remoteWorkResultMetadata   = "gc.remote_work_result"
-	remoteWorkEvidenceMetadata = "gc.remote_work_evidence_sha"
 )
 
 type remoteWorkNative struct {
@@ -118,7 +112,7 @@ func (n *remoteWorkNative) owned(id string, allowClosed bool) (beads.Store, bead
 		return nil, beads.Bead{}, errRemoteWorkDenied
 	}
 	b, e := store.Get(id)
-	if e != nil || b.ID != id || b.Assignee != n.assignee || (b.Status != "in_progress" && (!allowClosed || b.Status != "closed")) || b.Metadata["gc.routed_to"] != n.profile.Template || b.Metadata["gc.session_id"] != n.frame.Identity.SID {
+	if e != nil || b.ID != id || b.Assignee != n.assignee || (b.Status != "in_progress" && (!allowClosed || b.Status != "closed")) || b.Metadata[beadmeta.RoutedToMetadataKey] != n.profile.Template || b.Metadata[beadmeta.SessionIDMetadataKey] != n.frame.Identity.SID {
 		return nil, b, errRemoteWorkDenied
 	}
 	return store, b, nil
@@ -188,7 +182,7 @@ func (n *remoteWorkNative) Execute(ctx context.Context, r remoteWorkRequest) (re
 			if e != nil || b.Revision == 0 {
 				return errRemoteWorkDenied
 			}
-			if r.Op == "close" && (b.Metadata[remoteWorkResultMetadata] == "" || b.Metadata[remoteWorkEvidenceMetadata] != r.EvidenceSHA) {
+			if r.Op == "close" && (b.Metadata[beadmeta.RemoteWorkResultMetadataKey] == "" || b.Metadata[beadmeta.RemoteWorkEvidenceSHAMetadataKey] != r.EvidenceSHA) {
 				return errRemoteWorkDenied
 			}
 			if r.Op == "close" && evaluateWorkRecordCloseGate([]string{"close", b.ID}, s, map[string]beads.Bead{b.ID: b}, classDoorRepoDirs(n.profile.CityPath), true, io.Discard) {
@@ -198,12 +192,12 @@ func (n *remoteWorkNative) Execute(ctx context.Context, r remoteWorkRequest) (re
 			if e != nil {
 				return errRemoteWorkDenied
 			}
-			meta := map[string]string{remoteWorkRequestMetadata: r.RequestID, remoteWorkDigestMetadata: remoteWorkRequestDigest(r), remoteWorkEvidenceMetadata: r.EvidenceSHA}
+			meta := map[string]string{beadmeta.RemoteWorkRequestMetadataKey: r.RequestID, beadmeta.RemoteWorkDigestMetadataKey: remoteWorkRequestDigest(r), beadmeta.RemoteWorkEvidenceSHAMetadataKey: r.EvidenceSHA}
 			if r.Op == "result" {
-				meta[remoteWorkResultMetadata] = r.Text
-				meta["gc.work_outcome"] = r.Outcome
+				meta[beadmeta.RemoteWorkResultMetadataKey] = r.Text
+				meta[beadmeta.WorkOutcomeMetadataKey] = r.Outcome
 			} else {
-				meta["gc.remote_work_close_reason"] = r.Text
+				meta[beadmeta.RemoteWorkCloseReasonMetadataKey] = r.Text
 			}
 			guard := &remoteWorkOwnedGraph{GraphStore: graph, store: s, revision: b.Revision, metadata: meta}
 			var stdout, stderr bytes.Buffer
@@ -217,7 +211,7 @@ func (n *remoteWorkNative) Execute(ctx context.Context, r remoteWorkRequest) (re
 				return errRemoteWorkDenied
 			}
 			actual, e := s.Get(b.ID)
-			if e != nil || actual.Metadata[remoteWorkRequestMetadata] != r.RequestID || actual.Metadata[remoteWorkDigestMetadata] != remoteWorkRequestDigest(r) {
+			if e != nil || actual.Metadata[beadmeta.RemoteWorkRequestMetadataKey] != r.RequestID || actual.Metadata[beadmeta.RemoteWorkDigestMetadataKey] != remoteWorkRequestDigest(r) {
 				return errRemoteWorkDenied
 			}
 			out.State = "recorded"
@@ -302,7 +296,7 @@ func (n *remoteWorkNative) Reconcile(ctx context.Context, r remoteWorkRequest) (
 		return n.Execute(ctx, r)
 	case "result", "close":
 		_, b, e := n.owned(r.BeadID, true)
-		if e != nil || b.Metadata[remoteWorkRequestMetadata] != r.RequestID || b.Metadata[remoteWorkDigestMetadata] != remoteWorkRequestDigest(r) {
+		if e != nil || b.Metadata[beadmeta.RemoteWorkRequestMetadataKey] != r.RequestID || b.Metadata[beadmeta.RemoteWorkDigestMetadataKey] != remoteWorkRequestDigest(r) {
 			return out, errRemoteWorkDenied
 		}
 		out.State = "recorded"

@@ -207,6 +207,11 @@ const (
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
 	ReasoningMetadataKey                = "gc.reasoning"
+	RemoteWorkCloseReasonMetadataKey    = "gc.remote_work_close_reason"
+	RemoteWorkDigestMetadataKey         = "gc.remote_work_digest"
+	RemoteWorkEvidenceSHAMetadataKey    = "gc.remote_work_evidence_sha"
+	RemoteWorkRequestMetadataKey        = "gc.remote_work_request"
+	RemoteWorkResultMetadataKey         = "gc.remote_work_result"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
 	ReviewGateMetadataKey               = "gc.review_gate"
@@ -548,6 +553,11 @@ var KnownMetadataKeys = []string{
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
+	RemoteWorkCloseReasonMetadataKey,
+	RemoteWorkDigestMetadataKey,
+	RemoteWorkEvidenceSHAMetadataKey,
+	RemoteWorkRequestMetadataKey,
+	RemoteWorkResultMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
 	ReviewGateMetadataKey,

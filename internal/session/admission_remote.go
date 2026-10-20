@@ -6,6 +6,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -107,10 +108,18 @@ func WithRemoteAdmissionProfiles(ctx context.Context, profiles ...RemoteAdmissio
 }
 
 type remoteAdmissionProof struct {
+	// fence changes only after durable receipt CAS; shared proof readers must synchronize.
+	mu          sync.Mutex
 	profile     RemoteAdmissionProfile
 	reservation RemoteAdmissionReceipt
 	store       beads.Store
 	fence       remoteStartFence
+}
+
+func (proof *remoteAdmissionProof) fenceSnapshot() remoteStartFence {
+	proof.mu.Lock()
+	defer proof.mu.Unlock()
+	return proof.fence
 }
 
 func remoteHex(value string, size int) bool {
@@ -165,7 +174,7 @@ func admitRemoteCapacity(ctx context.Context, city, route, id string, now time.T
 		r := existing.remote.reservation.Request
 		current, fence, err := readRemoteRequest(existing.remote.store, r.City, route, id, binding)
 		current.Attempt = r.Attempt
-		if err != nil || current != r || fence != existing.remote.fence {
+		if err != nil || current != r || fence != existing.remote.fenceSnapshot() {
 			return ctx, false, "remote_admission_identity_changed"
 		}
 		return ctx, true, "remote_admission_prepared"
@@ -219,6 +228,8 @@ func validRemoteProfileIdentity(identity RemoteVMIdentity, profile RemoteAdmissi
 }
 
 func remoteProofCurrent(proof *remoteAdmissionProof) bool {
+	proof.mu.Lock()
+	defer proof.mu.Unlock()
 	r := proof.reservation.Request
 	current, fence, err := readRemoteRequest(proof.store, r.City, r.Template, r.SessionID, r.Binding)
 	current.Attempt = r.Attempt

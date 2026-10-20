@@ -975,8 +975,8 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		if sessName == "" {
 			sessName = sessionNameFor(b.ID)
 			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
-				_ = m.store.Close(b.ID)
-				return fmt.Errorf("storing session name: %w", err)
+				cleanupErr := m.closeUnstartedSource(b.ID, template)
+				return errors.Join(fmt.Errorf("storing session name: %w", err), cleanupErr)
 			}
 		}
 		if b.Metadata == nil {
@@ -987,8 +987,8 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			b.Metadata["session_name_explicit"] = "true"
 		}
 		if err := m.syncStoredMCPServers(b.ID, &b, hints.MCPServers); err != nil {
-			_ = m.store.Close(b.ID)
-			return err
+			cleanupErr := m.closeUnstartedSource(b.ID, template)
+			return errors.Join(err, cleanupErr)
 		}
 
 		unroute := m.routeACPIfNeeded(provider, transport, sessName)
@@ -1238,8 +1238,8 @@ func (m *Manager) createBeadOnly(spec CreateOptions) (Info, error) {
 		if sessName == "" {
 			sessName = sessionNameFor(b.ID)
 			if err := m.store.SetMetadata(b.ID, "session_name", sessName); err != nil {
-				_ = m.store.Close(b.ID)
-				return fmt.Errorf("storing session name: %w", err)
+				cleanupErr := m.closeUnstartedSource(b.ID, template)
+				return errors.Join(fmt.Errorf("storing session name: %w", err), cleanupErr)
 			}
 		}
 		if b.Metadata == nil {
@@ -1489,6 +1489,26 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
+		}
+		if pinned, ok, pinErr := decodeRuntimeBinding(id, b.Metadata[runtimeBindingMetadataKey]); pinErr != nil {
+			return pinErr
+		} else if ok && b.Status == "closed" {
+			if err := m.closeRemoteSource(id, sessName, b, pinned); err != nil {
+				return err
+			}
+			m.remoteCloseArtifacts(id, &result)
+			return nil
+		}
+		binding, routeErr := m.remoteCleanupBinding(sessName)
+		if routeErr != nil {
+			return routeErr
+		}
+		if binding != (runtime.RuntimeBinding{}) {
+			if err := m.closeRemoteSource(id, sessName, b, binding); err != nil {
+				return err
+			}
+			m.remoteCloseArtifacts(id, &result)
+			return nil
 		}
 		return m.withNativeCapacityTeardown(id, b.Metadata["template"], func() error {
 			if b.Status == "closed" {
@@ -1990,6 +2010,15 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 			continue
 		}
 		if !ts.Before(before) {
+			continue
+		}
+		if remoteResult, handled, closeErr := m.closePrunedRemoteSource(b); handled {
+			if closeErr != nil {
+				return result, closeErr
+			}
+			result.WaitNudgeIDs = append(result.WaitNudgeIDs, remoteResult.WaitNudgeIDs...)
+			result.Count++
+			result.SessionIDs = append(result.SessionIDs, b.ID)
 			continue
 		}
 		nudgeIDs, capped, err := NewStore(beads.SessionStore{Store: m.store}).CancelWaits(b.ID, time.Now().UTC())

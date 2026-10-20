@@ -475,3 +475,86 @@ func TestRemoteWorkNativeWrongSIDAndBeadIdentityDeny(t *testing.T) {
 		t.Fatal("foreign bead read")
 	}
 }
+
+// This exercises the real native receiver wrapper with fake runtime ports;
+// it is deliberately not evidence of an actual SSH write or readback.
+func TestRemoteWorkNativeDrainRequiresRuntimeAckReadback(t *testing.T) {
+	for _, failure := range []string{"none", "missing", "ack", "source", "token", "read-error", "identity-drift"} {
+		t.Run(failure, func(t *testing.T) {
+			h := remoteWorkNativeFixture(t)
+			n := h.n
+			if e := h.work.Close(h.bid); e != nil {
+				t.Fatal(e)
+			}
+			calls := 0
+			reads := 0
+			n.drain = func() error { calls++; return nil }
+			expected := map[string]string{"GC_DRAIN_ACK": "1", reconcilerDrainAckSourceKey: drainAckSourceAgentValue, drainAckRequesterInstanceTokenKey: drainAckInstanceTokenDigest(n.frame.Identity.InstanceToken)}
+			n.drainMeta = func(handle, key string) (string, error) {
+				reads++
+				if calls != 1 || handle != n.frame.Identity.Handle {
+					t.Fatal("readback did not follow exact-handle canonical handler")
+				}
+				value, ok := expected[key]
+				if !ok {
+					t.Fatal("unexpected metadata read", key)
+				}
+				switch failure {
+				case "missing":
+					return "", nil
+				case "ack":
+					if key == "GC_DRAIN_ACK" {
+						return "0", nil
+					}
+				case "source":
+					if key == reconcilerDrainAckSourceKey {
+						return "reconciler", nil
+					}
+				case "token":
+					if key == drainAckRequesterInstanceTokenKey {
+						return strings.Repeat("f", 64), nil
+					}
+				case "read-error":
+					return "", errors.New("fake unreadable runtime")
+				case "identity-drift":
+					if reads == 3 {
+						if e := h.sessions.SetMetadata(h.sid, "generation", "2"); e != nil {
+							t.Fatal(e)
+						}
+					}
+				}
+				return value, nil
+			}
+			j := remoteWorkTestJournal(t)
+			r := remoteWorkRequest{RequestID: "drain", Op: "self_drain"}
+			out, e := runRemoteWork(context.Background(), "drain-scope", r, j, n)
+			if failure == "none" {
+				if e != nil || out.State != "drain_acknowledged" || reads != 3 {
+					t.Fatalf("verified drain: state=%s reads=%d error=%v", out.State, reads, e)
+				}
+				return
+			}
+			if e == nil {
+				t.Fatal("unverified runtime drain acknowledged")
+			}
+			if calls != 1 {
+				t.Fatal("canonical handler repeated")
+			}
+			if failure != "identity-drift" {
+				if _, e = runRemoteWork(context.Background(), "drain-scope", r, j, n); e == nil {
+					t.Fatal("uncertain drain reconciled without proof")
+				}
+				if _, e = runRemoteWork(context.Background(), "drain-scope", remoteWorkRequest{RequestID: "new-drain", Op: "self_drain"}, j, n); e == nil {
+					t.Fatal("new ID escaped uncertain drain scope")
+				}
+			}
+			if calls != 1 {
+				t.Fatal("uncertain drain retried")
+			}
+			record, exists, e := j.Load("drain-scope", r)
+			if e != nil || !exists || record.Response != nil {
+				t.Fatal("uncertain drain lost intent or acquired completion")
+			}
+		})
+	}
+}

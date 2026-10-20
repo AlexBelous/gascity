@@ -124,6 +124,7 @@ var excludedFromCore = map[string]string{
 	"Nudge":                  "post-ready typed text",
 	"SessionLive":            "the LIVE axis — re-applied without restart (LiveFingerprint, not Core)",
 	"PackOverlayDirs":        "additive pack file staging, not hashed",
+	"PromptText":             "invocation-local literal startup payload, deliberately excluded",
 	"PromptSuffix":           "volatile beacon text, deliberately excluded",
 	"PromptFlag":             "command-reconstruction hint, not hashed",
 }

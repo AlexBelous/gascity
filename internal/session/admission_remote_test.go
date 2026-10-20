@@ -62,6 +62,7 @@ type remoteAdmissionTestAuthority struct {
 func newRemoteAdmissionTestAuthority(binding runtime.RuntimeBinding) *remoteAdmissionTestAuthority {
 	a := &remoteAdmissionTestAuthority{phase: RemoteAdmissionEntered}
 	a.profile = RemoteAdmissionProfile{UnitPrefix: "gc-remote", CgroupParent: "/system.slice", Binding: binding, SourceSHA: strings.Repeat("a", 40), ManifestSHA256: strings.Repeat("b", 64), ModelUID: 997, TransportUID: 998}
+	remoteLaunchFixtureProfile(a)
 	a.profile.Prepare = func(_ context.Context, r RemoteAdmissionRequest) (RemoteAdmissionReceipt, error) {
 		a.prepares++
 		if a.occupied {
@@ -74,9 +75,9 @@ func newRemoteAdmissionTestAuthority(binding runtime.RuntimeBinding) *remoteAdmi
 		}
 		return a.prepared, nil
 	}
-	a.profile.Begin = func(_ context.Context, r RemoteAdmissionReceipt) (RemoteBeginReceipt, error) {
+	a.profile.Begin = func(_ context.Context, r RemoteAdmissionReceipt, cfg runtime.Config) (RemoteBeginReceipt, runtime.Config, error) {
 		a.begins++
-		return RemoteBeginReceipt{Reservation: r, IntentID: "controller-intent"}, nil
+		return RemoteBeginReceipt{Reservation: r, IntentID: "controller-intent"}, remoteLaunchFixtureConfig(cfg, a.profile, r), nil
 	}
 	a.profile.Finish = func(ctx context.Context, r RemoteBeginReceipt, _ error) (RemoteAdmissionReceipt, error) {
 		a.finishes++
@@ -322,10 +323,10 @@ func TestRemoteAdmissionPreparedProofRejectsChangedBinding(t *testing.T) {
 func TestRemoteAdmissionBeginReceiptCannotReplaceReservation(t *testing.T) {
 	city, store, b, p, a := remoteAdmissionFixture(t)
 	original := a.profile.Begin
-	a.profile.Begin = func(ctx context.Context, r RemoteAdmissionReceipt) (RemoteBeginReceipt, error) {
-		v, e := original(ctx, r)
+	a.profile.Begin = func(ctx context.Context, r RemoteAdmissionReceipt, cfg runtime.Config) (RemoteBeginReceipt, runtime.Config, error) {
+		v, launch, e := original(ctx, r, cfg)
 		v.Reservation.AuthorityReceiptID = "other"
-		return v, e
+		return v, launch, e
 	}
 	admitted, ok, reason := AdmitCapacityStart(remoteAdmissionContext(t, a), city, "worker", b.ID, time.Now(), p, store)
 	if !ok {
@@ -351,9 +352,9 @@ func TestRemoteAdmissionPublicCreatePreservesOccupiedSource(t *testing.T) {
 				}
 			}
 			if fault == "begin" {
-				a.profile.Begin = func(context.Context, RemoteAdmissionReceipt) (RemoteBeginReceipt, error) {
+				a.profile.Begin = func(context.Context, RemoteAdmissionReceipt, runtime.Config) (RemoteBeginReceipt, runtime.Config, error) {
 					a.begins++
-					return RemoteBeginReceipt{}, errors.New("lost intent response")
+					return RemoteBeginReceipt{}, runtime.Config{}, errors.New("lost intent response")
 				}
 			}
 			if fault == "finish-unknown" {
@@ -418,10 +419,10 @@ func TestRemoteAdmissionKillFenceWithinAuthorityWindow(t *testing.T) {
 			}
 			if window == "begin" {
 				original := a.profile.Begin
-				a.profile.Begin = func(ctx context.Context, r RemoteAdmissionReceipt) (RemoteBeginReceipt, error) {
-					v, e := original(ctx, r)
+				a.profile.Begin = func(ctx context.Context, r RemoteAdmissionReceipt, cfg runtime.Config) (RemoteBeginReceipt, runtime.Config, error) {
+					v, launch, e := original(ctx, r, cfg)
 					kill()
-					return v, e
+					return v, launch, e
 				}
 			}
 			ctx, ok, _ := AdmitCapacityStart(remoteAdmissionContext(t, a), city, "worker", b.ID, time.Now(), p, store)
@@ -534,9 +535,9 @@ func TestRemoteAdmissionAmbiguousCallbacksDoNotBecomeFreshGrant(t *testing.T) {
 				}
 			}
 			if fault == "begin" {
-				a.profile.Begin = func(context.Context, RemoteAdmissionReceipt) (RemoteBeginReceipt, error) {
+				a.profile.Begin = func(context.Context, RemoteAdmissionReceipt, runtime.Config) (RemoteBeginReceipt, runtime.Config, error) {
 					a.begins++
-					return RemoteBeginReceipt{}, lost
+					return RemoteBeginReceipt{}, runtime.Config{}, lost
 				}
 			}
 			if fault == "start" {

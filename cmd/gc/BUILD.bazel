@@ -1494,6 +1494,7 @@ go_test(
         "telemetry_lifecycle_metrics_test.go",
         "template_resolve_env_test.go",
         "agent_runtime_routing_test.go",
+        "remote_prompt_text_test.go",
         "template_resolve_mcp_test.go",
         "template_resolve_phase2_test.go",
         "template_resolve_prompt_test.go",

@@ -948,6 +948,11 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.Command = tp.Command
 	cfg.Upstream = tp.Upstream
 	cfg.PromptSuffix = promptSuffix
+	if promptSuffix != "" {
+		cfg.PromptText = runtime.PromptTextFromLiteral(tp.Prompt)
+	} else {
+		cfg.PromptText = runtime.PromptTextFromLiteral(nudge)
+	}
 	cfg.PromptFlag = promptFlag
 	cfg.Env = env
 	cfg.OperatorEnv = maps.Clone(tp.OperatorEnv)

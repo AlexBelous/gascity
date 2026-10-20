@@ -903,6 +903,10 @@ type Config struct {
 	// that should not trigger restarts.
 	PromptSuffix string
 
+	// PromptText is the literal invocation-local delivery payload for guarded
+	// transports. It is never a persisted wire field or desired fingerprint.
+	PromptText PromptText `json:"-"`
+
 	// PromptFlag is the CLI flag (e.g., "--prompt") prepended to
 	// PromptSuffix when constructing the startup command. When empty,
 	// PromptSuffix is appended as a bare positional argument. Stored

@@ -184,8 +184,14 @@ unless the row names how they map to the canonical projection.
 
 | ID | Scenario | Required behavior | Evidence |
 |---|---|---|---|
-| SESSION-ROUTE-001 | First explicit runtime launch | Bind exact SID/template before resource admission; Store owns immutable runtime binding metadata under its mutation lock and an exact conditional-write revision fence. Off/unavailable conditional writes refuse the first pin. A binding is routing identity and never admission proof. | `runtime_binding.go`; `admission_runtime.go`; `runtime_binding_test.go` |
+| SESSION-ROUTE-001 | First explicit runtime launch | Bind exact SID/template before resource admission; Store owns immutable runtime binding metadata using an exact conditional-write revision fence without reacquiring a caller-held SID mutation lock. Off/unavailable conditional writes refuse the first pin. A binding is routing identity and never admission proof. | `runtime_binding.go`; `admission_runtime.go`; `runtime_binding_test.go` |
 | SESSION-ROUTE-002 | Closed record or duplicate provider name | Preserve closed SID pins for cleanup/restart reconstruction; reject ambiguous names and non-SID metadata writes. | `runtime_binding_test.go` |
+
+## Guarded remote launch
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-REMOTE-LAUNCH-001 | Authority prepares guarded bridge startup | Begin receives invocation-local Config and returns intent plus rewritten Config. Only the reviewed fixed command prefix plus public lower-hex attempt, fixed workdir, unchanged five GC identity env values (and optional GC_CITY), one-shot lifecycle and sudo process hint reach the transport. The transport receives the SDK-owned validated snapshot rather than callback-owned maps or slices. Every other config field is zero, including shell hooks, prompt suffix/text, overlays, operator env and local CommandScope. Rejected rewrites hold the occupied source; Begin receives a deep copy of all mutable Config branches and cannot mutate the caller through maps, slices, nested MCP entries, startup bytes or pointers. The root-owned backend validates the entry prefix and stages literal prompt text under the exact attempt. | `admission_remote_launch_test.go` |
 
 ## Maintenance Rules
 

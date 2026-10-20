@@ -21,6 +21,7 @@ go_library(
         "process_evidence.go",
         "process_table_scanner.go",
         "protocol.go",
+        "prompt_text.go",
         "provider_core.go",
         "redact.go",
         "runtime.go",
@@ -44,6 +45,7 @@ go_test(
     srcs = [
         "attach_observer_test.go",
         "beacon_test.go",
+        "prompt_text_test.go",
         "capacity_test.go",
         "carrier_test.go",
         "dialog_midsession_test.go",

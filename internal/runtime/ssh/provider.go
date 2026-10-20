@@ -492,7 +492,15 @@ func (p *Provider) Attach(name string) error {
 	if err := checkName(name); err != nil {
 		return fmt.Errorf("ssh attach: %w", err)
 	}
-	cmd := exec.Command("ssh", attachArgs(p.conn.ep, name)...)
+	if p.conn.ep.Strict && (p.conn.ep.KeyPath == "" || p.conn.ep.KnownHostsPath == "") {
+		return errors.New("strict SSH endpoint requires explicit key and known hosts")
+	}
+	executable := "ssh"
+	if p.conn.ep.Strict {
+		executable = "/usr/bin/ssh"
+	}
+	cmd := exec.Command(executable, attachArgs(p.conn.ep, name)...)
+
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -902,6 +910,9 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 // is deliberately omitted (unlike the non-interactive [sshArgs]) so an
 // operator-initiated attach can still answer a key-passphrase or host-key prompt.
 func attachArgs(ep Endpoint, name string) []string {
+	if ep.Strict {
+		return append([]string{"-t"}, sshArgs(ep, []string{"tmux", "attach", "-t", name})...)
+	}
 	args := []string{"-t", "-o", "StrictHostKeyChecking=accept-new"}
 	if ep.KnownHostsPath != "" {
 		args = append(args, "-o", "UserKnownHostsFile="+ep.KnownHostsPath)

@@ -33,12 +33,16 @@ func withAgentRuntimeRouting(ctx sessionProviderContext, local runtime.Provider)
 		return nil, fmt.Errorf("loading pinned runtime routes: %w", err)
 	}
 	store := session.NewStore(beads.SessionStore{Store: cliSessionStore(raw, ctx.cfg, ctx.cityPath)})
-	return composeAgentRuntimeRouting(ctx, local, store, resolveAgentRuntimeProfile)
+	return composeOperatorRemoteRuntimeRouting(ctx, local, store)
 }
 
 // composeAgentRuntimeRouting owns only transport selection. Store owns all SID
 // metadata writes; the caller still owns resource authorization before launch.
 func composeAgentRuntimeRouting(ctx sessionProviderContext, local runtime.Provider, store *session.Store, profile agentRuntimeProfileResolver) (runtime.Provider, error) {
+	return composeAgentRuntimeRoutingUsing(ctx, local, store, profile, nil)
+}
+
+func composeAgentRuntimeRoutingUsing(ctx sessionProviderContext, local runtime.Provider, store *session.Store, profile agentRuntimeProfileResolver, trustedFactory func(runtime.RuntimeBinding) (runtime.Provider, error)) (runtime.Provider, error) {
 	pins, err := store.RuntimeBindings()
 	if err != nil {
 		return nil, err
@@ -63,6 +67,14 @@ func composeAgentRuntimeRouting(ctx sessionProviderContext, local runtime.Provid
 		}
 		if !strings.HasPrefix(b.Selector, "ssh:") || b.Endpoint != strings.TrimPrefix(b.Selector, "ssh:") {
 			return nil, fmt.Errorf("pinned runtime requires an immutable SSH endpoint/reference")
+		}
+		if trustedFactory != nil {
+			sp, err := trustedFactory(b)
+			if err != nil {
+				return nil, err
+			}
+			providers[b] = sp
+			return sp, nil
 		}
 		registry, err := runtimeRegistryForCity(ctx.cfg)
 		if err != nil {
@@ -172,6 +184,9 @@ func composeAgentRuntimeRouting(ctx sessionProviderContext, local runtime.Provid
 // Every accepted config generation refreshes an active overlay: profile policy
 // may depend on model/provider/workspace inputs beyond the Runtime selector.
 func agentRuntimeRoutingActive(sp runtime.Provider, configs ...*config.City) bool {
+	if _, ok := sp.(*operatorRemoteProvider); ok {
+		return true
+	}
 	if _, ok := sp.(*routing.Provider); ok {
 		return true
 	}
@@ -189,8 +204,12 @@ func agentRuntimeRoutingActive(sp runtime.Provider, configs ...*config.City) boo
 }
 
 func refreshAgentRuntimeRouting(ctx sessionProviderContext, sp runtime.Provider) (runtime.Provider, error) {
-	if router, ok := sp.(*routing.Provider); ok {
+	return refreshAgentRuntimeRoutingUsing(ctx, sp, withAgentRuntimeRouting)
+}
+
+func refreshAgentRuntimeRoutingUsing(ctx sessionProviderContext, sp runtime.Provider, compose func(sessionProviderContext, runtime.Provider) (runtime.Provider, error)) (runtime.Provider, error) {
+	if router, ok := sp.(interface{ DefaultProvider() runtime.Provider }); ok {
 		sp = router.DefaultProvider()
 	}
-	return withAgentRuntimeRouting(ctx, sp)
+	return compose(ctx, sp)
 }

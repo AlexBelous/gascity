@@ -26,6 +26,7 @@ go_test(
         "seams_test.go",
         "session_env_file_test.go",
         "ssh_test.go",
+        "strict_endpoint_test.go",
         "testenv_import_test.go",
     ],
     data = glob(["testdata/**"]),

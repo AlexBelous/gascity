@@ -3,7 +3,9 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 
@@ -131,4 +133,52 @@ func TestRuntimeBindingConcurrentWriterCannotReplaceWinner(t *testing.T) {
 	if err != nil || !ok || got != winner || mem.writes != 1 {
 		t.Fatalf("winner lost: %+v %v %v writes=%d", got, ok, err, mem.writes)
 	}
+}
+
+// Manager.Start/StartRuntimeOnly already hold the SID mutation lock before
+// admission calls the runtime binder. First pinning must not reacquire it.
+func TestRuntimeBindingFirstPinInsideManagerMutationLock(t *testing.T) {
+	s := NewStore(beads.SessionStore{Store: runtimeBindingMemStore(t)})
+	info, err := s.CreateSessionInfo(CreateSpec{ID: "sid-nested-first-pin", AgentName: "worker", Metadata: map[string]string{"template": "worker", "session_name": "nested-first-pin", "state": "asleep", "provider": "fake", "generation": "1", "instance_token": NewInstanceToken()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := runtime.RuntimeBinding{Selector: "ssh:worker@vm", Endpoint: "worker@vm", ResourceDomain: "owned-vm", PolicyDigest: "reviewed-policy"}
+	provider := &runtimeBindingManagerProvider{Fake: runtime.NewFake(), store: s, binding: binding}
+	manager := NewManagerWithOptions(s.store, provider, WithCityPath(t.TempDir()))
+	result := make(chan error, 1)
+	go func() {
+		result <- manager.Start(context.Background(), info.ID, "fixture-command", runtime.Config{WorkDir: t.TempDir()})
+	}()
+	select {
+	case err = <-result:
+		// A subsequent remote-admission slice may deny the prepared route;
+		// first pinning must complete before that denial, without a nested lock.
+		if err != nil && !errors.Is(err, ErrCapacityAdmission) {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first explicit runtime pin deadlocked inside Manager SID mutation lock")
+	}
+	got, pinned, err := s.RuntimeBinding(info.ID)
+	if err != nil || !pinned || got != binding {
+		t.Fatalf("pin/start mismatch: %+v %v %v", got, pinned, err)
+	}
+}
+
+type runtimeBindingManagerProvider struct {
+	*runtime.Fake
+	store   *Store
+	binding runtime.RuntimeBinding
+}
+
+func (p *runtimeBindingManagerProvider) BindRuntime(_ context.Context, id string, _ string) (runtime.RuntimeBinding, error) {
+	if err := p.store.PinRuntimeBinding(id, p.binding); err != nil {
+		return runtime.RuntimeBinding{}, err
+	}
+	return p.binding, nil
+}
+
+func (p *runtimeBindingManagerProvider) ResolveRuntime(string) (runtime.RuntimeBinding, error) {
+	return p.binding, nil
 }

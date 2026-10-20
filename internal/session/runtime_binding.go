@@ -40,45 +40,45 @@ func validateRuntimeBinding(b runtime.RuntimeBinding) error {
 	return nil
 }
 
-// PinRuntimeBinding writes once using an exact revision fence, under the
-// session mutation lock. A changed template or policy can never redirect an
-// existing session to another host. The first pin requires conditional writes;
+// PinRuntimeBinding writes once using an exact revision fence. A changed
+// template or policy can never redirect an existing session to another host. The first pin requires conditional writes;
 // unavailable/off capability refuses instead of degrading to an unsafe write.
 func (s *Store) PinRuntimeBinding(id string, binding runtime.RuntimeBinding) error {
 	if err := validateRuntimeBinding(binding); err != nil {
 		return err
 	}
-	return WithSessionMutationLock(id, func() error {
-		row, err := s.validatedBead(id)
-		if err != nil {
-			return err
-		}
-		current, ok, err := decodeRuntimeBinding(id, row.Metadata[runtimeBindingMetadataKey])
-		if err != nil {
-			return err
-		}
-		if ok {
-			if current != binding {
-				return fmt.Errorf("session %q: runtime binding is immutable", id)
-			}
-			return nil
-		}
-		raw, err := json.Marshal(binding)
-		if err != nil {
-			return err
-		}
-		writer, _, err := beads.ResolveConditionalWriter(s.store)
-		if err != nil {
-			return err
-		}
-		if writer == nil {
-			return fmt.Errorf("session %q: runtime binding requires conditional session writes", id)
-		}
-		if err = writer.UpdateIfMatch(id, row.Revision, beads.UpdateOpts{Metadata: map[string]string{runtimeBindingMetadataKey: string(raw)}}); err != nil {
-			return fmt.Errorf("pinning session %q runtime: %w", id, err)
+	// Admission may already hold this SID's non-reentrant mutation lock.
+	// The canonical CAS writer is the cross-process arbiter; do not nest a
+	// process-local lock or retry a lost revision against a competing pin.
+	row, err := s.validatedBead(id)
+	if err != nil {
+		return err
+	}
+	current, ok, err := decodeRuntimeBinding(id, row.Metadata[runtimeBindingMetadataKey])
+	if err != nil {
+		return err
+	}
+	if ok {
+		if current != binding {
+			return fmt.Errorf("session %q: runtime binding is immutable", id)
 		}
 		return nil
-	})
+	}
+	raw, err := json.Marshal(binding)
+	if err != nil {
+		return err
+	}
+	writer, _, err := beads.ResolveConditionalWriter(s.store)
+	if err != nil {
+		return err
+	}
+	if writer == nil {
+		return fmt.Errorf("session %q: runtime binding requires conditional session writes", id)
+	}
+	if err = writer.UpdateIfMatch(id, row.Revision, beads.UpdateOpts{Metadata: map[string]string{runtimeBindingMetadataKey: string(raw)}}); err != nil {
+		return fmt.Errorf("pinning session %q runtime: %w", id, err)
+	}
+	return nil
 }
 
 // RuntimeRoute resolves one exact provider session name. A missing record is

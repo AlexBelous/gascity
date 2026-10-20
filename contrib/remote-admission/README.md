@@ -29,6 +29,12 @@ entry streams only model output to its transport. A transport disconnect or tmux
 exit does not prove model termination. Remote health and cancellation use this root
 authority, not SSH descendant process matching.
 
+The installer must explicitly provision root0600 `ledger.json` containing exactly
+`{"schema_version":1,"current":null,"attempts":{}}` only for a proved fresh authority
+before activating its root profile. The engine always refuses an absent ledger;
+it never silently initializes or recreates lost history. After any prior attempt,
+missing ledger requires explicit reconciliation of retained independent evidence.
+
 The finite state machine is prepared -> staged -> consumed -> entered -> exited.
 Any ambiguous start/observation retains an unknown occupied attempt. Only one
 attempt can occupy the locked durable ledger. Retry never issues another start
@@ -83,7 +89,9 @@ its own reviewed migration; the helper neither copies nor reads auth. It verifie
 exact mounted source/device, root-owned 0600 fully allocated backing-file identity/size, kernel
 loop backing path and filesystem maximum bytes. Sparse backing files are refused;
 preallocation and the backing filesystem allocation guarantees are operator gates. HOME is writable inside the unit,
-but cannot grow its backing image. Work, /tmp and /var/tmp are separate size-capped
+but cannot grow its backing image. PrivateDevices=yes and PrivateIPC=yes isolate host devices and IPC; /dev/shm is
+a separate size-capped tmpfs. Its device and IPC namespace must differ from PID1.
+Work, /tmp and /var/tmp are separate size-capped
 tmpfs mounts charged to the model cgroup. LimitFSIZE bounds each output/file; no
 model-writable unbounded persistent path is allowed. Rootstate is private 0700,
 so its explicit sandbox write allowance serves only the privileged hooks. Retained

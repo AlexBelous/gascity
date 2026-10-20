@@ -177,7 +177,8 @@ class Authority:
             current = path.lstat()
             require((info.st_dev, info.st_ino) == (current.st_dev, current.st_ino), "lock_replaced")
             ledger = self.directory / "ledger.json"
-            state = decode(read_private(ledger, self.profile.owner)) if ledger.exists() else {"schema_version": 1, "current": None, "attempts": {}}
+            require(ledger.exists(), "missing_ledger")
+            state = decode(read_private(ledger, self.profile.owner))
             keys(state, "schema_version current attempts")
             require(type(state["schema_version"]) is int and state["schema_version"] == 1 and type(state["attempts"]) is dict, "ledger_schema")
             require(state["current"] is None or state["current"] in state["attempts"], "ledger_current")
@@ -466,9 +467,10 @@ class LinuxHost:
             "Restart": "no", "RemainAfterExit": "yes", "KillMode": "control-group", "OOMPolicy": "kill",
             "NoNewPrivileges": "yes", "ProtectSystem": "strict", "ProtectHome": "yes",
             "ProtectControlGroups": "yes", "Delegate": "no", "PrivateTmp": "no",
+            "PrivateDevices": "yes", "PrivateIPC": "yes",
             "ReadWritePaths": self.p["state_dir"] + " " + self.p["model_home"],
             "WorkingDirectory": self.p["working_directory"],
-            "TemporaryFileSystem": "/tmp:rw,nosuid,nodev,size=" + str(r["tmp_max_bytes"]) + ",mode=1777 /var/tmp:rw,nosuid,nodev,size=" + str(r["tmp_max_bytes"]) + ",mode=1777 " + self.p["working_directory"] + ":rw,nosuid,nodev,size=" + str(r["work_max_bytes"]) + ",mode=0700,uid=" + str(self.p["model_uid"]) + ",gid=" + str(self.p["model_gid"]),
+            "TemporaryFileSystem": "/dev/shm:rw,nosuid,nodev,noexec,size=" + str(r["tmp_max_bytes"]) + ",mode=1777 /tmp:rw,nosuid,nodev,size=" + str(r["tmp_max_bytes"]) + ",mode=1777 /var/tmp:rw,nosuid,nodev,size=" + str(r["tmp_max_bytes"]) + ",mode=1777 " + self.p["working_directory"] + ":rw,nosuid,nodev,size=" + str(r["work_max_bytes"]) + ",mode=0700,uid=" + str(self.p["model_uid"]) + ",gid=" + str(self.p["model_gid"]),
             "LimitFSIZE": str(r["output_max_bytes"]),
             "RestrictSUIDSGID": "yes", "CapabilityBoundingSet": "", "AmbientCapabilities": "",
             "MemoryMax": str(r["memory_max_bytes"]), "MemorySwapMax": str(r["memory_swap_max_bytes"]),
@@ -517,12 +519,25 @@ class LinuxHost:
         for name, budget, mode, uid, gid in (
             ("/tmp", self.p["resources"]["tmp_max_bytes"], 0o1777, 0, 0),
             ("/var/tmp", self.p["resources"]["tmp_max_bytes"], 0o1777, 0, 0),
+            ("/dev/shm", self.p["resources"]["tmp_max_bytes"], 0o1777, 0, 0),
             (self.p["working_directory"], self.p["resources"]["work_max_bytes"], 0o700, self.p["model_uid"], self.p["model_gid"]),
         ):
             require([fstype for mount, fstype in mounts if mount == name] == ["tmpfs"], "tmpfs_mount")
             path = pathlib.Path("/proc/" + str(pid) + "/root" + name)
             info, space = path.stat(), os.statvfs(path)
             require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (uid, gid, mode) and space.f_blocks * space.f_frsize <= budget, "tmpfs_budget")
+
+        self.private_namespaces(pid)
+
+    def private_namespaces(self, pid):
+        # PID1 is the host reference even when a privileged hook shares some unit namespaces.
+        ipc = os.stat("/proc/" + str(pid) + "/ns/ipc")
+        host_ipc = os.stat("/proc/1/ns/ipc")
+        require((ipc.st_dev, ipc.st_ino) != (host_ipc.st_dev, host_ipc.st_ino), "shared_ipc")
+        for name in ("/dev", "/dev/shm"):
+            model = os.stat("/proc/" + str(pid) + "/root" + name)
+            host = os.stat("/proc/1/root" + name)
+            require(model.st_dev != host.st_dev, "shared_device_mount")
 
     def validate_identity(self, row, identity):
         keys(identity, "boot_id unit invocation_id cgroup_path cgroup_device cgroup_inode source_sha manifest_sha256 model_uid transport_uid")

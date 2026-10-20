@@ -62,6 +62,7 @@ class GuardTests(unittest.TestCase):
         self.config=configuration(self.directory)
         self.profile=g.Profile(self.config,owner=os.getuid())
         self.host=FakeHost(self.profile)
+        g.atomic(self.directory/"ledger.json",dict(schema_version=1,current=None,attempts={}))
         self.a=g.Authority(self.profile,self.host)
         self.req=dict(city="city",session_id="sid",template="role",runtime_handle="runtime",generation="1",instance_token="private-incarnation",attempt="1"*32,binding=self.config["binding"])
     def tearDown(self):
@@ -159,6 +160,7 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(receipt["identity"]["model_uid"],988)
         self.assertEqual(receipt["request"],self.req)
     def test_reboot_and_scope_inode_hold(self):
+        self.entered()
         for field,value in (("boot_id","other"),("inode",999)):
             with self.subTest(field=field):
                 # Restore original proof before independently injecting each change.
@@ -438,5 +440,51 @@ class GuardTests(unittest.TestCase):
             self.a.save(state,row)
         self.refuses(self.a.enter,self.req["attempt"],987)
         self.assertEqual(self.host.started,0)
+
+    def test_private_devices_ipc_and_bounded_shm_properties(self):
+        linux=g.LinuxHost(self.profile);linux.pin=lambda *args:None
+        calls=[];linux.command=lambda argv:calls.append(argv)
+        self.stage()
+        with self.a.locked() as state:row=copy.deepcopy(state["attempts"][self.req["attempt"]])
+        linux.start(row)
+        argv=calls[0]
+        self.assertIn("--property=PrivateDevices=yes",argv)
+        self.assertIn("--property=PrivateIPC=yes",argv)
+        tmpfs=next(x for x in argv if x.startswith("--property=TemporaryFileSystem="))
+        self.assertIn("/dev/shm:rw,nosuid,nodev,noexec,size=1048576,mode=1777",tmpfs)
+
+    def test_lost_consumed_ledger_never_becomes_fresh_authority(self):
+        self.entered()
+        # Preserve unknown history in an archive; absence must never bootstrap a fresh seat.
+        (self.directory/"ledger.json").rename(self.directory/"lost-ledger-retained.json")
+        self.host.sc["empty"]=True
+        request=copy.deepcopy(self.req);request["attempt"]="2"*32
+        self.refuses(self.a.prepare,request)
+
+    def test_private_kernel_namespaces_rejects_host_sharing(self):
+        from types import SimpleNamespace
+        linux=g.LinuxHost(self.profile)
+        def fake(path):
+            if path.endswith("ns/ipc"):return SimpleNamespace(st_dev=1,st_ino=2)
+            return SimpleNamespace(st_dev=3,st_ino=4)
+        with mock.patch.object(g.os,"stat",side_effect=fake):
+            self.refuses(linux.private_namespaces,123)
+    def test_private_kernel_namespace_distinct_proof(self):
+        from types import SimpleNamespace
+        linux=g.LinuxHost(self.profile)
+        def fake(path):
+            if path.endswith("ns/ipc"):return SimpleNamespace(st_dev=1,st_ino=2 if "/1/" in path else 3)
+            return SimpleNamespace(st_dev=4 if "/1/" in path else 5,st_ino=6)
+        with mock.patch.object(g.os,"stat",side_effect=fake):linux.private_namespaces(123)
+    def test_private_device_mount_shared_rejected(self):
+        from types import SimpleNamespace
+        linux=g.LinuxHost(self.profile)
+        def fake(path):
+            if path.endswith("ns/ipc"):return SimpleNamespace(st_dev=1,st_ino=2 if "/1/" in path else 3)
+            return SimpleNamespace(st_dev=4,st_ino=6)
+        with mock.patch.object(g.os,"stat",side_effect=fake):self.refuses(linux.private_namespaces,123)
+    def test_fresh_authority_requires_operator_provisioned_ledger(self):
+        (self.directory/"ledger.json").rename(self.directory/"operator-empty-retained.json")
+        self.refuses(self.a.prepare,self.req)
 
 if __name__ == "__main__":unittest.main()

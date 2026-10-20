@@ -16,11 +16,13 @@ ProtectHome=yes
 ProtectControlGroups=yes
 Delegate=no
 PrivateTmp=no
+PrivateDevices=yes
+PrivateIPC=yes
 RestrictSUIDSGID=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 # ReadWritePaths=<rootstate> <bounded persistent modelHOME>
-# TemporaryFileSystem=/tmp:rw,nosuid,nodev,size=<required>,mode=1777 /var/tmp:rw,nosuid,nodev,size=<required>,mode=1777 <work>:rw,nosuid,nodev,size=<required>,mode=0700,uid=<model>,gid=<model>
+# TemporaryFileSystem=/dev/shm:rw,nosuid,nodev,noexec,size=<required>,mode=1777 /tmp:rw,nosuid,nodev,size=<required>,mode=1777 /var/tmp:rw,nosuid,nodev,size=<required>,mode=1777 <work>:rw,nosuid,nodev,size=<required>,mode=0700,uid=<model>,gid=<model>
 # CPUQuota/MemoryMax/MemorySwapMax/TasksMax/RuntimeMaxSec/LimitFSIZE are REQUIRED.
 # StandardInput=file:<root600 stagedprompt>
 # StandardOutput=append:<root600 boundedoutput>

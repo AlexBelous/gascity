@@ -76,6 +76,33 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.a.observe(self.req)["phase"],"entered")
     def refuses(self,fn,*args):
         with self.assertRaises(g.Refusal): fn(*args)
+    def test_unit_hook_uses_only_fenced_unit_resources(self):
+        self.stage()
+        self.a.enter(self.req["attempt"],987)
+        self.host.cgroup = lambda row: self.host.peer_value["cgroup"]
+        self.host.unit_resources = mock.Mock()
+        g.unit_hook(self.a,self.req["attempt"],False)
+        self.host.unit_resources.assert_called_once_with()
+        self.host.unit_resources.reset_mock()
+        g.unit_hook(self.a,self.req["attempt"],True)
+        self.host.unit_resources.assert_called_once_with()
+        for field,value in (("current",None),("phase","unknown"),("revoked",True),("profile_digest","wrong")):
+            with self.subTest(field=field):
+                with self.a.locked() as state:
+                    original=copy.deepcopy(state)
+                    if field=="current":state[field]=value
+                    else:state["attempts"][self.req["attempt"]][field]=value
+                    g.atomic(self.directory/"ledger.json",state)
+                self.host.unit_resources.reset_mock()
+                self.refuses(g.unit_hook,self.a,self.req["attempt"],False)
+                self.host.unit_resources.assert_not_called()
+                g.atomic(self.directory/"ledger.json",original)
+        self.host.peer_value["cgroup"]="/other.slice"
+        self.host.cgroup=lambda row:"/test.slice/test-"+self.req["attempt"]+".service"
+        self.host.unit_resources.reset_mock()
+        self.refuses(g.unit_hook,self.a,self.req["attempt"],False)
+        self.host.unit_resources.assert_not_called()
+
     def test_parser(self):
         for raw in (b'{"x":1,"x":2}', b'{"x":NaN}', b'[]', b'{}x', bytes([255]), b'x'*(g.MAX_FRAME+1)):
             self.refuses(g.decode,raw)
@@ -551,5 +578,131 @@ class GuardTests(unittest.TestCase):
             # Restore exact positive history directly as an operator fixture only.
             state["attempts"][self.req["attempt"]]["ever_consumed"]=True
             g.atomic(self.directory/"ledger.json",state)
+
+
+class UnitWorkspaceTests(unittest.TestCase):
+    """Unprivileged filesystem fixture; mountinfo is a controlled kernel snapshot."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="hook-work-", dir="/srv/gc-build/home")
+        self.work = pathlib.Path(self.tmp.name)
+        self.work.chmod(0o700)
+        config = configuration(self.work.with_name(self.work.name + "-state"))
+        config.update(working_directory=str(self.work), model_uid=os.getuid(), model_gid=os.getgid())
+        self.host = g.LinuxHost(g.Profile(config, owner=os.getuid()))
+        self.host.p["resources"]["work_max_bytes"] = os.statvfs(self.work).f_blocks * os.statvfs(self.work).f_frsize
+        info = self.work.stat()
+        self.mount = f"900 1 {os.major(info.st_dev)}:{os.minor(info.st_dev)} / {self.work} rw,nosuid,nodev - tmpfs tmpfs rw\n"
+        self.actual_lstat = pathlib.Path.lstat
+        self.actual_read = pathlib.Path.read_text
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def check(self, mount=None, root_changed=False, action=None, mount_changed=False):
+        # The real target/fd is owned by this unprivileged test UID. Only ancestor
+        # ownership and the proc mount table model the root-provisioned unit.
+        from types import SimpleNamespace
+        def lstat(path, *args, **kwargs):
+            value = self.actual_lstat(path, *args, **kwargs)
+            if path in self.work.parents:
+                return SimpleNamespace(st_mode=value.st_mode & ~0o022, st_uid=0)
+            return value
+        reads=0
+        def read(path, *args, **kwargs):
+            nonlocal reads
+            if str(path) == "/proc/self/mountinfo":
+                reads+=1
+                if mount_changed and reads>1:
+                    return self.mount.replace("900 ", "901 ", 1)
+                return self.mount if mount is None else mount
+            return self.actual_read(path, *args, **kwargs)
+        with mock.patch.object(pathlib.Path, "lstat", lstat), mock.patch.object(pathlib.Path, "read_text", read):
+            if root_changed:
+                real = os.fstat
+                def changed(fd):
+                    value = real(fd)
+                    return SimpleNamespace(st_dev=value.st_dev, st_ino=value.st_ino + 1, st_uid=value.st_uid, st_gid=value.st_gid, st_mode=value.st_mode)
+                with mock.patch.object(g.os, "fstat", changed):
+                    (action or self.host.unit_workspace)()
+            else:
+                (action or self.host.unit_workspace)()
+
+    def test_bounded_model_owned_unit_tmpfs(self):
+        self.check()
+
+    def test_wrong_owner_gid_or_mode_refused(self):
+        for field in ("model_uid", "model_gid"):
+            with self.subTest(field=field):
+                previous = self.host.p[field]
+                self.host.p[field] += 1
+                with self.assertRaises(g.Refusal):
+                    self.check()
+                self.host.p[field] = previous
+        self.work.chmod(0o750)
+        with self.assertRaises(g.Refusal):
+            self.check()
+
+    def test_ordinary_path_or_wrong_mount_root_refused(self):
+        for mount in ("", self.mount.replace(" - tmpfs ", " - ext4 "), self.mount.replace(" / ", " /subdir ", 1), self.mount + self.mount):
+            with self.subTest(mount=mount), self.assertRaises(g.Refusal):
+                self.check(mount=mount)
+
+    def test_mount_device_and_size_refused(self):
+        with self.assertRaises(g.Refusal):
+            self.check(mount=self.mount.replace(self.mount.split()[2], "0:999", 1))
+        self.host.p["resources"]["work_max_bytes"] -= 1
+        with self.assertRaises(g.Refusal):
+            self.check()
+
+    def test_changed_opened_root_refused(self):
+        with self.assertRaises(g.Refusal):
+            self.check(root_changed=True)
+        with self.assertRaises(g.Refusal):
+            self.check(mount_changed=True)
+
+    def test_missing_safe_mount_options_refused(self):
+        for option in ("rw", "nosuid", "nodev"):
+            with self.subTest(option=option), self.assertRaises(g.Refusal):
+                self.check(mount=self.mount.replace("rw,nosuid,nodev", ",".join(x for x in ("rw","nosuid","nodev") if x!=option)))
+
+    def test_symlink_or_model_owned_ancestor_refused(self):
+        alias=self.work.with_name(self.work.name+"-alias")
+        alias.symlink_to(self.work)
+        self.host.p["working_directory"]=str(alias)
+        try:
+            with self.assertRaisesRegex(g.Refusal, "symlink"):
+                self.check()
+        finally:
+            alias.rename(self.work/"retained-alias")
+            self.host.p["working_directory"]=str(self.work)
+        # The actual test home ancestor is non-root-owned; without the modeled
+        # root-owned ancestors, an otherwise valid leaf must still be refused.
+        with self.assertRaises(g.Refusal):
+            self.host.unit_workspace()
+
+    def test_unit_resources_preserves_shared_resource_thresholds(self):
+        self.host.p["state_dir"]=str(self.work)
+        self.host.p["thresholds"].update(max_memory_psi_full_avg10=100,max_io_psi_full_avg10=100)
+        with mock.patch.object(self.host,"home_mount"):
+            self.check(action=self.host.unit_resources)
+            for field in ("min_mem_available_bytes","min_disk_available_bytes","min_free_inodes"):
+                with self.subTest(field=field):
+                    original=self.host.p["thresholds"][field]
+                    self.host.p["thresholds"][field]=10**30
+                    with self.assertRaises(g.Refusal):
+                        self.check(action=self.host.unit_resources)
+                    self.host.p["thresholds"][field]=original
+        with mock.patch.object(self.host,"home_mount",side_effect=g.Refusal("home_proof")):
+            with self.assertRaisesRegex(g.Refusal,"home_proof"):
+                self.host.unit_resources()
+
+    def test_default_host_resources_still_refuses_model_owned_target(self):
+        self.host.p["state_dir"]=str(self.work)
+        self.host.p["thresholds"].update(max_memory_psi_full_avg10=100,max_io_psi_full_avg10=100)
+        with mock.patch.object(self.host, "home_mount"):
+            self.check(action=self.host.unit_resources)
+            with self.assertRaisesRegex(g.Refusal, "unsafe_owner_mode"):
+                self.check(action=self.host.resources)
+
 
 if __name__ == "__main__":unittest.main()

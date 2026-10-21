@@ -409,11 +409,57 @@ class LinuxHost:
         require(filesystem.f_blocks * filesystem.f_frsize <= mount["max_bytes"], "home_budget")
 
     def resources(self):
-        self.home_mount()
-        # Installer provisions this root-only mount target. Never repair/chown it here.
+        self.check_resources(False)
+
+    def unit_resources(self):
+        # Only unit_hook calls this after validating the root ledger and exact cgroup.
+        # A '+' privileged hook still sees the unit's model-owned tmpfs overlay.
+        self.check_resources(True)
+
+    def unit_workspace(self):
         work = pathlib.Path(self.p["working_directory"])
-        secure_path(work, 0, True)
+        before = secure_path(work, self.p["model_uid"], True)
         require(all(parent.lstat().st_uid == 0 for parent in work.parents), "work_ancestor")
+        require((before.st_gid, stat.S_IMODE(before.st_mode)) == (self.p["model_gid"], 0o700), "work_credentials")
+
+        def mount():
+            entries = []
+            for line in pathlib.Path("/proc/self/mountinfo").read_text().splitlines():
+                left, right = line.split(" - ", 1)
+                fields = left.split()
+                if fields[4] == str(work):
+                    entries.append((fields, right.split()))
+            require(len(entries) == 1, "work_mount")
+            fields, filesystem = entries[0]
+            require(fields[3] == "/" and filesystem[0] == "tmpfs", "work_tmpfs")
+            require({"rw", "nosuid", "nodev"} <= set(fields[5].split(",")), "work_mount_options")
+            require(fields[2] == str(os.major(before.st_dev)) + ":" + str(os.minor(before.st_dev)), "work_device")
+            return entries[0]
+
+        mounted = mount()
+        fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            opened = os.fstat(fd)
+            require((opened.st_dev, opened.st_ino, opened.st_uid, opened.st_gid, opened.st_mode) ==
+                    (before.st_dev, before.st_ino, before.st_uid, before.st_gid, before.st_mode), "work_changed")
+            space = os.fstatvfs(fd)
+            require(space.f_blocks * space.f_frsize <= self.p["resources"]["work_max_bytes"], "work_budget")
+            after = work.lstat()
+            require((after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_mode) ==
+                    (before.st_dev, before.st_ino, before.st_uid, before.st_gid, before.st_mode)
+                    and mount() == mounted, "work_changed")
+        finally:
+            os.close(fd)
+
+    def check_resources(self, in_unit):
+        self.home_mount()
+        if in_unit:
+            self.unit_workspace()
+        else:
+            # Installer provisions this root-only host target. Never repair/chown it.
+            work = pathlib.Path(self.p["working_directory"])
+            secure_path(work, 0, True)
+            require(all(parent.lstat().st_uid == 0 for parent in work.parents), "work_ancestor")
         values = {}
         for line in pathlib.Path("/proc/meminfo").read_text().splitlines():
             name, rest = line.split(":", 1)
@@ -650,7 +696,7 @@ def unit_hook(authority, attempt, post):
         row = state["attempts"].get(attempt)
         require(row is not None and state["current"] == attempt and row["profile_digest"] == authority.profile.digest and row["phase"] in ("consumed", "entered") and not row["revoked"], "hook_denied")
         require(authority.host.peer(os.getpid())["cgroup"] == authority.host.cgroup(row), "hook_cgroup")
-        authority.host.resources()
+        authority.host.unit_resources()
         scope = authority.host.scope()
         require(all(scope[k] == row["scope"][k] for k in ("boot_id", "device", "inode")), "scope_changed")
         if post:

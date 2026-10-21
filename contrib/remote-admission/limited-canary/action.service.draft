@@ -1,0 +1,23 @@
+# DATA ONLY. Root renders immutable final entry path before installing.
+[Unit]
+After=gc-repairer-action-208-fixture.service UNRESOLVED_EXACT_MODEL_UNIT
+# Ordering references retain history; no Wants/Requires and no implicit start.
+[Service]
+Type=exec
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/gascity/repairer-limited208 serve
+RuntimeDirectory=gc-repairer-limited208
+RuntimeDirectoryMode=0710
+# Root publication sets RuntimeDirectory group982 BEFORE starting this unit.
+ExecStartPre=/usr/bin/chown 0:982 /run/gc-repairer-limited208
+RuntimeMaxSec=300
+TimeoutStopSec=5
+Restart=no
+CPUQuota=10%
+MemoryMax=128M
+MemorySwapMax=0
+TasksMax=16
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077

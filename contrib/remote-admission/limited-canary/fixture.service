@@ -1,0 +1,22 @@
+# DATA ONLY. Not installed by source author.
+[Unit]
+Description=Single fixed repairer208 fixture natural-cycle sensor
+[Service]
+Type=exec
+DynamicUser=yes
+ExecStart=/usr/bin/sleep 90
+Restart=no
+RemainAfterExit=no
+RuntimeMaxSec=100
+TimeoutStartSec=5
+TimeoutStopSec=5
+CPUQuota=10%
+MemoryMax=32M
+MemorySwapMax=0
+TasksMax=8
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX

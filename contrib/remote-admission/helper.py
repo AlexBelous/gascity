@@ -745,12 +745,20 @@ class LinuxHost:
                 and unit["MainPID"] == "0" and unit["ExecMainCode"] == "0"
                 and unit["ExecMainStatus"] == "0" and unit["Result"] == "success", "pending_state")
         require(HEX32.fullmatch(unit["InvocationID"]) is not None
-                and unit["ControlGroup"] == self.cgroup(row) and scope["empty"] is False, "pending_binding")
+                and unit["ControlGroup"] == self.cgroup(row), "pending_binding")
         path = pathlib.Path("/sys/fs/cgroup" + self.cgroup(row))
         before = path.stat()
         require(stat.S_ISDIR(before.st_mode) and before.st_uid == 0 and before.st_mode & 0o022 == 0
                 and before.st_ino > 0, "pending_cgroup")
         second, after, final_scope = self.show(self.unit(row)), path.stat(), self.scope()
+        # scope was sampled before the first systemd read. Reconcile that early
+        # empty view using these existing bounded reads, never by granting entry.
+        try:
+            self.diagnostic_scope_empty = final_scope["empty"]
+            if type(getattr(self, "diagnostic_state", None)) is dict:
+                self.diagnostic_state["scope_empty"] = final_scope["empty"]
+        except Exception:
+            pass  # Diagnostic preparation cannot change the admission decision.
         # Compare immutable identity, allowing only explicit forward startup states.
         require(all(second[k] == unit[k] for k in ("Id", "LoadState", "InvocationID", "ControlGroup")),
                 "pending_changed")
@@ -771,7 +779,7 @@ class LinuxHost:
                     "cgroup_device": before.st_dev, "cgroup_inode": before.st_ino,
                     **{k: self.p[k] for k in ("source_sha", "manifest_sha256", "model_uid", "transport_uid")}}
         self.validate_identity(row, identity)
-        return {"phase": "pending", "identity": identity, "scope": scope}
+        return {"phase": "pending", "identity": identity, "scope": final_scope}
 
     def inspect(self, row):
         self.diagnostic_state = None

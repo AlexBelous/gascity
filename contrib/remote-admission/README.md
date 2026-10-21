@@ -151,6 +151,18 @@ masquerade as a full entered/exited child kernel receipt.
 Response loss, startup races or unknown remain occupied until root reconciliation.
 Errors are content-free `{schema_version:1,error:"refused"}` with nonzero exit.
 
+Early startup observation may read an empty parent before systemd reports
+activating/start-pre. The pending path reconciles that earlier view with its
+existing second systemd/child-cgroup read and fresh recursive parent scope. It
+returns only the final nonempty scope, with unchanged boot, parent, invocation,
+and child kernel pins. Final-empty or changed snapshots refuse without polling
+or granting entry. A pending seat remains consumed and unattested (public phase
+unknown); queue access still requires the complete entered proof. This does not
+change the existing handling of previously unknown rows or release any retained
+fixture authority. These reads are sequential, not an atomic OS snapshot: the
+cached diagnostic timestamp belongs to the systemd read, while scope_empty may
+reflect the later final scope read.
+
 `queue-observe` is a separate fixed root-only read API. Input is exactly
 `{schema_version:1,profile_id,peer:{pid,uid,gid,start,cgroup}}`, optionally plus
 `expected_identity`. It derives the current attempt from its single root ledger,

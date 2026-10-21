@@ -913,6 +913,100 @@ class StartupObservationTests(unittest.TestCase):
         self.assertEqual(len(calls),2)
 
 
+    def empty_before_show(self, populate=True):
+        self.pending()
+        self.host.sc["empty"]=True
+        self.show_reads=[]
+        def show(unit):
+            self.show_reads.append(unit)
+            if populate:self.host.sc["empty"]=False
+            return copy.deepcopy(self.unit)
+        self.linux.show=show
+
+    def test_empty_scope_before_start_pre_reconciles_final_scope_without_admission(self):
+        self.empty_before_show()
+        with self.kernel():
+            self.assertEqual(self.a.observe(self.req)["phase"],"unknown")
+            state,row=self.state()
+            self.assertEqual(row["phase"],"consumed")
+            self.assertEqual(len(self.show_reads),2)
+            self.assertFalse(row["attested"])
+            self.assertEqual(row["startup_identity"]["invocation_id"],"a"*32)
+            g.unit_hook(self.a,self.req["attempt"],False)
+            self.assertEqual(self.checked,["resources"])
+            with self.assertRaisesRegex(g.Refusal,"not_entered"):
+                self.a.queue_observe(dict(schema_version=1,profile_id="test",peer=self.host.peer_value))
+        self.assertEqual(self.state()[1]["phase"],"consumed")
+        self.assertEqual(self.host.started,1)
+
+    def test_final_empty_start_pre_refuses_after_exactly_two_snapshots(self):
+        self.empty_before_show(populate=False)
+        with self.kernel():
+            self.a.observe(self.req)
+        _,row=self.state()
+        self.assertEqual(row["phase"],"unknown")
+        self.assertNotIn("startup_identity",row)
+        self.assertEqual(len(self.show_reads),2)
+        self.assertEqual(self.checked,[])
+        event=g.decode((self.directory/"diagnostic-first-unknown.json").read_bytes())
+        self.assertEqual(event["reason"],"pending_changed")
+
+    def test_initial_empty_reconciliation_rejects_second_invocation_or_state_change(self):
+        for change in ({"InvocationID":"b"*32},{"ControlGroup":"/foreign.slice"},
+                       {"SubState":"dead","ActiveState":"inactive"}):
+            with self.subTest(change=change):
+                try:
+                    self.empty_before_show()
+                    first=self.linux.show
+                    def drift(unit):
+                        value=first(unit)
+                        if len(self.show_reads)>1:value.update(change)
+                        return value
+                    self.linux.show=drift
+                    with self.kernel():self.a.observe(self.req)
+                    row=self.state()[1]
+                    self.assertEqual(row["phase"],"unknown")
+                    self.assertNotIn("startup_identity",row)
+                    self.assertEqual(len(self.show_reads),2)
+                finally:
+                    self.tearDown();self.setUp()
+
+    def test_initial_empty_reconciliation_rejects_parent_and_child_turnover(self):
+        for which in ("parent","child"):
+            with self.subTest(which=which):
+                try:
+                    self.empty_before_show()
+                    if which=="parent":
+                        initial=self.host.scope()
+                        scopes=iter((initial,{**initial,"empty":False,"inode":initial["inode"]+1}))
+                        self.linux.scope=lambda:next(scopes)
+                    calls=[]
+                    def drift(value):
+                        calls.append(True)
+                        if which=="child" and len(calls)>1:value["st_ino"]+=1
+                    with self.kernel(drift):self.a.observe(self.req)
+                    self.assertEqual(self.state()[1]["phase"],"unknown")
+                    self.assertNotIn("startup_identity",self.state()[1])
+                    self.assertEqual(len(self.show_reads),2)
+                finally:
+                    self.tearDown();self.setUp()
+
+    def test_final_scope_diagnostic_replaces_earlier_empty_value(self):
+        self.empty_before_show()
+        # Use the actual show cache on both reads, not a fabricated cache shape.
+        self.linux.command=lambda argv:"\n".join(k+"="+v for k,v in self.unit.items())
+        actual=g.LinuxHost.show.__get__(self.linux)
+        def show(unit):
+            self.show_reads.append(unit)
+            self.host.sc["empty"]=False
+            return actual(unit)
+        self.linux.show=show
+        with self.kernel():
+            proof=self.linux.inspect(self.state()[1])
+        self.assertFalse(proof["scope"]["empty"])
+        self.assertFalse(self.linux.diagnostic_state["scope_empty"])
+
+
 
 class DiagnosticTests(unittest.TestCase):
     setUp = GuardTests.setUp

@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 
 PROMPT = "isolated queue fixture: execute exactly one no-op lifecycle\n"
 
@@ -47,9 +48,19 @@ def await_entry():
     # Root sends only after its actual entered receipt and fresh pidfd identity
     # check. No queue request is retried while service entry is being attested.
     signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGUSR1})
-    info=signal.sigtimedwait({signal.SIGUSR1},30)
-    if info is None or info.si_uid!=0:
-        raise ValueError("entry barrier")
+    # A positive sigtimedwait timeout temporarily removes SIGUSR1 from Linux
+    # /proc SigBlk while sleeping, hiding readiness from the root observer.
+    deadline=time.monotonic()+30
+    while time.monotonic()<deadline:
+        if signal.SIGUSR1 in signal.sigpending():
+            if time.monotonic()>=deadline:break
+            info=signal.sigtimedwait({signal.SIGUSR1},0)
+            if info is None or info.si_uid!=0 or time.monotonic()>=deadline:
+                raise ValueError("entry barrier")
+            return
+        time.sleep(min(.01,max(0,deadline-time.monotonic())))
+    raise ValueError("entry barrier")
+
 
 def assert_auth_inaccessible():
     # Metadata only: never open, read or hash OAuth files in the reused HOME.

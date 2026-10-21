@@ -6118,6 +6118,7 @@ func TestCommitStartResult_TerminalProviderErrorMarksUnhealthy(t *testing.T) {
 	session.Type = sessionBeadType
 	session.Labels = []string{sessionBeadLabel}
 	session.Title = "worker"
+	store.persistRow(session)
 	candidate := startCandidate{
 		info: sessiontest.SeedBead(t, session),
 		tp:   TemplateParams{TemplateName: "worker", InstanceName: "worker"},
@@ -7116,7 +7117,7 @@ func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T
 	results := executePreparedStartWave(
 		context.Background(),
 		[]preparedStart{item},
-		sp,
+		&localCleanupZombieProvider{zombieAfterStartProvider: sp},
 		nil,
 		10*time.Second,
 		withStartStabilityWaiter(immediateStartStabilityWaiter),
@@ -7176,7 +7177,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession(t *testing.T) {
 	results := executePreparedStartWave(
 		context.Background(),
 		[]preparedStart{item},
-		sp,
+		&localCleanupFake{Fake: sp},
 		nil,
 		10*time.Second,
 	)
@@ -7238,7 +7239,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSessionDespitePendingCreateMisma
 	results := executePreparedStartWave(
 		context.Background(),
 		[]preparedStart{item},
-		sp,
+		&localCleanupFake{Fake: sp},
 		nil,
 		10*time.Second,
 	)

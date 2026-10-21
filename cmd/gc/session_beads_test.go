@@ -8521,7 +8521,7 @@ func TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime(t *testing.T) {
 		t.Fatalf("SetMeta: %v", err)
 	}
 
-	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-closed", Status: "closed"}}, nil)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-closed", Type: sessionBeadType, Status: "closed"}}, nil)
 	// The session_name "mayor" is now owned by a different, open bead.
 	snapshot := newSessionBeadSnapshot([]beads.Bead{{
 		ID:     "gm-open",

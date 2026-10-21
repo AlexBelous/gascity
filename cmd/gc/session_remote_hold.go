@@ -25,6 +25,27 @@ func remoteAdmissionSourceHeld(id string, front *sessionpkg.Store, stderr io.Wri
 	return false
 }
 
+// remoteAdmissionCleanupHeld permits source-less cleanup only when the provider
+// positively attests that this exact runtime handle launches the model locally.
+// Routing/authority capability always requires source evidence. Opaque providers
+// (including legacy SSH), and native providers lacking that proof, remain held.
+func remoteAdmissionCleanupHeld(id, name string, front *sessionpkg.Store, sp runtime.Provider, stderr io.Writer) bool {
+	if front == nil || front.Store().Store == nil {
+		if sp == nil {
+			return true
+		}
+		if _, routed := sp.(runtime.SessionRuntimeProvider); routed {
+			return true
+		}
+		if _, authority := sp.(sessionpkg.RemoteAdmissionProfileProvider); authority {
+			return true
+		}
+		local, ok := sp.(runtime.CommandScopeProvider)
+		return !ok || !local.SupportsCommandScope(name)
+	}
+	return remoteAdmissionSourceHeld(id, front, stderr)
+}
+
 // reconcileRemoteAdmissionSourceHold is the level-triggered controller consumer
 // of fresh VM exit evidence. Only the SDK's exact authority/identity/CAS checks
 // may clear a reservation; elapsed time and transport absence never do.

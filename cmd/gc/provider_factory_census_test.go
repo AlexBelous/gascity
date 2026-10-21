@@ -94,9 +94,11 @@ var canonicalProviderCalls = map[string]int{
 	"providers.go:newStatusSessionProviderForCity:newStatusSessionProviderForCityWithSnapshot:forward-return":                                  1,
 	"providers.go:newStatusSessionProviderForCityWithSnapshot:newSessionProviderFromContext:forward-to-withSessionProviderConstructionContext": 1,
 	"providers.go:newStatusSessionProviderForCityWithSnapshot:withSessionProviderConstructionContext:bind-error":                               1,
-	"session_logs_resolve.go:resolveStoredSessionLogSource:newSessionProvider:bind-error":                                                      1,
-	"session_template_start.go:materializeSessionForAgentConfig:newSessionProvider:bind-error":                                                 1,
-	"session_template_start.go:materializeSessionForTemplateWithOptions:newSessionProvider:bind-error":                                         1,
+	// The native relay verifies drain markers through the city's trusted runtime.
+	"remote_work_native_linux.go:verifyDrainAck:newSessionProviderForCity:bind-error":                  1,
+	"session_logs_resolve.go:resolveStoredSessionLogSource:newSessionProvider:bind-error":              1,
+	"session_template_start.go:materializeSessionForAgentConfig:newSessionProvider:bind-error":         1,
+	"session_template_start.go:materializeSessionForTemplateWithOptions:newSessionProvider:bind-error": 1,
 }
 
 // Multi-result forwarding is intentionally narrower than ordinary result

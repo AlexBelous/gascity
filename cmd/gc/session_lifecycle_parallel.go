@@ -2252,7 +2252,7 @@ func startPreparedStartCandidate(
 			// provider rate-limit screen in the pane is not counted as a crash.
 			crashOutput, peekErr := sp.Peek(name, rateLimitPeekLines)
 			recycleBegin := time.Now()
-			if remoteAdmissionSourceHeld(item.candidate.info.ID, sessionFrontDoor(store), io.Discard) {
+			if remoteAdmissionCleanupHeld(item.candidate.info.ID, name, sessionFrontDoor(store), sp, io.Discard) {
 				return false, sessionpkg.CapacityAdmissionError("remote_source_reconciliation_required")
 			}
 			stopErr := sp.Stop(name)

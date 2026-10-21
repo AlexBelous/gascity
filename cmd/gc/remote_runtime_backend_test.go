@@ -231,6 +231,28 @@ func TestOperatorRemoteBackendPublicCreateReachesRootAuthority(t *testing.T) {
 	if cfg == nil || len(cfg.PreStart) > 0 || cfg.Command == "codex exec --model pinned" || cfg.PromptText.IsSet() {
 		t.Fatal("unguarded command reached transport")
 	}
+	t.Run("status keeps historical route after agent removal", func(t *testing.T) {
+		removed := providerCtx
+		removed.cfg = &config.City{}
+		removed.agents = nil
+		local := runtime.NewFake()
+		historical, e := composeLoadedOperatorRemoteRuntimeRouting(removed, local, store, remoteOperatorProfiles{Version: 1, Profiles: []remoteOperatorProfile{profile}}, executor, func(remoteOperatorProfile) (runtime.Provider, error) { return transport, nil })
+		if e != nil {
+			t.Fatal(e)
+		}
+		status := newBoundedStatusProvider(historical)
+		beforeReads := revision
+		beforeStarts := transport.CountCalls("Start", "runtime-created")
+		beforeStops := transport.CountCalls("Stop", "runtime-created")
+		observer := status.(runtime.LivenessObserverWithError)
+		live, e := observer.ObserveLivenessWithError("runtime-created", nil)
+		if e != nil || !live.Running || !live.Alive || revision <= beforeReads {
+			t.Fatalf("historical remote status not observed: live=%+v err=%v", live, e)
+		}
+		if local.CountCalls("IsRunning", "runtime-created") != 0 || local.CountCalls("Start", "runtime-created") != 0 || local.CountCalls("Stop", "runtime-created") != 0 || transport.CountCalls("Start", "runtime-created") != beforeStarts || transport.CountCalls("Stop", "runtime-created") != beforeStops {
+			t.Fatal("historical status performed a native fallback or lifecycle effect")
+		}
+	})
 	phase = "prepared"
 	live, err := wrapped.ObserveLivenessWithError("runtime-created", nil)
 	if err == nil || !live.Running || !live.Alive {

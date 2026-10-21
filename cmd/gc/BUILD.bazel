@@ -1650,6 +1650,7 @@ go_test(
         "//internal/runtime/procobserver",
         "//internal/runtime/proctable",
         "//internal/runtime/runtimecontract",
+        "//internal/runtime/ssh",
         "//internal/runtime/tmux",
         "//internal/session",
         "//internal/session/sessiontest",

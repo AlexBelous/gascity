@@ -3200,7 +3200,7 @@ func cleanupDeadRuntimeSessionCorpses(
 		if claimsLive && !deadRuntimeBelongsToRow(info, name, sp, deadChecker, stderr) {
 			continue
 		}
-		if remoteAdmissionSourceHeld(info.ID, sessionFrontDoor(store), stderr) {
+		if remoteAdmissionCleanupHeld(info.ID, name, sessionFrontDoor(store), sp, stderr) {
 			continue
 		}
 		if err := sp.Stop(name); err != nil {

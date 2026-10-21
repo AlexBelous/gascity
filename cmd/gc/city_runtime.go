@@ -2220,7 +2220,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 		var newSp runtime.Provider
 		var spErr error
 		if baseProviderChanged {
-			newSp, spErr = newSessionProviderForCity(nextCfg, cr.cityPath)
+			newSp, spErr = newSessionProviderForCityByName(nextCfg, newProviderName, nextCfg.Session, cr.cityName, cr.cityPath)
+			if spErr == nil {
+				newSp, spErr = refreshAgentRuntimeRouting(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), newSp)
+			}
 		} else {
 			newSp, spErr = refreshAgentRuntimeRouting(sessionProviderContextForCity(nextCfg, cr.cityPath, newProviderName), cr.sp)
 		}

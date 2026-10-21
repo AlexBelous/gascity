@@ -331,7 +331,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession_RecordsCrashMetric(t *te
 	results := executePreparedStartWave(
 		context.Background(),
 		[]preparedStart{item},
-		sp,
+		&localCleanupFake{Fake: sp},
 		nil,
 		10*time.Second,
 	)
@@ -384,7 +384,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric(t *test
 		sp, item := newZombie(t)
 		sp.SetPeekOutput("test-agent", "You've hit your limit, Pro plan\n\n/rate-limit-options")
 
-		results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+		results := executePreparedStartWave(context.Background(), []preparedStart{item}, &localCleanupFake{Fake: sp}, nil, 10*time.Second)
 		if len(results) != 1 || results[0].err != nil {
 			t.Fatalf("expected 1 successful result (zombie recycle must not wedge the start), got %+v", results)
 		}
@@ -398,7 +398,7 @@ func TestExecutePreparedStartWave_RecyclesZombieSession_SkipsCrashMetric(t *test
 		sp, item := newZombie(t)
 		sp.StopErrors["test-agent"] = errors.New("stop failed")
 
-		results := executePreparedStartWave(context.Background(), []preparedStart{item}, sp, nil, 10*time.Second)
+		results := executePreparedStartWave(context.Background(), []preparedStart{item}, &localCleanupFake{Fake: sp}, nil, 10*time.Second)
 		if len(results) != 1 || results[0].err == nil {
 			t.Fatalf("expected 1 failed result when the zombie recycle Stop fails, got %+v", results)
 		}
@@ -441,7 +441,7 @@ func TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric(t *testing.T) {
 			},
 		}
 		var stderr bytes.Buffer
-		stopStaleAsyncStartRuntime(result, sp, &stderr)
+		stopStaleAsyncStartRuntime(result, sp, nil, &stderr)
 
 		points := collectCounterDataPoints(t, reader, "gc.agent.stops.total")
 		if !hasDataPointWithStringAttrs(points, map[string]string{"agent": identity, "reason": "stale-async-start", "status": "ok"}) {
@@ -470,7 +470,7 @@ func TestStopStaleAsyncStartRuntime_RecordsAgentStopMetric(t *testing.T) {
 			},
 		}
 		var stderr bytes.Buffer
-		stopStaleAsyncStartRuntime(result, sp, &stderr)
+		stopStaleAsyncStartRuntime(result, sp, nil, &stderr)
 
 		if points := collectCounterDataPoints(t, reader, "gc.agent.stops.total"); len(points) != 0 {
 			t.Fatalf("gc.agent.stops.total datapoints = %+v, want none when there is no matching stale runtime to stop", points)

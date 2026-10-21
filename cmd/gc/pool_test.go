@@ -871,6 +871,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		PromptTemplate:               "prompts/test.md",
 		Nudge:                        "nudge text",
 		Session:                      "acp",
+		Runtime:                      "ssh:transport@fixture-vm",
 		Provider:                     "claude",
 		ContextAdvisory:              &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: strPtr("advisory {{.Pct}}"), Enabled: &trueVal}}},
 		Upstream:                     "anthropic",
@@ -972,6 +973,10 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	}
 	if dst.Dir != "copy-dir" {
 		t.Errorf("Dir = %q, want %q", dst.Dir, "copy-dir")
+	}
+
+	if dst.Runtime != src.Runtime {
+		t.Fatalf("Runtime = %q, want %q", dst.Runtime, src.Runtime)
 	}
 
 	// All other non-tombstone fields should match the source.

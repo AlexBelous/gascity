@@ -180,6 +180,19 @@ unless the row names how they map to the canonical projection.
 | SESSION-RUNTIME-010 | Attachment uncertainty holds destructive gates | Error-aware attachment probes remain direct and fresh even when ordinary fleet observations are cached. Probe failures defer config-drift, autosuspend, drain escalation, and input clearing; they do not mean detached. Exact missing targets remain distinguishable from unavailable runtimes. | `internal/runtime/tmux/attach_probe_test.go`; `cmd/gc/session_reconciler_observation_regression_test.go`; `cmd/gc/drain_ack_escalation_test.go`; `cmd/gc/chat_autosuspend_test.go`; upstream #6882/#6900; gascity-kb#32 |
 | SESSION-RUNTIME-011 | Fleet attachment and activity batching | Ordinary tmux attachment and last-activity reads share the short-lived fleet snapshot. Activity is the maximum window activity including corpse windows, with the poke discount retained. Unknown/evicted/stale sessions use direct probes, and corpse-only rows never become running. | `internal/runtime/tmux/adapter_unit_test.go`; `internal/runtime/tmux/state_cache_test.go`; upstream #5599; gascity-kb#32 |
 
+## Durable runtime binding
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-ROUTE-001 | First explicit runtime launch | Bind exact SID/template before resource admission; Store owns immutable runtime binding metadata using an exact conditional-write revision fence without reacquiring a caller-held SID mutation lock. Off/unavailable conditional writes refuse the first pin. A binding is routing identity and never admission proof. | `runtime_binding.go`; `admission_runtime.go`; `runtime_binding_test.go` |
+| SESSION-ROUTE-002 | Closed record or duplicate provider name | Preserve closed SID pins for cleanup/restart reconstruction; reject ambiguous names and non-SID metadata writes. | `runtime_binding_test.go` |
+
+## Guarded remote launch
+
+| ID | Scenario | Required behavior | Evidence |
+|---|---|---|---|
+| SESSION-REMOTE-LAUNCH-001 | Authority prepares guarded bridge startup | Begin receives invocation-local Config and returns intent plus rewritten Config. Only the reviewed fixed command prefix plus public lower-hex attempt, fixed workdir, unchanged five GC identity env values (and optional GC_CITY), one-shot lifecycle and sudo process hint reach the transport. The transport receives the SDK-owned validated snapshot rather than callback-owned maps or slices. Every other config field is zero, including shell hooks, prompt suffix/text, overlays, operator env and local CommandScope. Rejected rewrites hold the occupied source; Begin receives a deep copy of all mutable Config branches and cannot mutate the caller through maps, slices, nested MCP entries, startup bytes or pointers. The root-owned backend validates the entry prefix and stages literal prompt text under the exact attempt. | `admission_remote_launch_test.go` |
+
 ## Maintenance Rules
 
 - Add one row per behavior scenario, not one paragraph per file.

@@ -1697,6 +1697,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// values without re-reading the bead (the coherence the old raw mirror
 	// provided for the later re-projection).
 	for i := range rows {
+		if rows[i].RemoteAdmissionPending {
+			reconcileRemoteAdmissionSourceHold(ctx, rows[i].Info.ID, sessFront, sp, stderr)
+		}
 		rows[i].Info = healExpiredTimersInfo(rows[i].Info, sessFront, clk)
 	}
 	// Phase 0b: retire duplicate configured-named sessions — Info twin over the
@@ -1818,7 +1821,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// the close is store-only, so a raw re-projection of *session still sees it
 	// open — the fold must match that.
 	attemptRollbackPendingCreate := func(info sessionpkg.Info, templateName, name, action, detail string, clearClaim bool) map[string]string {
-		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+		if !releaseBeadScopedPoolRuntime(info, sp, sessFront, stderr) {
 			return nil
 		}
 		rollbacksThisTick++
@@ -2113,7 +2116,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
-					closedFailedCreate := releaseBeadScopedPoolRuntime(infoByID[id], sp, stderr) &&
+					closedFailedCreate := releaseBeadScopedPoolRuntime(infoByID[id], sp, sessFront, stderr) &&
 						closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], string(sessionpkg.StateFailedCreate), clk.Now().UTC(), stderr, false)
 					if closedFailedCreate {
 						// Reflect the in-memory close on the snapshot: the cross-session

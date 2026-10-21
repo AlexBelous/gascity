@@ -194,8 +194,11 @@ func (s *Store) ListAll(opts ListAllOptions) ([]Info, error) {
 // (a retired row must carry its circuit with it), so the row carries both. This
 // mirrors the ListedSession{Info, Response} precedent.
 type ReconcileSession struct {
-	Info    Info
-	Circuit CircuitState
+	// RemoteAdmissionPending is a pure snapshot hint to reread VM authority.
+	// It never grants permission or proves that a reservation may be released.
+	RemoteAdmissionPending bool
+	Info                   Info
+	Circuit                CircuitState
 }
 
 // ListAllForReconcile returns every session bead projected to a ReconcileSession,
@@ -216,8 +219,9 @@ func (s *Store) ListAllForReconcile(opts ListAllOptions) ([]ReconcileSession, er
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{
-			Info:    infoFromPersistedBead(b),
-			Circuit: CircuitStateFromMetadata(b.Metadata),
+			Info:                   infoFromPersistedBead(b),
+			Circuit:                CircuitStateFromMetadata(b.Metadata),
+			RemoteAdmissionPending: remoteAdmissionPendingHint(b),
 		})
 	}
 	return out, err
@@ -236,8 +240,9 @@ func ReconcileRowsFromBeads(beadsIn []beads.Bead) []ReconcileSession {
 	out := make([]ReconcileSession, 0, len(beadsIn))
 	for _, b := range beadsIn {
 		out = append(out, ReconcileSession{
-			Info:    infoFromPersistedBead(b),
-			Circuit: CircuitStateFromMetadata(b.Metadata),
+			Info:                   infoFromPersistedBead(b),
+			Circuit:                CircuitStateFromMetadata(b.Metadata),
+			RemoteAdmissionPending: remoteAdmissionPendingHint(b),
 		})
 	}
 	return out
@@ -298,8 +303,9 @@ func (s *Store) ListAllForReconcileWithFingerprint(opts ListAllOptions) ([]Recon
 	out := make([]ReconcileSession, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, ReconcileSession{
-			Info:    infoFromPersistedBead(b),
-			Circuit: CircuitStateFromMetadata(b.Metadata),
+			Info:                   infoFromPersistedBead(b),
+			Circuit:                CircuitStateFromMetadata(b.Metadata),
+			RemoteAdmissionPending: remoteAdmissionPendingHint(b),
 		})
 	}
 	return out, fingerprint, err

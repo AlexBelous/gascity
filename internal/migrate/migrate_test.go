@@ -792,6 +792,28 @@ upstream = "bedrock"
 	}
 }
 
+// A runtime-only agent must retain its execution runtime when the legacy
+// inline agent is moved into agents/<name>/agent.toml.
+func TestMigratePreservesRuntimeOnlyAgent(t *testing.T) {
+	t.Parallel()
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "worker"
+runtime = "remote-exec"
+`)
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	agentToml := readFile(t, filepath.Join(cityDir, "agents", "worker", "agent.toml"))
+	if !strings.Contains(agentToml, `runtime = "remote-exec"`) {
+		t.Fatalf("worker agent.toml missing runtime:\n%s", agentToml)
+	}
+}
+
 func TestMigrateCreatesFreshBindingWhenExistingImportHasNonDefaultSemantics(t *testing.T) {
 	t.Parallel()
 
@@ -1117,6 +1139,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		PromptTemplate:         "prompts/worker.md",
 		Nudge:                  "nudge text",
 		Session:                "acp",
+		Runtime:                "remote-exec",
 		Provider:               "claude",
 		ContextAdvisory:        &config.ContextAdvisory{Enabled: &trueVal, WindowTokens: intPtr(1_000_000), Tiers: []config.ContextAdvisoryTier{{Threshold: intPtr(75), Message: &advisoryMessage, Enabled: &trueVal}}},
 		Upstream:               "anthropic",

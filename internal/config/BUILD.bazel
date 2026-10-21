@@ -94,6 +94,7 @@ go_test(
         "acp_session_config_test.go",
         "agent_discovery_test.go",
         "agent_layout_test.go",
+        "agent_runtime_test.go",
         "builtin_family_test.go",
         "bundled_import_test.go",
         "chain_test.go",

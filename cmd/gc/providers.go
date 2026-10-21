@@ -197,6 +197,10 @@ func newStatusSessionProviderForCity(cfg *config.City, cityPath string) (runtime
 	return newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, nil)
 }
 
+// Runtime routes are authoritative persisted state, including pins for agents
+// removed from current config. Status therefore requires the route store even
+// with a supplied transport snapshot; an unavailable store is an error, not a
+// local-provider fallback or evidence that the remote runtime is stopped.
 func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
 	sp, err := withSessionProviderConstructionContext(newSessionProviderFromContext(ctx, sessionBeads))
@@ -243,7 +247,11 @@ func loadProviderSessionSnapshot(ctx sessionProviderContext) *sessionBeadSnapsho
 }
 
 func newSessionProviderFromContext(ctx sessionProviderContext, sessionBeads *sessionBeadSnapshot) (runtime.Provider, error) {
-	return resolveSessionTransportProvider(ctx, sessionBeads)
+	local, err := resolveSessionTransportProvider(ctx, sessionBeads)
+	if err != nil {
+		return nil, err
+	}
+	return withAgentRuntimeRouting(ctx, local)
 }
 
 func withSessionProviderConstructionContext(sp runtime.Provider, err error) (runtime.Provider, error) {

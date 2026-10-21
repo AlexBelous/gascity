@@ -55,7 +55,8 @@ func TestStartAndRollbackHoldMutationLockAcrossReadAndWrite(t *testing.T) {
 	if applied, err := front.CommitStartedIfCurrent(expected, MetadataPatch{"state": "active", "pending_create_claim": ""}); err != nil || !applied {
 		t.Fatalf("completion: applied=%v err=%v", applied, err)
 	}
-	if store.reads != 2 || store.writes != 1 {
-		t.Fatalf("reads=%d writes=%d, want 2 and 1", store.reads, store.writes)
+	// Additional safety reads must obey the same lock; their exact count is not the contract.
+	if store.reads < 2 || store.writes != 1 {
+		t.Fatalf("reads=%d writes=%d, want at least 2 and exactly 1", store.reads, store.writes)
 	}
 }

@@ -1163,28 +1163,34 @@ func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	}
 }
 
-func TestStatusSessionProviderSkipsSessionSnapshot(t *testing.T) {
+func TestStatusSessionProviderRequiresAuthoritativeRuntimeRouteStore(t *testing.T) {
 	oldOpen := openSessionProviderStore
+	oldBuild := buildSessionProviderByName
+	local := runtime.NewFake()
+	buildSessionProviderByName = func(_ *config.City, _ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		return local, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
 	t.Cleanup(func() { openSessionProviderStore = oldOpen })
 
 	calls := 0
 	openSessionProviderStore = func(string) (beads.Store, error) {
 		calls++
-		return nil, errors.New("session snapshot should not load for status")
+		return nil, errors.New("authoritative runtime route store unavailable")
 	}
 
 	sp, err := newStatusSessionProviderForCity(&config.City{
 		Workspace: config.Workspace{Name: "city"},
 		Session:   config.SessionConfig{Provider: "subprocess"},
 	}, "/tmp/city")
-	if err != nil {
-		t.Fatalf("newStatusSessionProviderForCity: %v", err)
+	if err == nil || sp != nil {
+		t.Fatalf("unavailable authoritative route store returned provider=%T err=%v", sp, err)
 	}
-	if sp == nil {
-		t.Fatal("newStatusSessionProviderForCity() = nil")
+	if len(local.SnapshotCalls()) != 0 {
+		t.Fatal("unavailable route store fell back to native runtime operations")
 	}
-	if calls != 0 {
-		t.Fatalf("openSessionProviderStore called %d times, want 0", calls)
+	if calls != 1 {
+		t.Fatalf("openSessionProviderStore called %d times, want 1", calls)
 	}
 }
 

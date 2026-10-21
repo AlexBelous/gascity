@@ -225,8 +225,9 @@ session  = "acp"        # drive over ACP instead of tmux
 
 ## Axis 5 — Runtime (where it runs)
 
-The runtime is *where* the session's box lives. It is selected city-wide via the
-`[session]` block (or the `GC_SESSION` environment variable), not per-agent:
+The runtime is *where* the session's box lives. Its city default is selected via
+the `[session]` block or the `GC_SESSION` environment variable. The opt-in agent
+`runtime` field requires the explicit policy binding described below:
 
 ```toml
 # city.toml
@@ -300,3 +301,16 @@ $ gc doctor                          # validates your city / agent config
   only import packs you trust.)
 - **Tutorial:** the guided walkthrough that introduces agents —
   [Tutorial 02 — Agents](/tutorials/02-agents).
+
+### Explicit execution runtime binding
+
+`runtime` on an agent selects its execution location independently of `session`
+(the interaction transport). Leaving `runtime` empty preserves the city runtime.
+The opt-in routing seam requires an explicit resource-policy resolver; a selector
+such as `ssh:user@host` alone cannot authorize a remote launch. This slice supports
+pinned SSH endpoints; named mutable pack runtime reconstruction is refused.
+
+The controller stores the chosen selector, endpoint, resource domain and policy
+digest on the exact session ID before admission. Existing SID observations and
+cleanup keep that endpoint when the template changes; new launches require the
+current policy to match. Runtime binding does not grant resource admission.

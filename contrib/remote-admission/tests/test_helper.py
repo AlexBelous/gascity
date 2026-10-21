@@ -705,4 +705,212 @@ class UnitWorkspaceTests(unittest.TestCase):
                 self.check(action=self.host.resources)
 
 
+
+class StartupObservationTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    tearDown = GuardTests.tearDown
+    stage = GuardTests.stage
+
+    def pending(self):
+        self.stage()
+        self.a.enter(self.req["attempt"],987)
+        self.linux=g.LinuxHost(self.profile)
+        self.linux.scope=self.host.scope
+        self.linux.boot=lambda:self.host.sc["boot_id"]
+        self.unit=dict(Id=self.linux.unit({"request":self.req}),LoadState="loaded",
+                       ActiveState="activating",SubState="start-pre",MainPID="0",
+                       InvocationID="a"*32,ControlGroup=self.linux.cgroup({"request":self.req}),
+                       ExecMainCode="0",ExecMainStatus="0",Result="success")
+        self.linux.show=lambda unit:copy.deepcopy(self.unit)
+        self.host.inspect=self.linux.inspect
+        self.host.validate_identity=self.linux.validate_identity
+        self.host.cgroup=self.linux.cgroup
+        self.checked=[]
+        self.host.unit_resources=lambda:self.checked.append("resources")
+
+    def state(self):
+        with self.a.locked() as state:
+            return copy.deepcopy(state),copy.deepcopy(state["attempts"][self.req["attempt"]])
+
+    def kernel(self, mutate=None):
+        from types import SimpleNamespace
+        actual=pathlib.Path.stat
+        cg="/sys/fs/cgroup"+self.unit["ControlGroup"]
+        def info(path,*args,**kwargs):
+            if str(path)==cg:
+                value=dict(st_dev=29,st_ino=124,st_uid=0,st_mode=0o40755)
+                if mutate:mutate(value)
+                return SimpleNamespace(**value)
+            return actual(path,*args,**kwargs)
+        return mock.patch.object(pathlib.Path,"stat",info)
+
+    def test_early_observe_preserves_pending_hook_but_denies_queue(self):
+        self.pending()
+        with self.kernel():
+            self.assertEqual(self.a.observe(self.req)["phase"],"unknown")
+            state,row=self.state()
+            self.assertEqual(row["phase"],"consumed")
+            self.assertFalse(row["attested"])
+            self.assertTrue(row["ever_consumed"])
+            self.assertEqual(row["startup_identity"]["invocation_id"],"a"*32)
+            g.unit_hook(self.a,self.req["attempt"],False)
+            self.assertEqual(self.checked,["resources"])
+            with self.assertRaisesRegex(g.Refusal,"not_entered"):
+                self.a.queue_observe(dict(schema_version=1,profile_id="test",peer=self.host.peer_value))
+            self.assertEqual(self.state()[1]["phase"],"consumed")
+            self.assertEqual(self.host.started,1)
+
+    def test_forward_progress_second_snapshot_keeps_pending(self):
+        self.pending()
+        second={**self.unit,"ActiveState":"active","SubState":"running","MainPID":"123"}
+        replies=iter((copy.deepcopy(self.unit),second))
+        self.linux.show=lambda unit:next(replies)
+        with self.kernel():
+            self.a.observe(self.req)
+        self.assertEqual(self.state()[1]["phase"],"consumed")
+
+    def test_failed_missing_or_foreign_pending_snapshot_holds(self):
+        cases=(
+            {"ActiveState":"failed","SubState":"failed","Result":"exit-code"},
+            {"InvocationID":""},{"ControlGroup":"/other.slice/foreign.service"},
+            {"ExecMainCode":"1"},{"LoadState":"not-found"},
+        )
+        for change in cases:
+            with self.subTest(change=change):
+                self.pending()
+                self.unit.update(change)
+                with self.kernel():
+                    self.assertEqual(self.a.observe(self.req)["phase"],"unknown")
+                self.assertEqual(self.state()[1]["phase"],"unknown")
+                with self.assertRaisesRegex(g.Refusal,"hook_denied"):
+                    g.unit_hook(self.a,self.req["attempt"],False)
+                # Each case owns an independent fresh synthetic ledger.
+                self.tearDown();self.setUp()
+
+    def test_second_snapshot_identity_or_failure_drift_holds(self):
+        for change in ({"InvocationID":"b"*32},{"ControlGroup":"/other.slice"},
+                       {"ActiveState":"failed","SubState":"failed","Result":"exit-code"}):
+            with self.subTest(change=change):
+                self.pending()
+                replies=iter((copy.deepcopy(self.unit),{**self.unit,**change}))
+                self.linux.show=lambda unit:next(replies)
+                with self.kernel():
+                    self.a.observe(self.req)
+                self.assertEqual(self.state()[1]["phase"],"unknown")
+                self.tearDown();self.setUp()
+
+    def test_foreign_kernel_or_parent_holds(self):
+        for which in ("owner","inode","parent"):
+            with self.subTest(which=which):
+                self.pending()
+                def drift(value):
+                    if which=="owner":value["st_uid"]=988
+                    elif which=="inode":value["st_ino"]=0
+                if which=="parent":self.host.sc["inode"]+=1
+                with self.kernel(drift):
+                    self.a.observe(self.req)
+                self.assertEqual(self.state()[1]["phase"],"unknown")
+                self.tearDown();self.setUp()
+
+    def test_existing_unknown_or_revoked_never_becomes_pending(self):
+        for field,value in (("phase","unknown"),("revoked",True)):
+            with self.subTest(field=field):
+                self.pending()
+                with self.a.locked() as state:
+                    state["attempts"][self.req["attempt"]][field]=value
+                    g.atomic(self.directory/"ledger.json",state)
+                with self.kernel():
+                    self.a.observe(self.req)
+                self.assertEqual(self.state()[1]["phase"],"unknown")
+                with self.assertRaisesRegex(g.Refusal,"hook_denied"):
+                    g.unit_hook(self.a,self.req["attempt"],False)
+                self.tearDown();self.setUp()
+
+    def test_kernel_or_boot_changes_between_reads_hold(self):
+        for which in ("kernel","boot"):
+            with self.subTest(which=which):
+                self.pending()
+                calls=[]
+                def changed(value):
+                    calls.append(True)
+                    if len(calls)>1:value["st_ino"]+=1
+                if which=="boot":
+                    first=self.host.scope()
+                    scopes=iter((first,{**first,"boot_id":"b"*32}))
+                    self.linux.scope=lambda:next(scopes)
+                with self.kernel(changed if which=="kernel" else None):
+                    self.a.observe(self.req)
+                self.assertEqual(self.state()[1]["phase"],"unknown")
+                self.tearDown();self.setUp()
+
+    def test_startup_pin_drift_denies_hook_before_resources(self):
+        self.pending()
+        with self.kernel():
+            self.a.observe(self.req)
+            self.unit["InvocationID"]="b"*32
+            with self.assertRaisesRegex(g.Refusal,"startup_changed"):
+                g.unit_hook(self.a,self.req["attempt"],False)
+        self.assertEqual(self.checked,[])
+        self.assertFalse(self.state()[1]["attested"])
+
+    def test_nonconsumed_or_attested_row_cannot_classify_pending(self):
+        self.pending()
+        _,row=self.state()
+        for phase,attested in (("prepared",False),("staged",False),("entered",True)):
+            with self.subTest(phase=phase),self.kernel():
+                with self.assertRaisesRegex(g.Refusal,"terminal_history"):
+                    self.linux.inspect({**row,"phase":phase,"attested":attested})
+
+    def test_entered_must_match_startup_identity(self):
+        for changed in (False,True):
+            with self.subTest(changed=changed):
+                self.pending()
+                with self.kernel():self.a.observe(self.req)
+                self.host.inspect=lambda row:dict(phase="entered",scope=self.host.scope(),identity={**self.host.identity(row),"invocation_id":("b" if changed else "a")*32})
+                receipt=self.a.observe(self.req)
+                self.assertEqual(receipt["phase"],"unknown" if changed else "entered")
+                self.assertEqual(self.state()[1]["attested"],not changed)
+                self.tearDown();self.setUp()
+
+    def test_present_malformed_startup_pin_refuses_without_overwrite(self):
+        for malformed in (None,{},0,"",[],False):
+            with self.subTest(malformed=malformed):
+                try:
+                    self.pending()
+                    with self.a.locked() as state:
+                        state["attempts"][self.req["attempt"]]["startup_identity"]=malformed
+                        g.atomic(self.directory/"ledger.json",state)
+                    before=(self.directory/"ledger.json").read_bytes()
+                    with self.kernel():
+                        with self.assertRaisesRegex(g.Refusal,"schema"):
+                            self.a.observe(self.req)
+                        with self.assertRaisesRegex(g.Refusal,"schema"):
+                            g.unit_hook(self.a,self.req["attempt"],False)
+                    self.assertEqual((self.directory/"ledger.json").read_bytes(),before)
+                    self.assertEqual(self.checked,[])
+                finally:
+                    self.tearDown();self.setUp()
+
+    def test_native_bridge_early_poll_does_not_poison_pre_hook(self):
+        self.pending()
+        path=self.directory/(self.req["attempt"]+".output")
+        path.write_bytes(b"");path.chmod(0o600)
+        calls=[]
+        actual_inspect=FakeHost.inspect.__get__(self.host)
+        def advance(delay):
+            calls.append(delay)
+            if len(calls)==1:
+                self.assertEqual(self.state()[1]["phase"],"consumed")
+                g.unit_hook(self.a,self.req["attempt"],False)
+                self.host.inspect=actual_inspect
+            elif len(calls)==2:
+                self.host.phase="exited";self.host.sc["empty"]=True
+            else:self.fail("unexpected bridge retry")
+        with self.kernel(),mock.patch.object(g.time,"sleep",advance):
+            self.linux.bridge(self.a,self.req)
+        self.assertEqual(self.state()[1]["phase"],"exited")
+        self.assertEqual(self.host.started,1)
+        self.assertEqual(len(calls),2)
+
+
 if __name__ == "__main__":unittest.main()

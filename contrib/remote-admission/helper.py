@@ -187,6 +187,8 @@ class Authority:
                 require(type(row) is dict and row.get("request", {}).get("attempt") == attempt and HEX32.fullmatch(attempt) is not None, "ledger_attempt")
                 require(row.get("phase") in ("prepared", "staged", "consumed", "entered", "exited", "unknown") and type(row.get("ever_consumed")) is bool and type(row.get("revoked")) is bool, "ledger_phase")
                 require(type(row.get("attested")) is bool and type(row.get("never_entered")) is bool, "ledger_history")
+                if "startup_identity" in row:
+                    keys(row["startup_identity"], "boot_id unit invocation_id cgroup_path cgroup_device cgroup_inode source_sha manifest_sha256 model_uid transport_uid")
                 if row["phase"] in ("prepared", "staged"):
                     require(not row["ever_consumed"] and not row["attested"] and not row["never_entered"], "ledger_consumed")
                 elif row["phase"] == "exited":
@@ -289,7 +291,14 @@ class Authority:
         try:
             proof = self.host.inspect(row)
             require(proof["scope"]["boot_id"] == row["scope"]["boot_id"] and proof["scope"]["device"] == row["scope"]["device"] and proof["scope"]["inode"] == row["scope"]["inode"], "scope_changed")
-            if proof["phase"] == "entered":
+            if proof["phase"] == "pending":
+                # Public unknown; only preserve the consumed seat for its own hooks.
+                require(row["phase"] == "consumed" and row["ever_consumed"] and not row["attested"]
+                        and not row["revoked"] and state["current"] == row["request"]["attempt"], "pending_denied")
+                require(proof["scope"]["empty"] is False, "scope_inconsistent")
+                self.host.validate_identity(row, proof["identity"])
+                row["startup_identity"] = proof["identity"]
+            elif proof["phase"] == "entered":
                 require(proof["scope"]["empty"] is False, "scope_inconsistent")
                 require(not row["revoked"], "revoked")
                 identity = proof["identity"]
@@ -613,6 +622,43 @@ class LinuxHost:
             require(identity[field] == self.p[field], "identity_pin")
         integer(identity["cgroup_inode"])
         integer(identity["cgroup_device"], 0)
+        require("startup_identity" not in row or row["startup_identity"] == identity, "startup_changed")
+
+    def pending(self, row, unit, scope):
+        require(row["phase"] == "consumed" and row["ever_consumed"] and not row["attested"]
+                and not row["revoked"], "pending_denied")
+        require(unit["Id"] == self.unit(row) and unit["LoadState"] == "loaded"
+                and unit["ActiveState"] == "activating" and unit["SubState"] == "start-pre"
+                and unit["MainPID"] == "0" and unit["ExecMainCode"] == "0"
+                and unit["ExecMainStatus"] == "0" and unit["Result"] == "success", "pending_state")
+        require(HEX32.fullmatch(unit["InvocationID"]) is not None
+                and unit["ControlGroup"] == self.cgroup(row) and scope["empty"] is False, "pending_binding")
+        path = pathlib.Path("/sys/fs/cgroup" + self.cgroup(row))
+        before = path.stat()
+        require(stat.S_ISDIR(before.st_mode) and before.st_uid == 0 and before.st_mode & 0o022 == 0
+                and before.st_ino > 0, "pending_cgroup")
+        second, after, final_scope = self.show(self.unit(row)), path.stat(), self.scope()
+        # Compare immutable identity, allowing only explicit forward startup states.
+        require(all(second[k] == unit[k] for k in ("Id", "LoadState", "InvocationID", "ControlGroup")),
+                "pending_changed")
+        require((second["ActiveState"], second["SubState"]) in (
+                    ("activating", "start-pre"), ("activating", "start"),
+                    ("activating", "start-post"), ("active", "running"))
+                and second["ExecMainCode"] == "0" and second["ExecMainStatus"] == "0"
+                and second["Result"] == "success"
+                and re.fullmatch(r"0|[1-9][0-9]*", second["MainPID"]) is not None
+                and (second["SubState"] not in ("start-post", "running") or second["MainPID"] != "0"),
+                "pending_progress")
+        require((before.st_dev, before.st_ino, before.st_uid, before.st_mode) ==
+                (after.st_dev, after.st_ino, after.st_uid, after.st_mode)
+                and all(final_scope[k] == scope[k] for k in ("boot_id", "device", "inode"))
+                and final_scope["empty"] is False, "pending_changed")
+        identity = {"boot_id": scope["boot_id"], "unit": self.unit(row),
+                    "invocation_id": unit["InvocationID"], "cgroup_path": self.cgroup(row),
+                    "cgroup_device": before.st_dev, "cgroup_inode": before.st_ino,
+                    **{k: self.p[k] for k in ("source_sha", "manifest_sha256", "model_uid", "transport_uid")}}
+        self.validate_identity(row, identity)
+        return {"phase": "pending", "identity": identity, "scope": scope}
 
     def inspect(self, row):
         scope = self.scope()
@@ -645,6 +691,8 @@ class LinuxHost:
             # Re-read after all kernel reads to reject concurrent exit/PID turnover.
             require(self.peer(pid) == peer and self.show(self.unit(row))["InvocationID"] == identity["invocation_id"], "snapshot_changed")
             return {"phase": "entered", "identity": identity, "scope": scope}
+        if row["phase"] == "consumed" and not row["attested"] and not row["revoked"]:
+            return self.pending(row, unit, scope)
         require(row.get("attested") and unit["InvocationID"] == row["identity"]["invocation_id"] and unit["ExecMainCode"] in ("1", "2", "3") and unit["ActiveState"] in ("active", "inactive", "failed") and unit["SubState"] in ("exited", "dead", "failed"), "terminal_history")
         return {"phase": "exited", "identity": row["identity"], "scope": scope}
 
@@ -696,6 +744,10 @@ def unit_hook(authority, attempt, post):
         row = state["attempts"].get(attempt)
         require(row is not None and state["current"] == attempt and row["profile_digest"] == authority.profile.digest and row["phase"] in ("consumed", "entered") and not row["revoked"], "hook_denied")
         require(authority.host.peer(os.getpid())["cgroup"] == authority.host.cgroup(row), "hook_cgroup")
+        if "startup_identity" in row:
+            proof = authority.host.inspect(row)
+            require(proof["phase"] in ("pending", "entered")
+                    and proof["identity"] == row["startup_identity"], "startup_changed")
         authority.host.unit_resources()
         scope = authority.host.scope()
         require(all(scope[k] == row["scope"][k] for k in ("boot_id", "device", "inode")), "scope_changed")

@@ -913,4 +913,181 @@ class StartupObservationTests(unittest.TestCase):
         self.assertEqual(len(calls),2)
 
 
+
+class DiagnosticTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    tearDown = GuardTests.tearDown
+    stage = GuardTests.stage
+
+    def diagnostic(self, leaf):
+        return g.decode(g.read_private(self.directory / leaf, os.getuid()))
+
+    def test_first_unknown_is_recorded_without_private_identity(self):
+        self.stage();self.a.enter(self.req["attempt"],987)
+        self.host.fail_inspect=True
+        receipt=self.a.observe(self.req)
+        self.assertEqual(receipt["phase"],"unknown")
+        raw=(self.directory/"diagnostic-first-unknown.json").read_bytes()
+        event=g.decode(raw)
+        self.assertEqual(event["reason"],"os_error")
+        self.assertEqual((event["phase_before"],event["phase_after"]),("consumed","unknown"))
+        for value in (self.req["attempt"],self.req["instance_token"],"partition",self.req["session_id"]):
+            self.assertNotIn(value,raw.decode())
+        self.assertLessEqual(len(raw),1024)
+        self.assertIs(type(event["monotonic_ns"]),int)
+        self.assertEqual(event["pid"],os.getpid())
+
+    def test_repeated_unknown_never_overwrites_first_evidence(self):
+        self.stage();self.a.enter(self.req["attempt"],987);self.host.fail_inspect=True
+        self.a.observe(self.req)
+        path=self.directory/"diagnostic-first-unknown.json"
+        before=path.read_bytes();inode=path.stat().st_ino
+        self.host.fail_inspect=False;self.host.inspect=lambda row:(_ for _ in ()).throw(g.Refusal("pending_state"))
+        self.a.observe(self.req)
+        self.assertEqual(path.read_bytes(),before);self.assertEqual(path.stat().st_ino,inode)
+
+    def test_start_failure_keeps_original_refusal_and_consumed_hold(self):
+        self.stage();self.host.fail_start=True
+        with self.assertRaisesRegex(g.Refusal,"start_unknown"):self.a.enter(self.req["attempt"],987)
+        event=self.diagnostic("diagnostic-first-unknown.json")
+        self.assertEqual(event["reason"],"os_error")
+        self.assertEqual(event["phase_before"],"consumed")
+        state=g.decode((self.directory/"ledger.json").read_bytes())
+        self.assertEqual(state["attempts"][self.req["attempt"]]["phase"],"unknown")
+
+    def test_only_literal_refusal_allowlist_survives(self):
+        for kind,error,expected in (("unit-pre",g.Refusal("hook_denied"),"hook_denied"),("unit-post",g.Refusal("PRIVATE_TOKEN arbitrary/path"),"refusal_other"),("unknown-transition",ValueError("PRIVATE_TOKEN"),"value_error")):
+            self.assertTrue(g.capture_diagnostic(self.profile,kind,error))
+            leaf={"unit-pre":"diagnostic-unit-pre.json","unit-post":"diagnostic-unit-post.json","unknown-transition":"diagnostic-first-unknown.json"}[kind]
+            raw=(self.directory/leaf).read_bytes()
+            self.assertEqual(g.decode(raw)["reason"],expected);self.assertNotIn(b"PRIVATE_TOKEN",raw)
+
+    def test_nonstring_refusal_args_are_generic_without_formatting(self):
+        class Private:
+            def __str__(self):raise AssertionError("must not format")
+        self.assertTrue(g.capture_diagnostic(self.profile,"unit-pre",g.Refusal(Private())))
+        self.assertEqual(self.diagnostic("diagnostic-unit-pre.json")["reason"],"refusal_other")
+
+    def test_fixed_three_files_existing_evidence_never_replaced(self):
+        for kind in ("unit-pre","unit-post","unknown-transition"):
+            self.assertTrue(g.capture_diagnostic(self.profile,kind,g.Refusal("scope_changed")))
+            self.assertFalse(g.capture_diagnostic(self.profile,kind,g.Refusal("hook_denied")))
+        leaves=sorted(p.name for p in self.directory.glob("diagnostic-*.json"))
+        self.assertEqual(leaves,["diagnostic-first-unknown.json","diagnostic-unit-post.json","diagnostic-unit-pre.json"])
+        for path in self.directory.glob("diagnostic-*.json"):
+            self.assertEqual(path.stat().st_mode&0o777,0o600);self.assertEqual(path.stat().st_nlink,1)
+        self.assertFalse(g.capture_diagnostic(self.profile,"../escape",g.Refusal("hook_denied")))
+
+    def test_existing_fifo_is_not_opened_or_overwritten(self):
+        path=self.directory/"diagnostic-unit-pre.json";os.mkfifo(path,0o600)
+        inode=path.lstat().st_ino
+        self.assertFalse(g.capture_diagnostic(self.profile,"unit-pre",g.Refusal("hook_denied")))
+        self.assertEqual(path.lstat().st_ino,inode)
+
+    def test_existing_symlink_and_hardlink_are_preserved(self):
+        original=self.directory/"original";original.write_bytes(b"retained");original.chmod(0o600)
+        (self.directory/"diagnostic-unit-pre.json").symlink_to(original)
+        os.link(original,self.directory/"diagnostic-unit-post.json")
+        self.assertFalse(g.capture_diagnostic(self.profile,"unit-pre",g.Refusal("hook_denied")))
+        self.assertFalse(g.capture_diagnostic(self.profile,"unit-post",g.Refusal("hook_denied")))
+        self.assertEqual(original.read_bytes(),b"retained")
+
+    def test_unsafe_state_directory_refuses_diagnostic_only(self):
+        self.directory.chmod(0o755)
+        self.assertFalse(g.capture_diagnostic(self.profile,"unit-pre",g.Refusal("hook_denied")))
+        self.assertFalse((self.directory/"diagnostic-unit-pre.json").exists())
+        self.directory.chmod(0o700)
+
+    def test_diagnostic_open_failure_does_not_replace_original_unknown(self):
+        self.stage();self.a.enter(self.req["attempt"],987);self.host.fail_inspect=True
+        original=os.open
+        def fail_diagnostic(path,*args,**kwargs):
+            if str(path).startswith("diagnostic-"):raise OSError("PRIVATE_TOKEN diagnostic denied")
+            return original(path,*args,**kwargs)
+        with mock.patch.object(g.os,"open",side_effect=fail_diagnostic):
+            self.assertEqual(self.a.observe(self.req)["phase"],"unknown")
+        state=g.decode((self.directory/"ledger.json").read_bytes())
+        self.assertTrue(state["attempts"][self.req["attempt"]]["ever_consumed"])
+
+    def test_existing_native_snapshot_is_sanitized_without_extra_query(self):
+        linux=g.LinuxHost(self.profile)
+        unit="test-"+self.req["attempt"]+".service"
+        values=dict(Id=unit,LoadState="loaded",ActiveState="activating",SubState="start-pre",MainPID="0",InvocationID="a"*32,ControlGroup="/PRIVATE_TOKEN",ExecMainCode="0",ExecMainStatus="0",Result="success")
+        linux.command=mock.Mock(return_value="\n".join(k+"="+v for k,v in values.items()))
+        linux.show(unit)
+        self.assertEqual(linux.command.call_count,1)
+        native=linux.diagnostic_state
+        self.assertEqual(native["sub_state"],"start-pre")
+        self.assertTrue(native["main_pid_zero"])
+        self.assertNotIn("PRIVATE_TOKEN",g.canonical(native).decode())
+        self.assertNotIn(self.req["attempt"],g.canonical(native).decode())
+        self.assertIs(type(native["observed_monotonic_ns"]),int)
+
+    def test_hook_refusal_records_first_reason_and_preserves_original_exception(self):
+        self.stage();self.a.enter(self.req["attempt"],987)
+        with self.a.locked() as state:
+            state["attempts"][self.req["attempt"]]["phase"]="unknown"
+            g.atomic(self.directory/"ledger.json",state)
+        with self.assertRaisesRegex(g.Refusal,"hook_denied"):
+            g.dispatch_command(self.a,["unit-pre",self.req["attempt"]],b"")
+        self.assertEqual(self.diagnostic("diagnostic-unit-pre.json")["reason"],"hook_denied")
+
+    def test_cli_public_refusal_remains_generic(self):
+        import subprocess
+        p=subprocess.run(["/usr/bin/python3.12","-I","-B",str(PATH),"unit-pre","1"*32],capture_output=True,check=False)
+        self.assertEqual(p.returncode,1)
+        self.assertEqual(p.stdout,b'{"schema_version":1,"error":"refused"}\n')
+        self.assertEqual(p.stderr,b"")
+
+
+    def test_unknown_state_is_saved_before_diagnostic_capture(self):
+        self.stage();self.a.enter(self.req["attempt"],987);self.host.fail_inspect=True
+        actual=g.capture_diagnostic
+        seen=[]
+        def capture(*args,**kwargs):
+            state=g.decode((self.directory/"ledger.json").read_bytes())
+            seen.append(state["attempts"][self.req["attempt"]]["phase"])
+            return actual(*args,**kwargs)
+        with mock.patch.object(g,"capture_diagnostic",side_effect=capture):
+            self.a.observe(self.req)
+        self.assertEqual(seen,["unknown"])
+
+    def test_inspect_clears_old_snapshot_before_a_failing_scope_read(self):
+        linux=g.LinuxHost(self.profile);linux.diagnostic_state={"sub_state":"PRIVATE_TOKEN"}
+        with mock.patch.object(linux,"scope",side_effect=g.Refusal("scope_owner")):
+            with self.assertRaisesRegex(g.Refusal,"scope_owner"):linux.inspect({})
+        self.assertIsNone(linux.diagnostic_state)
+
+    def test_hook_diagnostic_failure_preserves_original_refusal(self):
+        self.stage();self.a.enter(self.req["attempt"],987)
+        with self.a.locked() as state:
+            state["attempts"][self.req["attempt"]]["phase"]="unknown"
+            g.atomic(self.directory/"ledger.json",state)
+        original=os.open
+        def fail_diagnostic(path,*args,**kwargs):
+            if str(path).startswith("diagnostic-"):raise OSError("PRIVATE_TOKEN")
+            return original(path,*args,**kwargs)
+        with mock.patch.object(g.os,"open",side_effect=fail_diagnostic):
+            with self.assertRaisesRegex(g.Refusal,"hook_denied"):
+                g.dispatch_command(self.a,["unit-pre",self.req["attempt"]],b"")
+
+    def test_native_unknown_values_and_fields_cannot_escape(self):
+        unsafe=dict(sub_state="PRIVATE_TOKEN",unit="PRIVATE_TOKEN",main_pid_zero="PRIVATE_TOKEN",observed_monotonic_ns="PRIVATE_TOKEN")
+        self.assertTrue(g.capture_diagnostic(self.profile,"unit-pre",g.Refusal("hook_denied"),native=unsafe))
+        raw=(self.directory/"diagnostic-unit-pre.json").read_bytes()
+        self.assertNotIn(b"PRIVATE_TOKEN",raw)
+        value=g.decode(raw)["native"]
+        self.assertEqual(value["sub_state"],"other")
+        self.assertIsNone(value["main_pid_zero"])
+        self.assertIsNone(value["observed_monotonic_ns"])
+        self.assertLessEqual(len(raw),1024)
+
+
+    def test_native_cache_failure_cannot_replace_original_show_refusal(self):
+        linux=g.LinuxHost(self.profile);unit="test-"+self.req["attempt"]+".service"
+        values=dict(Id=unit,LoadState="not-found",ActiveState="inactive",SubState="dead",MainPID="0",InvocationID="",ControlGroup="",ExecMainCode="0",ExecMainStatus="0",Result="success")
+        linux.command=lambda argv:"\n".join(k+"="+v for k,v in values.items())
+        with mock.patch.object(g,"diagnostic_native",side_effect=ValueError("PRIVATE_TOKEN")):
+            with self.assertRaisesRegex(g.Refusal,"unit_unknown"):linux.show(unit)
+
 if __name__ == "__main__":unittest.main()

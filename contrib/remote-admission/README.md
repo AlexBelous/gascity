@@ -174,3 +174,22 @@ NNP/caps0, bounded tmpfs and file limit. Root-private receipts are under
 `/var/lib/gc-repairer-fixtures/{systemd-20261020T185416Z,slice-20261020T185618Z,sandbox-20261020T190707Z}/receipt.json`.
 These prove OS mechanics, not acceptance of a production profile, home mount,
 model invocation, queue RPC or installed release. Those remain separate gates.
+
+
+## Private refusal diagnostics
+
+After a profile and its private state directory validate, the helper may create
+three derived evidence files there: `diagnostic-unit-pre.json`,
+`diagnostic-unit-post.json` and `diagnostic-first-unknown.json`. Each is at most
+1024 bytes, root0600 in production, created once with no-follow/exclusive semantics;
+existing or partial evidence is retained without overwrite, rotation or fallback.
+Only static refusal codes, generic exception categories, monotonic ordering,
+process ID and sanitized already-read native state enums/booleans are recorded.
+No request, attempt/unit name, token, prompt, environment or exception text is logged.
+
+The first unknown-transition record is attempted only after the original ledger
+save. Diagnostic failure cannot change admission, replace its original error or
+relax an occupied hold. Public RPC/schema and generic refused output are unchanged;
+profile-load/state-validation failures have no trusted diagnostic destination.
+These files do not backfill historical failures (including fixture003) or prove
+entry, termination, release or queue acceptance.

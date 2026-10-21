@@ -106,6 +106,100 @@ def atomic(path, value):
     finally:
         os.close(fd)
 
+
+# Diagnostic evidence is derived state, never admission authority or public wire.
+DIAGNOSTIC_LEAVES = {
+    "unit-pre": "diagnostic-unit-pre.json",
+    "unit-post": "diagnostic-unit-post.json",
+    "unknown-transition": "diagnostic-first-unknown.json",
+}
+MAX_DIAGNOSTIC_BYTES = 1024
+DIAGNOSTIC_REASONS = frozenset("""absolute_path arguments argv attempt attestation_failed binding_string bridge_timeout bridge_unknown bytes_required cancel_identity_changed cancel_scope_changed cancel_scope_unknown cancel_unknown cgroup_delegation cgroup_parent command_output consumed_budget consumption_ambiguous disk_threshold duplicate_key effective_cpu effective_file_limit effective_limit entry_denied entry_environment environment environment_keys environment_value file_changed file_too_large file_type frame_changed frame_too_large generation hardlink home_ancestor home_backing home_budget home_device home_mount home_mount_binding hook_cgroup hook_denied hook_sudo_denied identity identity_changed identity_mismatch identity_pin integer invalid_json invocation kernel_binding ledger_ambiguous ledger_attempt ledger_attestation ledger_consumed ledger_current ledger_history ledger_never_entered ledger_phase ledger_schema ledger_terminal lock_permissions lock_replaced loop_backing main_binding main_changed main_executable main_privilege memory_threshold missing_ledger mode model_home_env mount_path no_current nonfinite not_entered not_stageable object_required occupied oom_group operation output_bound output_filesystem owner path peer_changed peer_scope pending_binding pending_cgroup pending_changed pending_denied pending_progress pending_state policy_digest pressure_threshold principal_paths principal_separation private_mode process_credentials process_reused profile profile_binding profile_string prompt prompt_changed release_permissions release_pin release_type reservation_mismatch revoked root_required schema scope_changed scope_inconsistent scope_occupied scope_owner scope_symlink scope_tasks sha256 shared_device_mount shared_ipc snapshot_changed source_sha stage_changed stage_environment_keys start_unknown startup_changed sudo_principal symlink systemd_path terminal_history terminal_unproven threshold tmpfs_budget tmpfs_mount transport_principal unified_cgroup unit_prefix unit_unknown unknown unsafe_owner_mode version work_ancestor work_budget work_changed work_credentials work_device work_mount work_mount_options work_tmpfs""".split())
+DIAGNOSTIC_ENUMS = {
+    "load_state": ("loaded", "not-found", "error", "masked"),
+    "active_state": ("activating", "active", "inactive", "failed", "deactivating"),
+    "sub_state": ("start-pre", "start", "start-post", "running", "exited", "dead", "failed", "stop", "stop-post"),
+    "result": ("success", "exit-code", "timeout", "signal", "resources", "protocol"),
+    "exec_main_code": ("0", "1", "2", "3"),
+}
+DIAGNOSTIC_BOOLS = ("main_pid_zero", "exec_main_status_zero", "invocation_valid",
+                    "unit_id_matches", "control_group_matches", "scope_empty")
+
+def diagnostic_reason(error):
+    """Only static refusal literals or fixed exception classes reach evidence."""
+    if type(error) is Refusal:
+        value = error.args[0] if len(error.args) == 1 else None
+        return value if type(value) is str and value in DIAGNOSTIC_REASONS else "refusal_other"
+    for kind, code in ((OSError, "os_error"), (KeyError, "key_error"),
+                       (ValueError, "value_error"), (TypeError, "type_error"),
+                       (subprocess.SubprocessError, "subprocess_error")):
+        if isinstance(error, kind):
+            return code
+    return "unexpected_error"
+
+def diagnostic_native(raw):
+    """Revalidate cached evidence; no private names, values or arbitrary strings."""
+    if type(raw) is not dict:
+        return None
+    value = {key: raw.get(key) if type(raw.get(key)) is str and raw[key] in allowed else "other"
+             for key, allowed in DIAGNOSTIC_ENUMS.items()}
+    value.update({key: raw.get(key) if type(raw.get(key)) is bool else None
+                  for key in DIAGNOSTIC_BOOLS})
+    observed = raw.get("observed_monotonic_ns")
+    value["observed_monotonic_ns"] = observed if type(observed) is int and 0 < observed < 2**64 else None
+    return value
+
+def capture_diagnostic(profile, kind, error, phase_before=None, native=None,
+                       self_cgroup_match=None):
+    """Best-effort first evidence: three fixed private leaves, no overwritten history."""
+    try:
+        require(kind in DIAGNOSTIC_LEAVES and os.geteuid() == profile.owner, "diagnostic")
+        event = dict(schema_version=1, kind=kind, reason=diagnostic_reason(error),
+                     pid=os.getpid(), monotonic_ns=time.monotonic_ns())
+        if phase_before is not None:
+            event.update(phase_before=phase_before if phase_before in ("consumed", "entered", "unknown") else "other",
+                         phase_after="unknown")
+        snapshot = diagnostic_native(native)
+        if snapshot is not None:
+            event["native"] = snapshot
+        if type(self_cgroup_match) is bool:
+            event["self_cgroup_matches"] = self_cgroup_match
+        raw = canonical(event) + b"\n"
+        require(len(raw) <= MAX_DIAGNOSTIC_BYTES, "diagnostic")
+        directory = pathlib.Path(profile.data["state_dir"])
+        before = secure_path(directory, profile.owner, True)
+        parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            current = os.fstat(parent)
+            require((current.st_dev, current.st_ino) == (before.st_dev, before.st_ino), "diagnostic")
+            fd = os.open(DIAGNOSTIC_LEAVES[kind], os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+            try:
+                info = os.fstat(fd)
+                require(stat.S_ISREG(info.st_mode) and info.st_uid == profile.owner
+                        and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600, "diagnostic")
+                require(os.write(fd, raw) == len(raw), "diagnostic")
+                os.fsync(fd)
+                os.fsync(parent)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent)
+        return True
+    except Exception:
+        # Diagnostics must never replace the original admission/refusal outcome.
+        # Partial evidence is retained; there is no retry, alternate path or rotation.
+        return False
+
+def diagnose(authority, kind, error, phase_before=None):
+    """Contain even diagnostic preparation failures after the original state save."""
+    try:
+        return capture_diagnostic(authority.profile, kind, error, phase_before,
+                                  getattr(authority.host, "diagnostic_state", None),
+                                  getattr(authority, "diagnostic_cgroup_match", None))
+    except Exception:
+        return False
+
 class Profile:
     def __init__(self, value, owner=0):
         keys(value, "schema_version profile_id city template binding source_sha manifest_sha256 transport_uid model_uid model_gid unit_prefix cgroup_parent state_dir helper_path helper_sha256 model_argv model_exe_sha256 environment environment_keys resources thresholds disk_path model_home transport_home working_directory home_mount max_consumed_attempts")
@@ -279,15 +373,17 @@ class Authority:
             self.save(state, row)
             try:
                 self.host.start(row)
-            except Exception:
+            except Exception as error:
                 row["phase"] = "unknown"
                 self.save(state, row)
+                diagnose(self, "unknown-transition", error, "consumed")
                 raise Refusal("start_unknown") from None
             return self.receipt(row)
 
     def refresh(self, state, row):
         if row["phase"] in ("prepared", "staged", "exited"):
             return
+        previous_phase, failure = row["phase"], None
         try:
             proof = self.host.inspect(row)
             require(proof["scope"]["boot_id"] == row["scope"]["boot_id"] and proof["scope"]["device"] == row["scope"]["device"] and proof["scope"]["inode"] == row["scope"]["inode"], "scope_changed")
@@ -312,9 +408,12 @@ class Authority:
                 state["current"] = None
             else:
                 raise Refusal("unknown")
-        except (Refusal, OSError, KeyError, ValueError, subprocess.SubprocessError):
+        except (Refusal, OSError, KeyError, ValueError, subprocess.SubprocessError) as error:
+            failure = error
             row["phase"] = "unknown"
         self.save(state, row)
+        if failure is not None and previous_phase != "unknown":
+            diagnose(self, "unknown-transition", failure, previous_phase)
 
     def observe(self, request):
         with self.locked() as state:
@@ -569,6 +668,20 @@ class LinuxHost:
         fields = ("Id", "LoadState", "ActiveState", "SubState", "MainPID", "InvocationID", "ControlGroup", "ExecMainCode", "ExecMainStatus", "Result")
         raw = self.command(["/usr/bin/systemctl", "show", unit, "--no-pager", "--property=" + ",".join(fields)])
         result = dict(line.split("=", 1) for line in raw.splitlines())
+        try:
+            # Cache only this already-read kernel view; never issue a diagnostic query.
+            self.diagnostic_state = diagnostic_native(dict(
+                load_state=result.get("LoadState"), active_state=result.get("ActiveState"),
+                sub_state=result.get("SubState"), result=result.get("Result"),
+                exec_main_code=result.get("ExecMainCode"), main_pid_zero=result.get("MainPID") == "0",
+                exec_main_status_zero=result.get("ExecMainStatus") == "0",
+                invocation_valid=type(result.get("InvocationID")) is str and HEX32.fullmatch(result["InvocationID"]) is not None,
+                unit_id_matches=result.get("Id") == unit,
+                control_group_matches=result.get("ControlGroup") == self.p["cgroup_parent"] + "/" + unit,
+                scope_empty=getattr(self, "diagnostic_scope_empty", None),
+                observed_monotonic_ns=time.monotonic_ns()))
+        except Exception:
+            self.diagnostic_state = None
         require(set(result) == set(fields) and result["Id"] == unit and result["LoadState"] == "loaded", "unit_unknown")
         return result
 
@@ -661,7 +774,10 @@ class LinuxHost:
         return {"phase": "pending", "identity": identity, "scope": scope}
 
     def inspect(self, row):
+        self.diagnostic_state = None
+        self.diagnostic_scope_empty = None
         scope = self.scope()
+        self.diagnostic_scope_empty = scope["empty"]
         unit = self.show(self.unit(row))
         if unit["MainPID"] != "0":
             pid = int(unit["MainPID"])
@@ -743,7 +859,8 @@ def unit_hook(authority, attempt, post):
     with authority.locked() as state:
         row = state["attempts"].get(attempt)
         require(row is not None and state["current"] == attempt and row["profile_digest"] == authority.profile.digest and row["phase"] in ("consumed", "entered") and not row["revoked"], "hook_denied")
-        require(authority.host.peer(os.getpid())["cgroup"] == authority.host.cgroup(row), "hook_cgroup")
+        authority.diagnostic_cgroup_match = authority.host.peer(os.getpid())["cgroup"] == authority.host.cgroup(row)
+        require(authority.diagnostic_cgroup_match, "hook_cgroup")
         if "startup_identity" in row:
             proof = authority.host.inspect(row)
             require(proof["phase"] in ("pending", "entered")
@@ -760,6 +877,18 @@ def run(argv, raw):
     require(os.geteuid() == 0, "root_required")
     profile = Profile(decode(read_private(PROFILE, 0)))
     authority = Authority(profile, LinuxHost(profile))
+    return dispatch_command(authority, argv, raw)
+
+def dispatch_command(authority, argv, raw):
+    """Keep hook diagnostics behind a validated profile and private state boundary."""
+    try:
+        return run_command(authority, argv, raw)
+    except (Refusal, OSError, KeyError, ValueError, TypeError, subprocess.SubprocessError) as error:
+        if argv and type(argv[0]) is str and argv[0] in ("unit-pre", "unit-post"):
+            diagnose(authority, argv[0], error)
+        raise
+
+def run_command(authority, argv, raw):
     require(len(argv) in (1, 2), "arguments")
     mode = argv[0]
     if mode in ("enter", "unit-pre", "unit-post"):

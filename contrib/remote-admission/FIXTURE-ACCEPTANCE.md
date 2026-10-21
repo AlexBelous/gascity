@@ -69,9 +69,13 @@ Partial failed seed state is retained; use another named root, never clean/delet
    loop source/device/inode/allocation/size. No auth migration/copy, new HOME image
    or second provisioning transaction. The benign immutable Python actor and
    queue_client never invoke Codex or read OAuth. An exact-attempt model unit
-   drop-in MUST set InaccessiblePaths=/srv/gc-repairer/worker/.codex; '+' root
-   Pre/Post hooks intentionally remain unaffected. Prove actual UID988 model
-   namespace denial with os.access/stat ONLY, never auth bytes/hash; no assumption
+   drop-in MUST set InaccessiblePaths=/srv/gc-repairer/worker/.codex. The '+'
+   prefix grants hook privileges, not a blanket filesystem-namespace exemption.
+   Actual +ExecStartPre sees the bounded model-owned work tmpfs; the trusted
+   unit-hook validates it separately from the root-owned host target.
+   Attest actual namespace views; do not infer Post-hook behavior from this probe.
+   Prove actual UID988 model namespace denial with os.access/stat ONLY, never
+   auth bytes/hash; no assumption
    from unit text, no fallback when denial is unproved.
    Prepare separate named root state/work paths and explicitly fresh ledger
    schema1/currentnull/empty attempts. Persistent exclusive cap1 parent remains
@@ -124,8 +128,10 @@ Partial failed seed state is retained; use another named root, never clean/delet
    /etc/gascity/remote-work-client.json,
    /etc/gascity/remote-admission/profile.json.
    These are REAL temporary host fixture profiles, readable by real production
-   helper Pre/Post hooks. The earlier private-mount workaround is rejected:
-   privileged '+' hooks do not inherit the model filesystem namespace.
+   helper Pre/Post hooks. Exact host-profile publication remains the required
+   authority contract; the earlier private-mount workaround remains rejected.
+   Verify actual hook access to those exact host-published profiles rather than
+   assuming that '+' exempts filesystem namespaces.
    No namespace/nsenter/profile-alternate flag substitutes for real authority.
 7. Freeze every UID988 launcher for the entire transaction. Keep normal controller
    admissions held; no keys/sudo/normal role activation beyond reviewed fixture-only

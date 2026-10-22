@@ -1,30 +1,12 @@
 package beads
 
 import (
-	"strings"
 	"testing"
 )
 
-// TestOff128CurrentReservationGaps records the supported store behavior that
-// prevents a reservation label from being a safe execution fence.
+// TestOff128CurrentReservationGaps proves that a label alone is not a claim
+// fence; a blocked status is required at the SQLite claim boundary.
 func TestOff128CurrentReservationGaps(t *testing.T) {
-	t.Run("bd adapter omits create status", func(t *testing.T) {
-		var argv []string
-		runner := func(_, _ string, args ...string) ([]byte, error) {
-			argv = append([]string(nil), args...)
-			return []byte(`{"id":"probe-1","title":"reserved","status":"open","issue_type":"task","created_at":"2026-10-22T00:00:00Z"}`), nil
-		}
-		store := NewBdStore(t.TempDir(), runner)
-		created, err := store.Create(Bead{Title: "reserved", Status: "blocked", Labels: []string{"hold:external"}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := strings.Join(argv, " ")
-		t.Logf("requested_status=blocked argv=%q returned_status=%q", got, created.Status)
-		if strings.Contains(got, "--status") || created.Status != "open" {
-			t.Fatalf("negative capability no longer reproduces: argv=%q status=%q", got, created.Status)
-		}
-	})
 	t.Run("sqlite exact ID claim ignores reservation label", func(t *testing.T) {
 		opened, err := OpenSQLiteStore(t.TempDir())
 		if err != nil {

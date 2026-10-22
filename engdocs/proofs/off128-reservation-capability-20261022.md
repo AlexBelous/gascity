@@ -51,3 +51,13 @@ The first raw `go test` attempt exited 1 during compilation before any assertion
 3. Release only the reservation's own fence after verified bind, then persist a dispatch intent/receipt with recovery for an attached carrier lacking a sling receipt. Keep the same carrier on retries and ambiguous outcomes. Test concurrent reserve/dispatch and crashes before mapping, after mapping, after bind, and before dispatch against disposable stores.
 
 These are proposed changes, not implemented capabilities. The first slice cannot be accepted until they are executable and independently reviewed. Due-queue creation, task-contract publication, bootstrap finalize, role/Clerk readers, pool demand, result enrollment, installed `gc` and `gc-ready`, and unrelated holds remain outside this proof. Production ingress stays off.
+
+## Direct follow-up: preserve initial status (Root)
+
+Journal: https://github.com/AlexBelous/gascity-kb/issues/128. The negative baseline above is retained at commit `1808c57c00edfcb38efcab7abad9c5553cc4918d`; it is historical evidence, not the behavior expected of the patched adapter.
+
+The adapter now forwards a nonempty `Bead.Status` as `--status` in the original `bd create`, for every storage tier. Empty status still uses bd's default. There is no post-create update and no fallback that pretends a returned status was persisted. `TestBdStoreCreatePassesInitialStatus` failed on the baseline for each nonempty status/tier, then passed with the change. The baseline adapter-gap subtest is replaced by that regression; the two isolated SQLite claim-boundary checks remain.
+
+An important boundary found during review: `bdIssue.toBead` and NativeDolt readback normalize raw `blocked` and `deferred` to SDK `open`. The argument-plumbing test explicitly retains that existing normalization. Seeing SDK `open` is not evidence that raw create ignored the status, and seeing a fake blocked response is not real bd persistence evidence. This change does not make MemStore/FileStore/exec-provider create honor an initial status and does not establish a universal Store reservation API.
+
+Validation: the focused create/claim tests and `GC_FAST_UNIT=1 go test ./internal/beads/... -count=1` passed on Mac with the documented Homebrew ICU include/library flags. These tests cover argument forwarding and isolated SQLite claim behavior; real pinned bd/Dolt, installed binaries, enrollment, all discovery readers, durable mapping and bind/dispatch recovery remain unproved. Production remains off; CP0/CP1 remain unpassed.

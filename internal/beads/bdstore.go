@@ -1315,6 +1315,9 @@ func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) 
 		typ = "task"
 	}
 	args := []string{"create", "--json", b.Title, "-t", typ}
+	if b.Status != "" {
+		args = append(args, "--status", b.Status)
+	}
 	hasStableID := false
 	if id := strings.TrimSpace(b.ID); id != "" {
 		args = append(args, "--id", id)

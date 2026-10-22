@@ -17,6 +17,7 @@ func must(err error) {
 		panic(err)
 	}
 }
+
 func native(r beads.CommandRunner, dir, id string) map[string]any {
 	out, err := r(dir, "bd", "--sandbox", "show", id, "--json")
 	must(err)
@@ -27,6 +28,7 @@ func native(r beads.CommandRunner, dir, id string) map[string]any {
 	}
 	return rows[0]
 }
+
 func main() {
 	root := "/srv/gc-build/workspaces/off128-pinned-claim-20261022"
 	dir := filepath.Join(root, "repo")
@@ -43,8 +45,10 @@ func main() {
 	}
 	store := beads.NewBdStore(dir, runner)
 	for _, status := range []string{"open", "blocked", "deferred"} {
-		created, err := store.Create(beads.Bead{Title: "SDK native fixture " + status, Status: status,
-			Labels: []string{"hold:external"}, Metadata: beads.StringMap{"gc.reservation": "pending"}})
+		created, err := store.Create(beads.Bead{
+			Title: "SDK native fixture " + status, Status: status,
+			Labels: []string{"hold:external"}, Metadata: beads.StringMap{"gc.reservation": "pending"},
+		})
 		must(err)
 		before := native(exact, dir, created.ID)
 		if before["status"] != status {
@@ -52,9 +56,11 @@ func main() {
 		}
 		claimed, ok, claimErr := store.Claim(created.ID)
 		after := native(exact, dir, created.ID)
-		record := map[string]any{"requested_status": status, "id": created.ID, "sdk_create_status": created.Status,
+		record := map[string]any{
+			"requested_status": status, "id": created.ID, "sdk_create_status": created.Status,
 			"native_before_status": before["status"], "sdk_claim_ok": ok, "sdk_claim_status": claimed.Status,
-			"native_after_status": after["status"], "native_after_assignee": after["assignee"]}
+			"native_after_status": after["status"], "native_after_assignee": after["assignee"],
+		}
 		if claimErr != nil {
 			record["sdk_claim_error"] = claimErr.Error()
 		}

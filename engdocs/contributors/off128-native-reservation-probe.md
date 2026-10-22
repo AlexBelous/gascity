@@ -44,7 +44,7 @@ Run sequence within those bounded systemd units:
    open control with the same hold label/metadata as reserved cases.
 
 The Go parent PATH must include the fixture bin as well as the explicit child
-PATH: exec.LookPath resolves the program before applying Cmd.Env. Use Go1.27.1,
+PATH: exec.LookPath resolves the program before applying Cmd.Env. Use the declared Go1.26.6,
 GOMAXPROCS2, GOFLAGS=-p=2, CGO_ENABLED=0, GOTOOLCHAIN=local, GOPROXY=off,
 GOSUMDB=off and retained local module/cache paths. GOTMPDIR must point to the
 private writable .gotmp in the SDK evidence worktree; /tmp remains read-only.
@@ -94,12 +94,18 @@ Do not ship a precheck+unconditional-claim approximation as that mechanism.
   ae4b4f26b10a880abdaecba200a88b06e600478958f4273aa8a4531899bd1a9d;
   fixture recovery-receipt SHA256
   9f491d3d78490db86c935a6d0c1bb07b1267514a80bc2fd73a35ce6076d2ba3f.
-* SDK chain: unit off128-native-sdk3-20261022, invocation
-  7491a1837b524c19afdc1106b1e17dd1, exit0. Log SHA256
-  a8fe738b1fc19f77f51fa2413f33c877bbf49479760d394b57d8f3259d6ddb92;
+* SDK chain: unit off128-native-sdk4-20261022, invocation
+  a407cabab63f421ba594ddc5a74c3bab, exit0. Log SHA256
+  af51065d40849dfe251af88504cb680d5478b1fa1642a1a6d359c17365ba7829;
   tested main.go SHA256
-  ce0089f7232599f646b9617b8b492528e43d5b455daca6820679d1c680e865e1.
+  4783807ce46348ea245ee278363e8116885ad8686eedde3e2202968e0d4a879b.
 
 PID1 journal records successful terminal outcomes for each named invocation.
 Logs are /srv/gc-build/logs/<unit>.log. Source commit and receipt hashes permit
 independent inspection; no independent rerun is claimed by the author.
+
+The earlier pre-format SDK3/Go1.27.1 result remains retained and was independently
+reviewed with the native/recovery evidence in issue128 comment6349739860. Final
+SDK4 reruns the formatter-adjusted same logic on the declared Go1.26.6. The
+manual description lives under engdocs/contributors so the existing documentation
+coverage check covers it; no coverage exclusions were added.

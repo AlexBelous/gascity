@@ -109,6 +109,52 @@ func TestBdStoreCreate(t *testing.T) {
 	}
 }
 
+// TestBdStoreCreatePassesInitialStatus proves the status is sent in the
+// create itself, for every storage tier, rather than in a later update that
+// would leave a claimable window. An omitted status retains bd's default.
+func TestBdStoreCreatePassesInitialStatus(t *testing.T) {
+	for _, storage := range []beads.StorageClass{beads.StorageDefault, beads.StorageHistory, beads.StorageNoHistory, beads.StorageEphemeral} {
+		for _, status := range []string{"", "blocked", "deferred", "in_progress"} {
+			t.Run(string(storage)+"/"+status, func(t *testing.T) {
+				var calls int
+				runner := func(_, name string, args ...string) ([]byte, error) {
+					calls++
+					if name != "bd" || len(args) == 0 || args[0] != "create" {
+						t.Fatalf("expected one atomic create, got %s %q", name, args)
+					}
+					got := ""
+					for i, arg := range args {
+						if arg == "--status" && i+1 < len(args) {
+							got = args[i+1]
+						}
+					}
+					if got != status {
+						t.Fatalf("create status = %q, want %q; args=%q", got, status, args)
+					}
+					persisted := status
+					if persisted == "" {
+						persisted = "open"
+					}
+					return []byte(fmt.Sprintf(`{"id":"bd-x","title":"reserved","status":%q,"issue_type":"task"}`, persisted)), nil
+				}
+				store := beads.NewBdStore(t.TempDir(), runner)
+				created, err := store.CreateWithStorage(beads.Bead{Title: "reserved", Status: status}, storage)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := status
+				// BdStore normalizes raw blocked/deferred to the SDK open state.
+				if want == "" || want == "blocked" || want == "deferred" {
+					want = "open"
+				}
+				if created.Status != want || calls != 1 {
+					t.Fatalf("created status=%q calls=%d, want %q and one create", created.Status, calls, want)
+				}
+			})
+		}
+	}
+}
+
 func TestBdStoreCreateDefaultsTypeToTask(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {

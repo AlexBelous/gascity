@@ -186,7 +186,7 @@ func Catalog() []Entry {
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				time.Date(2026, time.October, 8, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.November, 17, 0, 0, 0, 0, time.UTC),
 				"TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls "+
 					"NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing "+
 					"the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two "+

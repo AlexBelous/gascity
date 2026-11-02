@@ -217,3 +217,17 @@ pins must be republished together after reviews, owning tests, normal hooks
 and source publication. Existing CI binary-size and Dolt-leak failures have
 separate baseline proof (run39647661810, tree equal to432338a7); they are not
 green results and the guards are not weakened.
+
+### Exact diagnostics continuation (issue208, generation4 to5)
+
+Approval: gascity-kb#208 comment6580272449. The prior generation4 stopped on
+read-only omitted-empty-comments DTO validation, before any claim or Accepted.
+Only the same SID and fixture may use --continue-diagnostics after the old actor
+is stopped and the genuine native generation becomes5. Both once.json and the
+exact consumed recovery-intent.json remain immutable. A separate root-owned
+continuation-ticket.json binds their hashes, published source/coordinator hashes,
+the approval and transition4→5. The one-use continuation-intent.json is retained
+before read-only diagnostics; continuation-diagnostics.json must receive exact
+root continuation-admission.json after an independent zero-attempt VM check.
+This consumes no additional model allowance: the existing total budget remains1.
+Any new failure retains Hold, with no automatic restart or further continuation.

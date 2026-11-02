@@ -63,7 +63,8 @@ class Session:
 class OncePermit:
     """Retained consumed-before-work receipt; restart never replays any phase."""
     def __init__(self, directory, filename="once.json"):
-        require(filename in ("once.json", "recovery-intent.json", "recovery-diagnostics.json"), "permit_filename")
+        require(filename in ("once.json", "recovery-intent.json", "recovery-diagnostics.json",
+                            "continuation-intent.json", "continuation-diagnostics.json"), "permit_filename")
         self.directory = Path(directory)
         self.filename = filename
 
@@ -143,12 +144,12 @@ class NativeQueue:
             require(current.decode().strip() == self.fixture, "current_claim_mismatch")
         return row
 
-    def recovery_preflight(self):
+    def recovery_preflight(self, expected_generation="4"):
         self.pin_check()
         session = self.show(self.session.sid)
         generation = self.session.matches(session)
         metadata = session.get("metadata", {})
-        require(generation == "4" and metadata.get("agent_name") == "repairer-coordinator"
+        require(expected_generation in ("4", "5") and generation == expected_generation and metadata.get("agent_name") == "repairer-coordinator"
                 and not metadata.get("current_claim_bead_id"), "recovery_session_claim")
         row = self.show(self.fixture, comments=True)
         info = row.get("metadata") or {}
@@ -328,6 +329,10 @@ class RecoveryPermit:
     ORIGINAL = "82e30b462767ff1196760eec5e8677f530f2e7ea7089af8bf94870114503bc20"
     APPROVAL = "https://github.com/AlexBelous/gascity-kb/issues/208#issuecomment-6576966510"
 
+    BEFORE, AFTER = "3", "4"
+    TICKET, INTENT, DIAGNOSTICS, ADMISSION = "ticket.json", "recovery-intent.json", "recovery-diagnostics.json", "admission.json"
+    PRIOR = None
+
     def __init__(self, directory, queue, source_sha, root_loader=None, clock=None, sleep=None,
                  admission_seconds=120):
         import time
@@ -339,18 +344,19 @@ class RecoveryPermit:
         self.admission_seconds = admission_seconds
 
     def reserve(self, receipt):
-        ticket = self.root_loader("ticket.json")
+        ticket = self.root_loader(self.TICKET)
         require(type(ticket) is dict and set(ticket) == {"schema_version", "fixture_id", "owner_session",
                 "generation_before", "generation_after", "original_once_sha256", "source_sha",
-                "coordinator_sha256", "approval_url"}, "recovery_ticket_schema")
+                "coordinator_sha256", "approval_url"} | ({"prior_recovery_intent_sha256"} if self.PRIOR else set()), "recovery_ticket_schema")
         require(ticket["schema_version"] == 1 and ticket["fixture_id"] == self.FIXTURE == self.queue.fixture
                 and ticket["owner_session"] == self.SID == self.queue.session.sid
-                and ticket["generation_before"] == "3" and ticket["generation_after"] == "4"
+                and ticket["generation_before"] == self.BEFORE and ticket["generation_after"] == self.AFTER
                 and ticket["original_once_sha256"] == self.ORIGINAL
                 and ticket["source_sha"] == self.source_sha
                 and ticket["approval_url"] == self.APPROVAL
                 and ticket["coordinator_sha256"] == hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "recovery_ticket_binding")
+        self.verify_prior(ticket)
         original_path = self.directory / "once.json"
         descriptor = os.open(original_path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor, "rb") as stream:
@@ -363,23 +369,23 @@ class RecoveryPermit:
         # Native read proves the new incarnation before any recovery mutation.
         native = self.queue.show(self.SID)
         generation = self.queue.session.matches(native)
-        require(generation == "4", "recovery_generation")
+        require(generation == self.AFTER, "recovery_generation")
         binding = dict(owner_session=self.SID, generation=generation,
                        incarnation_sha256=hashlib.sha256(self.queue.session.token.encode()).hexdigest(),
                        source_sha=self.source_sha)
         ticket_sha = hashlib.sha256(canonical(ticket).encode()).hexdigest()
         intent = dict(schema_version=1, original_once_sha256=self.ORIGINAL,
                       ticket_sha256=ticket_sha, **binding)
-        OncePermit(self.directory, "recovery-intent.json").reserve(intent)
-        self.queue.recovery_preflight()
-        intent_sha = hashlib.sha256((self.directory / "recovery-intent.json").read_bytes()).hexdigest()
+        OncePermit(self.directory, self.INTENT).reserve(intent)
+        self.preflight()
+        intent_sha = hashlib.sha256((self.directory / self.INTENT).read_bytes()).hexdigest()
         ready = dict(schema_version=1, ticket_sha256=ticket_sha,
                      recovery_intent_sha256=intent_sha, **binding)
-        OncePermit(self.directory, "recovery-diagnostics.json").reserve(ready)
+        OncePermit(self.directory, self.DIAGNOSTICS).reserve(ready)
         deadline = self.clock() + self.admission_seconds
         while self.clock() < deadline:
             try:
-                admission = self.root_loader("admission.json")
+                admission = self.root_loader(self.ADMISSION)
                 break
             except FileNotFoundError:
                 self.sleep(min(2, max(0, deadline - self.clock())))
@@ -388,9 +394,39 @@ class RecoveryPermit:
         require(self.clock() < deadline and admission == ready, "recovery_admission_binding")
         require(hashlib.sha256(original_path.read_bytes()).hexdigest() == self.ORIGINAL,
                 "recovery_original_changed")
-        require(hashlib.sha256((self.directory / "recovery-intent.json").read_bytes()).hexdigest() == intent_sha,
+        require(hashlib.sha256((self.directory / self.INTENT).read_bytes()).hexdigest() == intent_sha,
                 "recovery_intent_changed")
-        self.queue.recovery_preflight()
+        self.verify_prior(ticket)
+        self.preflight()
+
+    def preflight(self):
+        if self.AFTER == "4":
+            self.queue.recovery_preflight()
+        else:
+            self.queue.recovery_preflight(expected_generation=self.AFTER)
+
+    def verify_prior(self, ticket):
+        if self.PRIOR is None:
+            return
+        require(ticket.get("prior_recovery_intent_sha256") == self.PRIOR, "continuation_prior_binding")
+        descriptor = os.open(self.directory / "recovery-intent.json", os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid()
+                    and stat.S_IMODE(info.st_mode) == 0o600, "continuation_prior_file")
+            prior = stream.read(MAX_FRAME + 1)
+        require(hashlib.sha256(prior).hexdigest() == self.PRIOR, "continuation_prior_changed")
+
+
+class DiagnosticsContinuationPermit(RecoveryPermit):
+    """Explicit single continuation after generation4's read-only DTO refusal."""
+    BEFORE, AFTER = "4", "5"
+    APPROVAL = "https://github.com/AlexBelous/gascity-kb/issues/208#issuecomment-6580272449"
+    PRIOR = "cfc37da1290b259c7070ab2a7d6cce7e7d2654654a088a94ad8af146d75cd679"
+    TICKET = "continuation-ticket.json"
+    INTENT = "continuation-intent.json"
+    DIAGNOSTICS = "continuation-diagnostics.json"
+    ADMISSION = "continuation-admission.json"
 
 
 class NativeCLI:
@@ -580,7 +616,7 @@ def main():
     import time
     city = "/home/dev/Projects/gascity-cloud"
     try:
-        require(sys.argv[1:] in ([], ["--recover-preclaim"]) and os.getuid() == 1000, "coordinator_invocation")
+        require(sys.argv[1:] in ([], ["--recover-preclaim"], ["--continue-diagnostics"]) and os.getuid() == 1000, "coordinator_invocation")
         recovering = bool(sys.argv[1:])
         profile = private_json(city + "/.gc/runtime/repairer-limited208/profile.json")
         require(type(profile) is dict and set(profile) == {"schema_version", "fixture_id", "gc_binary", "state_dir", "artifact", "accepted_base"} and profile["schema_version"] == 1, "profile_schema")
@@ -604,7 +640,8 @@ def main():
         verify_sops()
         queue.pin_check = verify_sops
         accepted = {**base, "incident_id": queue.fixture, "owner_session": session.sid, "generation_source": "native_session"}
-        permit = RecoveryPermit(profile["state_dir"], queue, profile["artifact"]["commit"]) if recovering else OncePermit(profile["state_dir"])
+        permit_type = DiagnosticsContinuationPermit if sys.argv[1:] == ["--continue-diagnostics"] else RecoveryPermit
+        permit = permit_type(profile["state_dir"], queue, profile["artifact"]["commit"]) if recovering else OncePermit(profile["state_dir"])
         coordinate(queue, permit, SSHTransport(), accepted)
         return 0
     except Exception as error:

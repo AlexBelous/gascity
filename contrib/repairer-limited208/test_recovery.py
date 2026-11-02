@@ -157,13 +157,13 @@ class OutputBoundaryTests(unittest.TestCase):
             self.assertEqual(rows[-1], dict(step="editor_status", exit_code=1, stdout_bytes=0, outcome="refused"))
 
 class NativeRecoveryPreflightTests(unittest.TestCase):
-    def queue(self, mutation=None):
+    def queue(self, mutation=None, generation="4"):
         import copy
         from coordinator import NativeQueue, Session
         sid = "gcg-534258985155672334"
         token = "fixture-only-token"
         fixture = "gc-hgpqk5"
-        state = dict(session=dict(id=sid, status="open", metadata=dict(state="awake", generation="4",
+        state = dict(session=dict(id=sid, status="open", metadata=dict(state="awake", generation=generation,
                      template="repairer-coordinator", instance_token=token,
                      agent_name="repairer-coordinator", session_name="s-fixture-runtime")),
                      work=dict(id=fixture, status="open", assignee="", metadata={"gc.routed_to":"repairer-coordinator"}, comments=[]),
@@ -190,9 +190,15 @@ class NativeRecoveryPreflightTests(unittest.TestCase):
                         {"commit":"4"*40,"branch":"fixture/approved","work_dir":"/fixture/source"})
         return q, calls
     def test_valid_preflight_is_read_only(self):
-        q, calls = self.queue()
-        self.assertEqual(q.recovery_preflight()["generation"], "4")
-        self.assertFalse(any("--claim" in args or args[:2] in (("bd","update"),("bd","comment")) for _,args in calls))
+        for generation in ("4", "5"):
+            with self.subTest(generation=generation):
+                q, calls = self.queue(generation=generation)
+                self.assertEqual(q.recovery_preflight(expected_generation=generation)["generation"], generation)
+                self.assertFalse(any("--claim" in args or args[:2] in (("bd","update"),("bd","comment")) for _,args in calls))
+        from coordinator import Hold
+        for actual, expected in (("4","5"),("5","4"),("6","6")):
+            q, _ = self.queue(generation=actual)
+            with self.assertRaises(Hold): q.recovery_preflight(expected_generation=expected)
     def test_native_show_omits_empty_comments(self):
         # Native890 + bd show --include-comments omits an empty comments field.
         # The independent bd comments endpoint returns [] for this fixture.
@@ -203,7 +209,7 @@ class NativeRecoveryPreflightTests(unittest.TestCase):
     def test_distinct_unsafe_states_fail_closed(self):
         from coordinator import Hold
         cases = {
-          "generation": lambda s:s["session"]["metadata"].update(generation="5"),
+          "generation": lambda s:s["session"]["metadata"].update(generation="6"),
           "incarnation": lambda s:s["session"]["metadata"].update(instance_token="other-token"),
           "claim": lambda s:s["session"]["metadata"].update(current_claim_bead_id="gc-other"),
           "work_claimed": lambda s:s["work"].update(status="in_progress",assignee="other"),
@@ -216,11 +222,12 @@ class NativeRecoveryPreflightTests(unittest.TestCase):
           "foreign_lease": lambda s:s.update(leases=[{"bd":"gc-hgpqk5","session_id":"other","stale":True}]),
           "live_lease": lambda s:s.update(leases=[{"bd":"gc-hgpqk5","session_id":"gcg-534258985155672334","stale":False}]),
         }
-        for label, mutation in cases.items():
-            with self.subTest(label=label):
-                q,calls = self.queue(mutation)
-                with self.assertRaises(Hold): q.recovery_preflight()
-                self.assertFalse(any("--claim" in args for _,args in calls))
+        for generation in ("4", "5"):
+            for label, mutation in cases.items():
+                with self.subTest(generation=generation, label=label):
+                    q,calls = self.queue(mutation,generation=generation)
+                    with self.assertRaises(Hold): q.recovery_preflight(expected_generation=generation)
+                    self.assertFalse(any("--claim" in args for _,args in calls))
 
 
 class ExactOutputTests(unittest.TestCase):
@@ -244,3 +251,97 @@ class ExactOutputTests(unittest.TestCase):
                     with self.assertRaises(Hold):
                         bounded_process(["unused"],{},payload,10,(0,))
                     spawn.assert_not_called()
+
+class DiagnosticsContinuationTests(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        from coordinator import Session, canonical
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name)
+        self.sid = "gcg-534258985155672334"
+        self.fixture = "gc-hgpqk5"
+        self.session = Session(self.sid, "new-fixture-token", "repairer-coordinator")
+        self.receipt = dict(incident_id=self.fixture, owner_session=self.sid, state="consumed_before_claim")
+        self.original = canonical(self.receipt).encode()
+        self.prior = b'{"generation":"4","incarnation_sha256":"57eb5808991bbd656f2d811ff2d67ffb80fb8838b4ba150eb771530eb5a64bbb","original_once_sha256":"82e30b462767ff1196760eec5e8677f530f2e7ea7089af8bf94870114503bc20","owner_session":"gcg-534258985155672334","schema_version":1,"source_sha":"3af5366c422fac869be884c98f922099e31c0ef0","ticket_sha256":"9dd2b617a8920f9db77bbdc9da2d1c953995eb2538ea37a959670f5255ad7a9f"}'
+        for name, raw in (("once.json", self.original), ("recovery-intent.json", self.prior)):
+            (self.path/name).write_bytes(raw); (self.path/name).chmod(0o600)
+        import coordinator
+        self.ticket = dict(schema_version=1, fixture_id=self.fixture, owner_session=self.sid,
+            generation_before="4", generation_after="5",
+            original_once_sha256=hashlib.sha256(self.original).hexdigest(),
+            prior_recovery_intent_sha256=hashlib.sha256(self.prior).hexdigest(),
+            source_sha="5"*40, coordinator_sha256=hashlib.sha256(Path(coordinator.__file__).read_bytes()).hexdigest(),
+            approval_url="https://github.com/AlexBelous/gascity-kb/issues/208#issuecomment-6580272449")
+        self.reads=[]
+        owner=self
+        class Queue:
+            session=owner.session
+            fixture=owner.fixture
+            def show(self, identity):
+                return dict(id=identity, status="open", metadata=dict(state="awake", template="repairer-coordinator", instance_token=self.session.token, generation="5"))
+            def recovery_preflight(self, expected_generation="4"):
+                owner.reads.append(expected_generation)
+                if expected_generation != "5": raise AssertionError("continuation must require generation5")
+        self.queue=Queue()
+        self.admitted=True
+    def loader(self, name):
+        import hashlib
+        from coordinator import canonical
+        if name=="continuation-ticket.json": return self.ticket
+        self.assertEqual(name,"continuation-admission.json")
+        if not self.admitted: raise FileNotFoundError(name)
+        raw=(self.path/"continuation-intent.json").read_bytes()
+        return dict(schema_version=1, ticket_sha256=hashlib.sha256(canonical(self.ticket).encode()).hexdigest(),
+            recovery_intent_sha256=hashlib.sha256(raw).hexdigest(), owner_session=self.sid,
+            generation="5", incarnation_sha256=hashlib.sha256(self.session.token.encode()).hexdigest(), source_sha="5"*40)
+    def permit(self, **kwargs):
+        from coordinator import DiagnosticsContinuationPermit
+        return DiagnosticsContinuationPermit(self.path,self.queue,"5"*40,root_loader=self.loader,**kwargs)
+    def test_one_continuation_preserves_both_consumed_receipts(self):
+        from coordinator import Hold
+        self.permit().reserve(self.receipt)
+        self.assertEqual(self.reads,["5","5"])
+        self.assertEqual((self.path/"once.json").read_bytes(),self.original)
+        self.assertEqual((self.path/"recovery-intent.json").read_bytes(),self.prior)
+        self.assertTrue((self.path/"continuation-diagnostics.json").exists())
+        with self.assertRaises(Hold): self.permit().reserve(self.receipt)
+        self.assertEqual(self.reads,["5","5"])
+    def test_prior_receipt_change_or_symlink_refuses_before_new_intent(self):
+        from coordinator import Hold
+        target=self.path/"recovery-intent.json"
+        target.write_bytes(self.prior+b" ")
+        with self.assertRaises(Hold): self.permit().reserve(self.receipt)
+        self.assertFalse((self.path/"continuation-intent.json").exists())
+        target.rename(self.path/"prior")
+        target.symlink_to(self.path/"prior")
+        with self.assertRaises((Hold,OSError)): self.permit().reserve(self.receipt)
+    def test_ticket_cannot_change_prior_scope_or_approval(self):
+        from coordinator import Hold
+        for key,value in (("prior_recovery_intent_sha256","0"*64),("generation_before","3"),
+                          ("generation_after","6"),("approval_url","unapproved")):
+            with self.subTest(key=key):
+                old=self.ticket[key];self.ticket[key]=value
+                with self.assertRaises(Hold): self.permit().reserve(self.receipt)
+                self.assertFalse((self.path/"continuation-intent.json").exists())
+                self.ticket[key]=old
+    def test_missing_admission_retains_new_intent_without_claim(self):
+        from coordinator import Hold
+        self.admitted=False;clock=[0]
+        def sleep(s): clock[0]+=s
+        with self.assertRaises(Hold):
+            self.permit(clock=lambda:clock[0],sleep=sleep,admission_seconds=2).reserve(self.receipt)
+        self.assertEqual(self.reads,["5"])
+        self.assertTrue((self.path/"continuation-intent.json").exists())
+    def test_prior_receipt_changed_during_admission_is_refused(self):
+        from coordinator import Hold
+        normal=self.loader
+        def changed(name):
+            result=normal(name)
+            if name=="continuation-admission.json":
+                (self.path/"recovery-intent.json").write_bytes(self.prior+b" ")
+            return result
+        permit=self.permit();permit.root_loader=changed
+        with self.assertRaises(Hold):permit.reserve(self.receipt)
+        self.assertEqual(self.reads,["5"])

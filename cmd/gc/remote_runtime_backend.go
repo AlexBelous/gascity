@@ -94,6 +94,17 @@ func composeLoadedOperatorRemoteRuntimeRouting(ctx sessionProviderContext, local
 		}
 		return binding, nil
 	}
+	desired := map[string]runtime.RuntimeBinding{}
+	for _, agent := range ctx.agents {
+		if agent.Runtime == "" {
+			continue
+		}
+		binding, err := resolver(ctx.cfg, agent)
+		if err != nil {
+			return nil, err
+		}
+		desired[agent.QualifiedName()] = binding
+	}
 	factory := func(binding runtime.RuntimeBinding) (runtime.Provider, error) {
 		profile, ok := selected[binding]
 		if !ok {
@@ -118,12 +129,6 @@ func composeLoadedOperatorRemoteRuntimeRouting(ctx sessionProviderContext, local
 	router, ok := composed.(*routing.Provider)
 	if !ok {
 		return composed, nil
-	}
-	desired := map[string]runtime.RuntimeBinding{}
-	for _, agent := range ctx.agents {
-		if binding, ok := selectors[agent.Runtime]; ok && selected[binding].Template == agent.QualifiedName() {
-			desired[agent.QualifiedName()] = binding
-		}
 	}
 	return &operatorRemoteProvider{Provider: router, store: store, profiles: registrations, clients: clients, desiredByTemplate: desired}, nil
 }

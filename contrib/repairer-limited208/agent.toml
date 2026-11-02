@@ -1,0 +1,14 @@
+# Installed only after independent review; existing repairer-pilot stays suspended.
+start_command = "/usr/bin/python3 -I -B /home/dev/Projects/gascity-cloud/tools/repairer-limited208/coordinator.py"
+prompt_mode = "none"
+process_names = ["python3"]
+ready_delay_ms = 0
+scope = "city"
+work_dir = ".gc/agents/repairer-coordinator"
+lifecycle = "one_shot"
+min_active_sessions = 0
+max_active_sessions = 1
+idle_timeout = "0s"
+max_session_age = "0s"
+max_session_age_jitter = "0s"
+suspended = true

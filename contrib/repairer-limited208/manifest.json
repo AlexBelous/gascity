@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "issue": "https://github.com/AlexBelous/gascity-kb/issues/208",
+  "native_source": "890c59dc0a1cd9be4149113b32a63f34eca7a189",
+  "template": "repairer-coordinator",
+  "runtime_owner_host": "gastown-vps",
+  "runtime_owner_uid": 1000,
+  "executor_host": "vm328699",
+  "executor_uid": 988,
+  "transport_uid": 987,
+  "model_starts_lifetime_max": 1,
+  "profile_path": "/home/dev/Projects/gascity-cloud/.gc/runtime/repairer-limited208/profile.json",
+  "wire_version": 1,
+  "original_commands": [
+    "repairer-limited208 status",
+    "repairer-limited208 run"
+  ],
+  "stdin": "empty",
+  "files": [
+    "coordinator.py",
+    "agent.toml",
+    "README.md",
+    "manifest.json"
+  ],
+  "activation": "suspended; not installed",
+  "recovery": {
+    "mode": "root-approved-single-preclaim",
+    "fixture_id": "gc-hgpqk5",
+    "owner_session": "gcg-534258985155672334",
+    "generation_before": "3",
+    "generation_after": "4",
+    "ticket_root": "/etc/gascity/repairer-limited208-recovery",
+    "model_starts_lifetime_max": 1
+  }
+}

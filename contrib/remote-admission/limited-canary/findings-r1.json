@@ -1,0 +1,48 @@
+{
+  "scope": "limited finite VM source adapter; no deployment",
+  "findings": [
+    {
+      "id": "ROOT-C1",
+      "finding": "Accepted shape uses sop_pins, not sop_sha256",
+      "resolution": "real coordinator-shaped constructor regression and exact3pin comparison"
+    },
+    {
+      "id": "ROOT-C2",
+      "finding": "helper resource key runtime_max_seconds",
+      "resolution": "real helper.Profile constructor and exact model resource DATA"
+    },
+    {
+      "id": "ROOT-C3",
+      "finding": "fixture still active after model exit must not prematurely hold coordinator",
+      "resolution": "bounded exact-owned natural-cycle running state"
+    },
+    {
+      "id": "ROOT-C4",
+      "finding": "socket parent0700 prevents model traverse",
+      "resolution": "separate exact root:9820710/0750 check, private data dirs unchanged"
+    },
+    {
+      "id": "ROOT-C5",
+      "finding": "RUN must establish native server socket readiness",
+      "resolution": "root server PID/cgroup/socketFD gate before intent"
+    },
+    {
+      "id": "ROOT-C6",
+      "finding": "PID1 terminal ControlGroup may be empty",
+      "resolution": "terminal allows empty or captured group; captured group independently emptiness checked"
+    },
+    {
+      "id": "TEST-C1",
+      "finding": "initial lost-response test expected exception, but client intentionally returns1",
+      "resolution": "test corrected to assert1 and exactly one restart request; no production bug or fabricated test-first claim"
+    }
+  ],
+  "limits": [
+    "No native/root effects or model invocation",
+    "Full root publication and actual endpoint/action/queue acceptance pending independent review and parent execution"
+  ],
+  "execution_notes": [
+    "First wrapper pipeline status check failed after22purePASS; no production failure; corrected wrapper uses set-e/pipefail.",
+    "First existing114 baseline hit protected host007 profile; test-only previously reviewed RO empty-profile namespace rerun114PASS; host profile unchanged."
+  ]
+}

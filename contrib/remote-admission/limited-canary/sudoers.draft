@@ -1,0 +1,2 @@
+# DATA ONLY; root visudo/readback required before grant.
+repairer-transport ALL=(root) NOPASSWD: NOSETENV: /usr/local/libexec/gascity/repairer-limited208 status, /usr/local/libexec/gascity/repairer-limited208 run

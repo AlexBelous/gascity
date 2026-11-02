@@ -592,3 +592,37 @@ func TestOperatorRemoteBackendPinsOptionalCityBeforeEffects(t *testing.T) {
 		})
 	}
 }
+
+func TestOperatorRemoteBackendRejectsUnregisteredConfiguredRoute(t *testing.T) {
+	for _, kind := range []string{"missing-policy", "wrong-template", "wrong-selector"} {
+		t.Run(kind, func(t *testing.T) {
+			profile, store, _, providerCtx := remoteBackendFixture(t)
+			profiles := []remoteOperatorProfile{profile}
+			switch kind {
+			case "missing-policy":
+				profiles = nil
+			case "wrong-template":
+				profiles[0].Template = "other-worker"
+			case "wrong-selector":
+				profiles[0].Binding.Selector = "ssh:other@192.0.2.2"
+				profiles[0].Binding.Endpoint = "other@192.0.2.2"
+			}
+			calls := 0
+			execute := func(context.Context, []string, []byte) ([]byte, error) {
+				calls++
+				return nil, context.DeadlineExceeded
+			}
+			got, err := composeLoadedOperatorRemoteRuntimeRouting(providerCtx, runtime.NewFake(), store, remoteOperatorProfiles{Version: 1, Profiles: profiles}, execute, nil)
+			if err == nil || got != nil || !strings.Contains(err.Error(), "no trusted operator policy") {
+				t.Fatalf("unregistered configured route accepted during composition: provider=%T error=%v", got, err)
+			}
+			if calls != 0 {
+				t.Fatalf("policy refusal called remote authority %d times", calls)
+			}
+			pins, err := store.RuntimeBindings()
+			if err != nil || len(pins) != 0 {
+				t.Fatalf("policy refusal changed session bindings: %v %v", pins, err)
+			}
+		})
+	}
+}

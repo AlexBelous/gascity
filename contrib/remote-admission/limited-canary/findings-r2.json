@@ -1,0 +1,53 @@
+{
+  "scope": "C narrow R2 source-only, no native/root installation/model effects",
+  "r1_archive": "/srv/gc-build/logs/repairer-limited208-vm-r1-preserved",
+  "findings": [
+    {
+      "id": "LIMITEDVM-SEC-1",
+      "resolution": "Exact native peer + existing queue_observe repeated INSIDE physical flock and again after durable intent immediately before systemctl.",
+      "tests": "lockwait drift zeroeffect; three fresh proofs; concurrent oneeffect"
+    },
+    {
+      "id": "LIMITEDVM-SEC-2",
+      "resolution": "Fixed effective loaded envelope/no drop-ins/hooks/stale reload; exact sleep90 argv; initial fixed kernel cgroup empty before durable effect.",
+      "tests": "loaded override/hook negative matrix; occupied scope zeroeffect"
+    },
+    {
+      "id": "FINITE-TEST-1",
+      "resolution": "Actual callback observes intent before effect; action fsync failure zeroeffect; orphanactive/lostreply/postcheck failure no replay; concurrent results joined.",
+      "tests": "R2 actual realtemp Canary.action tests"
+    },
+    {
+      "id": "FINITE-TEST-2",
+      "resolution": "Real helper.Profile constructor uses existing helper fixture, wrong/missing SOPs/nonstring generation/mismatched native witness fail before observe/enter.",
+      "tests": "five constructor negative variants"
+    },
+    {
+      "id": "LIMITEDVM-CODE-terminal",
+      "resolution": "300s action service retains exact model+fixture unit ordering refs, no Wants/Requires. Complete context-bound root0600 fsynced terminal evidence backs public digest; later STATUS after PID1 GC revalidates same fresh model parent + fixed sensor.",
+      "tests": "receipt-backed native-GC projection and changed parent refusal; terminal sink fsync/overwrite negatives"
+    },
+    {
+      "id": "LIMITEDVM-DATA-entry",
+      "resolution": "Public immutable adapter0555 isolated Python shebang; helper0400; exact two sudoers commands; no serve grant.",
+      "tests": "rootcaller and exactdispatch tests; root installation not performed"
+    },
+    {
+      "id": "LIMITEDVM-diagnosis",
+      "resolution": "Literal client status and restart. Safe fresh fixedfixture diagnosis schema; restart validates same-unit inactivePID0 before exactly one effect request.",
+      "tests": "wrongtarget/active/malformed baseline no restart; lost reply no retry"
+    }
+  ],
+  "execution": {
+    "r2_red2": "4 behavior failures + missing new receipt path against oldsource; earlier mock-missing-API RED1 retained honestly",
+    "final": "35purePASS0.121s +114helperPASS1.381s; compile/tabnanny/whitespacePASS",
+    "unit": "gc-limited-pure-fa7672d8.service",
+    "namespace": "UID990 V2 pure lane; readonly absent-profile bind only inside testunit; host007 untouched"
+  },
+  "limits": [
+    "Formal R2 review pending",
+    "No actual endpoint/action/Codex/queue/native acceptance",
+    "No source commit/root publication/keygrant/service start",
+    "RUN total<=15s not guaranteed; finite transport timeout separately coordinated"
+  ]
+}

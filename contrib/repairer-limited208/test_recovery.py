@@ -193,6 +193,13 @@ class NativeRecoveryPreflightTests(unittest.TestCase):
         q, calls = self.queue()
         self.assertEqual(q.recovery_preflight()["generation"], "4")
         self.assertFalse(any("--claim" in args or args[:2] in (("bd","update"),("bd","comment")) for _,args in calls))
+    def test_native_show_omits_empty_comments(self):
+        # Native890 + bd show --include-comments omits an empty comments field.
+        # The independent bd comments endpoint returns [] for this fixture.
+        q, calls = self.queue(lambda state: state["work"].pop("comments"))
+        self.assertEqual(q.recovery_preflight()["generation"], "4")
+        self.assertFalse(any("--claim" in args for _, args in calls))
+
     def test_distinct_unsafe_states_fail_closed(self):
         from coordinator import Hold
         cases = {
@@ -202,6 +209,7 @@ class NativeRecoveryPreflightTests(unittest.TestCase):
           "work_claimed": lambda s:s["work"].update(status="in_progress",assignee="other"),
           "accepted": lambda s:s["work"]["metadata"].update({"repairer.accepted_sha256":"a"*64}),
           "comments": lambda s:s["work"].update(comments=[{"text":"changed"}]),
+          "null_comments": lambda s:s["work"].update(comments=None),
           "extra_ready": lambda s:s.update(extra_ready=True),
           "assigned_sid": lambda s:s.update(assigned="gcg-534258985155672334"),
           "assigned_runtime": lambda s:s.update(assigned="s-fixture-runtime"),

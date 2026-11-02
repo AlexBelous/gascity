@@ -191,7 +191,8 @@ After native gen4 exists, the same actor validates its real token against the
 canonical session, preserves original once, and O_EXCL/fsync creates
 recovery-intent.json before its read-only reconciliation. recovery_preflight
 checks canonical current_claim_bead_id, open/unassigned work with no Accepted
-or comments, SID/runtime-name/alias assigned tiers, singleton routed Ready and
+or comments (native show may omit an empty comments field; explicit null is
+refused), SID/runtime-name/alias assigned tiers, singleton routed Ready and
 absent or stale own editor lease. It never grants on hook-current exit1 alone.
 
 The actor publishes private recovery-diagnostics.json with exact

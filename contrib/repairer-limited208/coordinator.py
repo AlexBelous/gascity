@@ -155,7 +155,7 @@ class NativeQueue:
         require(row.get("status") == "open" and not row.get("assignee")
                 and info.get("gc.routed_to") == "repairer-coordinator"
                 and not info.get("gc.session_id") and not info.get("repairer.accepted_sha256")
-                and row.get("comments") == [], "recovery_work_changed")
+                and row.get("comments", []) == [], "recovery_work_changed")
         handle = metadata.get("session_name", "")
         require(type(handle) is str and ID.fullmatch(handle) is not None, "recovery_runtime_name")
         identity_args = tuple(item for identity in (self.session.sid, handle, "repairer-coordinator")

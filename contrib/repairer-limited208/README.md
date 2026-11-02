@@ -61,7 +61,8 @@ Drift during readiness holds with no RUN. READY received at/after its fixed
 monotonic deadline is refused.
 
 The local durable O_EXCL/fsync once.json is consumed BEFORE claim. Existing,
-partial or symlink receipt means hold forever; do not delete it to retry.
+partial or symlink receipt means hold; do not delete it to retry. The sole
+explicit recovery exception below requires a separately approved root ticket.
 Read-only native `gc hook --json` discovery must yield exactly the configured
 fixture before the first claim. Native hook claim/current must identify the configured fixture and canonical
 assignee/gc.session_id. Actual gt-bd status must prove same nonempty SID, same
@@ -154,3 +155,64 @@ plus entry observation15s and finite prechecks/SSH overhead. STATUS stays15s
 (or the smaller remaining readiness budget). Overall reconciliation is still240s
 measured before RUN; readiness120s, model120s, lifetime cap1 and no reRUN remain
 unchanged. This does not introduce an asynchronous RUN protocol.
+
+
+## Approved one-time preclaim recovery (issue208 only)
+
+BAA approved this exception on2026-11-02:
+https://github.com/AlexBelous/gascity-kb/issues/208#issuecomment-6576966510 .
+It is limited to gc-hgpqk5 and existing SID gcg-534258985155672334, real native
+generation3 ->4. Original once SHA256
+82e30b462767ff1196760eec5e8677f530f2e7ea7089af8bf94870114503bc20 is retained.
+There is no second recovery, new owner, new fixture or additional model budget.
+
+The reviewed runtime start command prepends /usr/bin/env -u GT_PROCESS_NAMES
+before the existing python3 -I -B coordinator.py command and adds the sole
+--recover-preclaim flag. Keep process_names=[python3] in the manager; preserve
+GC identity and all other editor guards. SDK's benign process hint must not
+be confused with selecting a different editor authority.
+
+Root, before waking the same SID, stops and positively verifies exit of the old
+generation3 actor, proves there is no other owner and reconciles the old editor
+lease through its ordinary protocol. Lease expiry alone is not proof of death.
+Root verifies unchanged original once, no current canonical claim/Accepted,
+and VM current=null/attempts={} with no context/RUN/action intent. Unknown is hold.
+
+Root-owned non-symlink ancestors at /etc/gascity/repairer-limited208-recovery
+contain immutable ticket.json and later admission.json; neither is supplied
+by the model/coordinator. Files are root-owned0444, parent0755 (public metadata,
+no raw incarnation token). Ticket exact fields:
+schema_version=1, fixture_id, owner_session, generation_before="3",
+generation_after="4", original_once_sha256, source_sha (published artifact),
+coordinator_sha256 (delivered bytes), approval_url (the exact BAA record above).
+Source and scope are checked before any recovery claim.
+
+After native gen4 exists, the same actor validates its real token against the
+canonical session, preserves original once, and O_EXCL/fsync creates
+recovery-intent.json before its read-only reconciliation. recovery_preflight
+checks canonical current_claim_bead_id, open/unassigned work with no Accepted
+or comments, SID/runtime-name/alias assigned tiers, singleton routed Ready and
+absent or stale own editor lease. It never grants on hook-current exit1 alone.
+
+The actor publishes private recovery-diagnostics.json with exact
+schema_version, ticket_sha256, recovery_intent_sha256, owner_session, generation,
+incarnation_sha256 and source_sha, then waits at most120s for root admission.
+Root independently verifies same sole gen4 actor/process, canonical work/session,
+lease reconciliation and VM no-consumption state again, and reads the fixed-name
+step journal (no unfiltered stdout/stderr). Only then root writes admission.json
+with exactly that metadata. The actor checks the binding and repeats the entire
+read-only preflight before existing native claim -> Accepted -> root witness ->
+one RUN -> result/close/drain. Any failure retains both receipts and hold.
+
+recovery-steps.jsonl records fixed command-step names, exit codes, stdout byte
+counts and bounded outcome categories. It never records argv, stderr, env,
+payload, raw tokens or model output. Native stdout is pipe-bounded to64KiB;
+native persistence files are not constrained by an inherited RLIMIT_FSIZE.
+Timeout/overflow kills only that invocation's direct child, never shared
+services; an unknown mutation is never repeated.
+
+This source delivery is not execution or acceptance. Root profile/source/SOP
+pins must be republished together after reviews, owning tests, normal hooks
+and source publication. Existing CI binary-size and Dolt-leak failures have
+separate baseline proof (run39647661810, tree equal to432338a7); they are not
+green results and the guards are not weakened.

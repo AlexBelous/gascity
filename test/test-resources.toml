@@ -261,6 +261,17 @@ migration_target = "P0.4b"
 expires = "2026-12-31"
 
 [[medium]]
+package_dir = "examples/bd"
+package_name = "bd"
+owner = "TestBdFreshInitMigrationFlagFence"
+resources = ["subprocess"]
+owner_bead = "gs-fork32-20261128.1"
+invariant = "the verified-empty init fence is exercised by an isolated shell"
+resource_owner = "the test executes the extracted provider function with test-owned temporary files and stubs"
+migration_target = "fork main reconciliation"
+expires = "2026-12-31"
+
+[[medium]]
 package_dir = "internal/api/apierr"
 package_name = "apierr"
 owner = "TestEveryEmittedErrorCodeIsRegistered"

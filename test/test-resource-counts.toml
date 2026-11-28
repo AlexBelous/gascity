@@ -1697,6 +1697,12 @@ resource = "subprocess"
 calls = 28
 
 [[count]]
+path = "examples/bd/fresh_init_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
 path = "examples/gastown/bind_key_script_test.go"
 resource = "subprocess"
 calls = 2

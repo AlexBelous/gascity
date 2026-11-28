@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -748,4 +750,49 @@ func makeTreeWritable(root string) {
 		}
 		return nil
 	})
+}
+
+// The tagged-module origin check runs on a GitHub-hosted runner and is a
+// hard dependency of both required verdicts, including on deps.env-only PRs.
+func TestRequiredCICarriesBeadsOriginVerification(t *testing.T) {
+	root := repoRoot(t)
+	var workflow struct {
+		Jobs map[string]struct {
+			If     string        `yaml:"if"`
+			RunsOn string        `yaml:"runs-on"`
+			Needs  yaml.Node     `yaml:"needs"`
+			Steps  []goFetchStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".github/workflows/ci.yml")), &workflow); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := workflow.Jobs["beads-origin"]
+	if !ok || job.If != "" || job.RunsOn != "ubuntu-latest" {
+		t.Fatalf("beads-origin must run unconditionally on ubuntu-latest: %+v", job)
+	}
+	found := false
+	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "scripts/check-embedded-pins --origin-only") && step.If == "" && step.ContinueOnError == "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("beads-origin must run the check without skip or continue-on-error")
+	}
+	for _, name := range []string{"check", "ci-required"} {
+		gate := workflow.Jobs[name]
+		var needs []string
+		if err := gate.Needs.Decode(&needs); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(needs, "beads-origin") {
+			t.Errorf("%s does not require beads-origin", name)
+		}
+		for _, step := range gate.Steps {
+			if regexp.MustCompile(`["']beads-origin["']`).MatchString(step.Run) {
+				t.Errorf("%s must not allow skipping the origin check", name)
+			}
+		}
+	}
 }

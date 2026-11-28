@@ -32,7 +32,9 @@ func newEmbeddedPinsFixture(t *testing.T) *embeddedPinsFixture {
 	f.write("internal/bootstrap/packs/core/pack.toml", "[pack]\nname = \"core\"\n")
 	f.write("examples/bd/pack.toml", "[pack]\nname = \"bd\"\n")
 	f.write("examples/bd/dolt/pack.toml", "[pack]\nname = \"dolt\"\n")
-	f.write("deps.env", "DOLT_VERSION=2.2.0\nBD_VERSION=v1.3.1\n")
+	f.write("deps.env", "DOLT_VERSION=2.2.0\nBD_VERSION=v1.3.1\nBD_CURRENT_VERSION=v1.3.1\nBD_CURRENT_REF=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+	f.write("origin.json", `{"Version":"v1.3.1","Origin":{"Hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}`)
+	f.write("go.mod", "module github.com/gastownhall/gascity\nrequire (\n github.com/steveyegge/beads v1.3.1\n)\n")
 	f.writePublicPacks("sha:" + strings.Repeat("0", 40))
 	contentCommit := f.commit("bundled content")
 	f.writePublicPacks("sha:" + contentCommit)
@@ -93,7 +95,7 @@ func (f *embeddedPinsFixture) commit(msg string) string {
 func (f *embeddedPinsFixture) run(args ...string) (string, error) {
 	f.t.Helper()
 	script := filepath.Join(repoRoot(f.t), "scripts", "check-embedded-pins")
-	cmd := exec.Command(script, append([]string{"--repo-root", f.root, "--latest-bd", "v1.3.1", "--bd-qualified-dolt", "2.2.0"}, args...)...)
+	cmd := exec.Command(script, append([]string{"--repo-root", f.root, "--latest-bd", "v1.3.1", "--bd-qualified-dolt", "2.2.0", "--bd-origin-info", filepath.Join(f.root, "origin.json")}, args...)...)
 	cmd.Env = f.env
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -105,6 +107,14 @@ func (f *embeddedPinsFixture) run(args ...string) (string, error) {
 // not carry a superseded bundled pin, bd must match the latest beads release,
 // and Dolt must be at least the version that release qualifies.
 func TestCheckEmbeddedPins(t *testing.T) {
+	t.Run("tagged origin mismatch fails", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		f.write("origin.json", `{"Version":"v1.3.1","Origin":{"Hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`)
+		out, err := f.run("--skip-bundled")
+		if err == nil || !strings.Contains(out, "differs from BD_CURRENT_REF") {
+			t.Fatalf("origin mismatch accepted: %v\n%s", err, out)
+		}
+	})
 	t.Run("current pins pass", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
 		if out, err := f.run(); err != nil {
@@ -142,13 +152,13 @@ func TestCheckEmbeddedPins(t *testing.T) {
 	t.Run("newer beads release is advisory with --bd-advisory", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
 		script := filepath.Join(repoRoot(t), "scripts", "check-embedded-pins")
-		cmd := exec.Command(script, "--repo-root", f.root, "--skip-bundled", "--latest-bd", "v1.3.2", "--bd-qualified-dolt", "2.2.0", "--bd-advisory")
+		cmd := exec.Command(script, "--repo-root", f.root, "--skip-bundled", "--latest-bd", "v1.3.2", "--bd-qualified-dolt", "2.2.0", "--bd-origin-info", filepath.Join(f.root, "origin.json"), "--bd-advisory")
 		cmd.Env = f.env
 		out, err := cmd.CombinedOutput()
 		if err != nil || !strings.Contains(string(out), "::warning title=bd pin behind latest beads release::") {
 			t.Fatalf("err = %v, want a passing run with a bd warning:\n%s", err, out)
 		}
-		cmd = exec.Command(script, "--repo-root", f.root, "--skip-bundled", "--latest-bd", "v1.3.2", "--bd-qualified-dolt", "2.2.0")
+		cmd = exec.Command(script, "--repo-root", f.root, "--skip-bundled", "--latest-bd", "v1.3.2", "--bd-qualified-dolt", "2.2.0", "--bd-origin-info", filepath.Join(f.root, "origin.json"))
 		cmd.Env = f.env
 		if out, err := cmd.CombinedOutput(); err == nil {
 			t.Fatalf("strict mode passed with bd behind the latest release:\n%s", out)
@@ -177,7 +187,7 @@ func TestCheckEmbeddedPins(t *testing.T) {
 
 	t.Run("bd and dolt behind the latest release", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
-		f.write("deps.env", "DOLT_VERSION=2.1.7\nBD_VERSION=v1.3.0\n")
+		f.write("deps.env", "DOLT_VERSION=2.1.7\nBD_VERSION=v1.3.0\nBD_CURRENT_VERSION=v1.3.1\nBD_CURRENT_REF=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 		f.commit("old deps")
 		out, err := f.run("--skip-bundled")
 		if err == nil {
@@ -194,7 +204,7 @@ func TestCheckEmbeddedPins(t *testing.T) {
 	// beads qualifies: deps.env pins 2.6.0 while beads v1.3.4 qualifies 2.2.0.
 	t.Run("a Dolt newer than beads qualifies passes", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
-		f.write("deps.env", "DOLT_VERSION=2.6.0\nBD_VERSION=v1.3.1\n")
+		f.write("deps.env", "DOLT_VERSION=2.6.0\nBD_VERSION=v1.3.1\nBD_CURRENT_VERSION=v1.3.1\nBD_CURRENT_REF=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 		f.commit("newer dolt")
 		if out, err := f.run("--skip-bundled"); err != nil {
 			t.Fatalf("a Dolt above the qualified 2.2.0 failed: %v\n%s", err, out)
@@ -203,7 +213,7 @@ func TestCheckEmbeddedPins(t *testing.T) {
 
 	t.Run("a Dolt that is not a release version fails", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
-		f.write("deps.env", "DOLT_VERSION=2.6.0-rc1\nBD_VERSION=v1.3.1\n")
+		f.write("deps.env", "DOLT_VERSION=2.6.0-rc1\nBD_VERSION=v1.3.1\nBD_CURRENT_VERSION=v1.3.1\nBD_CURRENT_REF=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 		f.commit("pre-release dolt")
 		out, err := f.run("--skip-bundled")
 		if err == nil || !strings.Contains(out, "DOLT_VERSION=2.6.0-rc1 is not a release version") {

@@ -173,6 +173,23 @@ jobs:
       - name: Test Windows Job Object descendant cleanup
         run: go test -tags=integration -count=1 ./internal/credentialprovider -run '^TestCredentialProviderWindowsJob' -timeout=45s
 
+  # The module tag and source build pin must identify the same commit on every
+  # PR and push, including a change to deps.env alone. This runs on a public
+  # GitHub-hosted runner independently of the other runner-policy jobs.
+  beads-origin:
+    name: Beads / tagged module origin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ./.github/actions/go-mod-download
+      - name: Verify beads tag origin
+        run: scripts/check-embedded-pins --origin-only
+
   # The Windows lane: rbe-west builds for Linux only, so these GOOS
   # cross-compiles run here. Each list under .github/windows-lane/ is an
   # allowlist of packages that pass; a package joins it in the PR that makes
@@ -277,6 +294,7 @@ jobs:
     name: Check
     needs:
       - runner-policy
+      - beads-origin
       # `changes` is a hard dependency so a filter-job flake fails Check
       # directly.
       - changes
@@ -328,6 +346,7 @@ jobs:
     name: CI / required
     needs:
       - runner-policy
+      - beads-origin
       - changes
       - check
       - credential-provider-windows

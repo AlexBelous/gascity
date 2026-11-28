@@ -269,6 +269,7 @@ const (
 	ModelMetadataKey                    = "gc.model"
 	NativeStepDependenciesMetadataKey   = "gc.native_step_dependencies.v1"
 	NextAttemptMetadataKey              = "gc.next_attempt"
+	NextOwnerMetadataKey                = "gc.next_owner"
 	OnExhaustedMetadataKey              = "gc.on_exhausted"
 	OnFailMetadataKey                   = "gc.on_fail"
 	OriginalKindMetadataKey             = "gc.original_kind"
@@ -728,6 +729,7 @@ var KnownMetadataKeys = []string{
 	ModelMetadataKey,
 	NativeStepDependenciesMetadataKey,
 	NextAttemptMetadataKey,
+	NextOwnerMetadataKey,
 	OnExhaustedMetadataKey,
 	OnFailMetadataKey,
 	OriginalKindMetadataKey,

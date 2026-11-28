@@ -24,6 +24,7 @@ func bdBlockerPatch(bdArgs []string) (map[string]string, bool, error) {
 		return nil, false, nil
 	}
 	patch := map[string]string{}
+	nonString := map[string]bool{}
 	valueFlags := bdflags.ValueFlags(verb)
 	metadataForms := map[string]bool{}
 	unsetTyped := false
@@ -71,17 +72,29 @@ func bdBlockerPatch(bdArgs []string) (map[string]string, bool, error) {
 		if strings.HasPrefix(value, "@") {
 			return nil, true, fmt.Errorf("--metadata @file cannot be checked atomically before write; pass inline JSON")
 		}
-		var values map[string]string
+		// bd accepts arbitrary JSON values; only a blocker write needs every
+		// value to be a string the validator can see unchanged.
+		var values map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(value), &values); err != nil {
 			return nil, false, fmt.Errorf("malformed --metadata: %w", err)
 		}
-		for key, v := range values {
+		for key, raw := range values {
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				nonString[key] = true
+				continue
+			}
 			patch[key] = v
 		}
 	}
 	_, hasText := patch[beadmeta.BlockedOnMetadataKey]
 	_, hasTyped := patch[beadmeta.BlockerV2MetadataKey]
+	hasText = hasText || nonString[beadmeta.BlockedOnMetadataKey]
+	hasTyped = hasTyped || nonString[beadmeta.BlockerV2MetadataKey]
 	touched := hasText || hasTyped || unsetText || unsetTyped
+	if touched && len(nonString) > 0 {
+		return nil, true, fmt.Errorf("blocker write requires string metadata values")
+	}
 	if unsetText || unsetTyped {
 		return nil, true, fmt.Errorf("blocker removal requires an evidence-backed reconciliation writer; gc bd --unset-metadata cannot validate release")
 	}

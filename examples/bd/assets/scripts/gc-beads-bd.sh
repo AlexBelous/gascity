@@ -4688,12 +4688,9 @@ op_init() {
                             die "database '$dolt_database' has a schema_migrations cursor in progress but it never settled; refusing to force-reinitialize (data-safety). this means a concurrent initializer is still migrating '$dolt_database', or a previous migration crashed mid-way. a forced reinit cannot succeed here -- beads refuses to auto-apply pending migrations to a database with existing history -- and would only corrupt the store further. wait for the concurrent init to finish, or inspect the stalled migration with 'bd dolt status' before retrying."
                         fi
                     else
-                        # Undetermined: the table count never answered, so there is
-                        # no evidence either way. Keep the pre-existing behaviour
-                        # rather than inventing a new way for init to fail, but say
-                        # so, because this is the one path that still reinitializes
-                        # on an unverified negative.
-                        echo "warning: could not determine whether '$dolt_database' holds bd tables; reinitializing on an unverified schema probe" >&2
+                        # An unanswered table/cursor/history probe does not prove
+                        # the database empty and cannot license a heal or init.
+                        die "could not determine whether database '$dolt_database' holds bd tables; refusing to initialize or reset (data-safety). retry when the database probes answer reliably."
                     fi
                 fi
             fi
@@ -4722,6 +4719,14 @@ op_init() {
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
                 ensure_project_identity "$dir"
+                # A prior fresh init may have verified schema/identity and
+                # published .local_version, then failed its first bd ready.
+                # Never report this schema-ready early exit as healthy until
+                # that exact store reopens. No migration authority is granted.
+                if [ -f "$dir/.beads/.local_version" ]; then
+                    BEADS_DOLT_SHARED_SERVER=1 run_bd_pinned "$dir" ready >/dev/null \
+                        || die "database $dolt_database has schema but bd cannot reopen; validated version witness retained for retry"
+                fi
                 exit 0
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
@@ -4816,9 +4821,7 @@ op_init() {
             else
                 die "database '$dolt_database' now has a schema_migrations cursor in progress that was not there moments ago; refusing to force-reinitialize (data-safety). a concurrent initializer started migrating '$dolt_database' between the freshness check and this forced reinit, and beads refuses to auto-apply pending migrations to a database with existing history. wait for the concurrent init to finish, or inspect the migration with 'bd dolt status' before retrying."
             fi
-        elif [ "$reinit_still_empty" -eq 2 ]; then
-            echo "warning: could not confirm '$dolt_database' is still empty immediately before forcing; proceeding on the earlier classification" >&2
-        else
+        elif [ "$reinit_still_empty" -eq 1 ]; then
             # reinit_still_empty == 1: freshly reconfirmed genuinely empty --
             # no bd tables, no schema_migrations history at all, not merely
             # "not yet visible". Route the fall-through init through the
@@ -4827,6 +4830,8 @@ op_init() {
             # nothing to protect here and what it breaks instead
             # (ga-k8l7y9, ga-h8haz6).
             bd_init_over_verified_empty=true
+        else
+            die "could not confirm database '$dolt_database' is still empty under the init lock; refusing to initialize or force-reinitialize (data-safety). retry when the database probes answer reliably."
         fi
     fi
 
@@ -4899,7 +4904,12 @@ op_init() {
     # compatibility state for raw bd operations, not a second GC authority.
     ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
 
+    normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
     ensure_project_identity "$dir"
+    if [ "$bd_init_over_verified_empty" = true ]; then
+        run_bd_pinned "$dir" ready >/dev/null \
+            || die "database $dolt_database could not reopen after verified-empty init; version witness retained for retry"
+    fi
 
     # Drop orphan database created by bd init (upstream gt-sv1h) only after
     # the pinned database schema is visible. Some bd builds appear to stage

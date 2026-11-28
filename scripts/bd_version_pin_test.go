@@ -55,9 +55,8 @@ func TestBDVersionPins(t *testing.T) {
 	// The pin takes one of two shapes and both are checked, because upstream
 	// alternates between them: a pseudo-version, whose embedded 12-char commit
 	// must be BD_CURRENT_REF; or an exact release/prerelease tag, which must be
-	// BD_CURRENT_VERSION verbatim (BD_CURRENT_REF is then that tag's commit, which
-	// only the network could confirm -- the same trust boundary the pseudo-version
-	// form already had for its timestamp).
+	// BD_CURRENT_VERSION verbatim; the required CI origin job separately checks
+	// that tag's recorded commit against BD_CURRENT_REF.
 	goMod := readFile(t, root, "go.mod")
 	goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+(v\S+)\s*$`).FindStringSubmatch(goMod)
 	if goModMatch == nil {
@@ -98,6 +97,8 @@ func TestBDVersionPins(t *testing.T) {
 	if !strings.Contains(dockerfile, "ARG BD_BUILD="+bdCurrentRef[:10]) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_BUILD must equal the first 10 characters of BD_CURRENT_REF (%s)", bdCurrentRef[:10])
 	}
+	// scripts/check-embedded-pins verifies the tagged module origin against
+	// BD_CURRENT_REF in the existing release pin-validation lane.
 
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly
 	// collapse them:

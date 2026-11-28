@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -17,6 +18,18 @@ import (
 // original process is killed and its port is made unavailable.
 func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) {
 	cityPath, rigPath := setupManagedBdWaitTestCity(t)
+	identityPath := filepath.Join(rigPath, ".beads", "identity.toml")
+	if _, err := os.Stat(identityPath); err != nil {
+		t.Fatalf("managed rig identity missing after setup at %s: %v", identityPath, err)
+	}
+	metadataPath := filepath.Join(rigPath, ".beads", "metadata.json")
+	metadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read managed rig metadata after setup: %v", err)
+	}
+	if !strings.Contains(string(metadata), `"project_id"`) {
+		t.Fatalf("managed rig metadata missing project_id after setup:\n%s", metadata)
+	}
 	bdPath := waitTestRealBDPath(t)
 	rawDir := filepath.Join(rigPath, "provider-rebind")
 	if err := os.MkdirAll(rawDir, 0o755); err != nil {

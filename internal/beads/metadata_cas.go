@@ -3,45 +3,30 @@
 // ConditionalWriter (beads.go) bundles four methods: the revision-CAS trio
 // (UpdateIfMatch/CloseIfMatch/DeleteIfMatch) plus CompareAndSetMetadataKey.
 // The trio needs a backend fence token — a revision that advances on every
-// mutation and is never reused. The beads v1.1.0 schema cannot supply one: the
-// issues DDL has no version column, and updated_at is second-granularity — so
-// two same-second writes yield an EQUAL token and a stale fence SILENTLY
-// SUCCEEDS, which is the lost update a fence exists to prevent. Label
-// mutations never touch updated_at at all. A store-maintained counter is not a
-// fence either: the Dolt database is multi-writer (the bd CLI, other gascity
-// processes, graph-apply), and a counter only the fencer maintains fences
-// nothing.
+// mutation and is never reused. The older beads v1.1.0 schema could not supply one:
+// types.Issue carries no revision field (Get().Revision is 0 and never
+// advances), the issues DDL has no version column, and updated_at is
+// second-granularity — so two same-second writes yield an EQUAL token and a
+// stale fence SILENTLY SUCCEEDS, which is the lost update a fence exists to
+// prevent. Label mutations never touch updated_at at all. A store-maintained
+// counter is not a fence either: the Dolt database is multi-writer (the bd
+// CLI, other gascity processes, graph-apply), and a counter only the fencer
+// maintains fences nothing.
 //
-// WHAT IS NO LONGER TRUE, on the issueops facade this store now rides: the
-// premise used to read "types.Issue carries no revision field, so Get().Revision
-// is 0 and never advances". Both halves of the token now exist. The READ half
-// arrived with the detail-view re-point — issueops.IssueDetails.Revision lands
-// on Bead.Revision (native_dolt_store_read_roles.go Get), and it is a real
-// row_lock rather than a fabricated zero. The POST-WRITE half is the same
-// facade: update, close and reopen each answer with the token they minted, on
-// issueops.{Update,Close,Reopen}Result.Issue.RowVersion.
-//
-// The trio is therefore EXPRESSIBLE against this facade and is still not
-// implemented, which is a scope statement and not a fact about the schema.
-// Implementing it means declaring ConditionalWriter, which is exactly the
-// declaration the paragraph below says must not be made casually — it decides
-// what ResolveConditionalWriter does under require mode for every caller. So it
-// stays its own slice, with its own conformance run against a served adapter,
-// rather than riding in on a pin bump.
-//
-// CompareAndSetMetadataKey needs no such token — it guards on the key's own
-// current value — so it is soundly implementable today on stores where the
-// trio is not. MetadataCASWriter is that half, split out so a store can
+// Current native Dolt backends expose RowVersion and implement the trio in
+// native_dolt_store_conditional.go. Other backends may still lack that fence.
+// CompareAndSetMetadataKey needs no row token — it guards on the key's own
+// current value — so it remains sound where the trio is unavailable.
+// MetadataCASWriter is that half, split out so a store can
 // declare the capability it actually has. Declaring the whole of
 // ConditionalWriter just to expose the CAS method would make
 // ResolveConditionalWriter RESOLVE under require mode and hand the trio's
-// callers a silently-wrong fence — converting today's loud typed refusal into
+// callers a silently-wrong fence — converting a loud typed refusal into
 // exactly the silent legacy write under require that the seam exists to make
 // inexpressible. See the condWritesStamp comment in native_dolt_store.go.
 //
-// Upstream beads #4697 (claim_fence) is the missing backend primitive. When it
-// lands, a store can implement the trio soundly and declare ConditionalWriter;
-// until then a narrow-only store declares MetadataCASWriter and nothing more.
+// Backends still awaiting a claim fence declare MetadataCASWriter only;
+// backends with a sound row-version fence may declare ConditionalWriter.
 //
 // Resolution is deliberately SEPARATE from ResolveConditionalWriter: this is a
 // capability lookup, not the operator-policy seam. It carries no

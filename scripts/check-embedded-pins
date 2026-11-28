@@ -20,10 +20,12 @@ Checks:
             below the qualified pin. It can sit above it: Gas City keeps its
             own Dolt floor (TestDoltVersionPins), and CI runs that version.
 
+The current beads Go module's recorded VCS origin must equal BD_CURRENT_REF;
+--origin-only runs this proof independently of release and pack checks.
 The public gastown/gascity pack pins are checked against the registry by
 scripts/update-bundled-gastown-pack --check.
 
---latest-bd and --bd-qualified-dolt replace the GitHub lookups (offline tests).
+--latest-bd, --bd-qualified-dolt and --bd-origin-info supply offline fixtures.
 """
 
 from __future__ import annotations
@@ -55,11 +57,13 @@ SUPERSEDED_LISTS = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--origin-only", action="store_true", help="only verify the current beads module origin")
     parser.add_argument("--skip-bundled", action="store_true", help="skip the bundled pack pin check")
     parser.add_argument("--skip-releases", action="store_true", help="skip the bd/dolt release checks")
     parser.add_argument("--skip-stale", action="store_true", help="skip the superseded-pin scan of examples and docs")
     parser.add_argument("--latest-bd", help="latest beads release tag (skips the GitHub lookup)")
     parser.add_argument("--bd-qualified-dolt", help="Dolt version the beads release qualifies (skips the lookup)")
+    parser.add_argument("--bd-origin-info", help="path to a saved go mod download JSON response (offline tests)")
     parser.add_argument(
         "--bd-advisory",
         action="store_true",
@@ -74,12 +78,21 @@ def main() -> int:
     args = parse_args()
     root = Path(args.repo_root).resolve()
     errors: list[str] = []
+    if args.origin_only:
+        errors = check_bd_module_origin(root, args.bd_origin_info)
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        if errors:
+            return 1
+        print("beads module origin matches the current source pin")
+        return 0
     if not args.skip_bundled:
         errors += check_bundled(root)
     if not args.skip_stale:
         errors += check_stale(root)
     if not args.skip_releases:
         errors += check_releases(root, args.latest_bd, args.bd_qualified_dolt, args.bd_advisory)
+        errors += check_bd_module_origin(root, args.bd_origin_info)
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
     if errors:
@@ -172,6 +185,34 @@ def deps_env(root: Path) -> dict[str, str]:
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
     return values
+
+
+def check_bd_module_origin(root: Path, saved_info: str | None) -> list[str]:
+    """Check the Go module's tagged VCS origin against the source build pin."""
+    env = deps_env(root)
+    version = env.get("BD_CURRENT_VERSION", "")
+    ref = env.get("BD_CURRENT_REF", "")
+    if not version or not re.fullmatch(r"[0-9a-f]{40}", ref):
+        return ["deps.env BD_CURRENT_VERSION/BD_CURRENT_REF missing or invalid"]
+    try:
+        module_text = (root / "go.mod").read_text(encoding="utf-8")
+        pin = re.search(r"(?m)^\s*github\.com/steveyegge/beads\s+(\S+)\s*$", module_text)
+        if not pin or pin.group(1) != version:
+            return [f"go.mod beads pin differs from BD_CURRENT_VERSION {version}"]
+        if saved_info:
+            info = json.loads(Path(saved_info).read_text(encoding="utf-8"))
+        else:
+            result = subprocess.run(
+                ["go", "mod", "download", "-json", f"github.com/steveyegge/beads@{version}"],
+                cwd=root, text=True, capture_output=True, check=True, timeout=120,
+            )
+            info = json.loads(result.stdout)
+        origin = info.get("Origin") or {}
+        if info.get("Version") != version or origin.get("Hash") != ref:
+            return [f"beads module {version} origin {origin.get('Hash')!r} differs from BD_CURRENT_REF {ref}"]
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return [f"cannot verify beads module {version} origin: {exc}"]
+    return []
 
 
 def fetch(url: str) -> bytes:

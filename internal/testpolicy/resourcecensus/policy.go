@@ -250,6 +250,13 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-12-31",
 		},
 		{
+			PackageDir: "examples/bd", PackageName: "bd", Owner: "TestBdFreshInitMigrationFlagFence",
+			Resources: []Resource{ResourceSubprocess}, OwnerBead: "gs-fork32-20261128.1",
+			Invariant:       "the verified-empty init fence is exercised by an isolated shell",
+			ResourceOwner:   "the test executes the extracted provider function with test-owned temporary files and stubs",
+			MigrationTarget: "fork main reconciliation", Expires: "2026-12-31",
+		},
+		{
 			PackageDir:      "internal/api/apierr",
 			PackageName:     "apierr",
 			Owner:           "TestEveryEmittedErrorCodeIsRegistered",

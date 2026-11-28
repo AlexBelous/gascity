@@ -84,6 +84,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"CreatedForm":                 nativeStoreRead,
 	"CloseIfMatch":                nativeStoreMutation,
 	"CloseWithMetadataIfMatch":    nativeStoreMutation,
+	"ClearBlockerPairIfMatch":     nativeStoreMutation,
 	"CompareAndSetMetadataKey":    nativeStoreMutation,
 	"DeleteIfMatch":               nativeStoreMutation,
 	"ReleaseIfCurrent":            nativeStoreMutation,

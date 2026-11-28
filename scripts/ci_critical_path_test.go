@@ -680,7 +680,7 @@ func TestLintAndVetRunAsNogoInBazel(t *testing.T) {
 // rbe-west cannot run, allowing only the path-gated ones to skip.
 func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate", "windows-lane", "windows-lane-test"}
+	gating := []string{"runner-policy", "changes", "beads-origin", "credential-provider-windows", "pack-gate", "windows-lane", "windows-lane-test"}
 	for jobName, want := range map[string]struct {
 		name  string
 		needs []string
@@ -726,6 +726,7 @@ func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
 	for file, want := range map[string][]string{
 		"ci.yml": {
 			"runner-policy", "changes", // routing
+			"beads-origin",                // live tagged module provenance, not a hermetic Bazel action
 			"credential-provider-windows", // no Windows workers
 			"pack-gate",                   // live registry and pin provenance
 			"windows-lane",                // GOOS=windows/darwin cross-compiles; rbe-west builds Linux only

@@ -62,3 +62,37 @@ func TestBdBlockerWriteRefusalRunsBeforeStoreWrite(t *testing.T) {
 		}
 	}
 }
+
+func TestBdBlockerPatchPassesNonStringMetadataWithoutBlockerKeys(t *testing.T) {
+	for _, value := range []string{
+		`{"links":{"source":"tg"},"commitment_id":518,"active":true,"note":null}`,
+		`{"gc.routed_to":"clerk","tags":["a","b"]}`,
+	} {
+		for _, verb := range []string{"create", "update"} {
+			if _, touched, err := bdBlockerPatch([]string{verb, "x", "--metadata", value}); err != nil || touched {
+				t.Fatalf("%s %s: non-blocker metadata refused: touched=%v err=%v", verb, value, touched, err)
+			}
+			if msg, refused := bdBlockerWriteRefusal(t.TempDir(), "validator.py", []string{verb, "x", "--metadata=" + value}); refused {
+				t.Fatalf("%s %s: non-blocker metadata refused: %s", verb, value, msg)
+			}
+		}
+	}
+}
+
+func TestBdBlockerPatchRefusesNonStringValuesInBlockerWrite(t *testing.T) {
+	for _, value := range []string{
+		`{"gc.blocked_on":{"type":"wait_client"},"gc.blocker.v2":"{}"}`,
+		`{"gc.blocked_on":"wait_client","gc.blocker.v2":{"type":"wait_client"}}`,
+		`{"gc.blocked_on":"wait_client","gc.blocker.v2":"{}","gc.next_control_at":1}`,
+		`{"gc.blocked_on":null,"gc.blocker.v2":"{}"}`,
+		`not-json`,
+	} {
+		if _, _, err := bdBlockerPatch([]string{"update", "gc-a", "--metadata", value}); err == nil {
+			t.Fatalf("%s: blocker write with non-string metadata admitted", value)
+		}
+	}
+	patch, touched, err := bdBlockerPatch([]string{"update", "gc-a", "--metadata", `{"gc.blocked_on":"wait_client","gc.blocker.v2":"{}","gc.next_owner":"clerk"}`})
+	if err != nil || !touched || patch["gc.next_owner"] != "clerk" || patch["gc.blocker.v2"] != "{}" {
+		t.Fatalf("string blocker write patch=%v touched=%v err=%v", patch, touched, err)
+	}
+}

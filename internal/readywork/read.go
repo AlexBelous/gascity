@@ -2,6 +2,7 @@ package readywork
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -147,6 +148,12 @@ func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bo
 	if err != nil {
 		return nil, err
 	}
+	if c.status == StatusInProgress {
+		items, err = authoritativeInProgress(ctx, legs, items, owners)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if c.status == "" {
 		// On a split city the ready arm re-judges cross-store blockers
 		// (crossstore.go): it adds the rows a store strands behind an absent
@@ -187,6 +194,72 @@ func readCompiled(ctx context.Context, legs []Leg, c compiled, untilUnblocked bo
 	return toReadyBeads(items, blockers), nil
 }
 
+// authoritativeInProgress prevents status-scoped listings from reviving a
+// stale assignment whose earlier or relocated authoritative copy has closed.
+func authoritativeInProgress(ctx context.Context, legs []Leg, items []beads.Bead, owners map[string]int) ([]beads.Bead, error) {
+	out := items[:0]
+	for _, row := range items {
+		own := owners[row.ID]
+		probe := func(i int) (beads.Bead, bool, error) {
+			if err := ctx.Err(); err != nil {
+				return beads.Bead{}, false, err
+			}
+			value, err := beads.LiveFor(legs[i].Store).Get(row.ID)
+			if errors.Is(err, beads.ErrNotFound) {
+				return beads.Bead{}, false, nil
+			}
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("%s store: resolving authoritative copy of %q: %w", legs[i].Label, row.ID, err)
+			}
+			return value, true, nil
+		}
+		shadowed := false
+		for i := range legs {
+			if !legs[i].ClassBinding {
+				continue
+			}
+			if i == own {
+				break
+			}
+			authoritative, found, err := probe(i)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				shadowed = true
+				if strings.EqualFold(strings.TrimSpace(authoritative.Status), StatusInProgress) {
+					owners[row.ID] = i
+					out = append(out, authoritative)
+				}
+				break
+			}
+		}
+		if !shadowed && !legs[own].ClassBinding {
+			for i := 0; i < own; i++ {
+				if legs[i].ClassBinding {
+					continue
+				}
+				_, found, err := probe(i)
+				if err != nil {
+					return nil, err
+				}
+				if found {
+					shadowed = true
+					break
+				}
+			}
+		}
+		if shadowed {
+			if owners[row.ID] == own {
+				delete(owners, row.ID)
+			}
+			continue
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 // readyAnswer turns the ready arm's merged candidates into its answer: the
 // stranded rows added, the predicates applied, the order imposed, the bound
 // applied after the cross-store gate. A bounded read already sized each leg's
@@ -217,10 +290,10 @@ func readyAnswer(ctx context.Context, cs *crossStore, c compiled, items []beads.
 // question asked of the work stores and a narrower one asked of the store that
 // holds the execution DAG (ga-8lyxc).
 //
-// owners maps each merged row to the index of the leg that served it. It is
-// recorded at MERGE time rather than re-probed afterwards: the merge is
-// first-leg-wins, and a co-resident bead that is open in one leg and in_progress
-// in another would resolve to the wrong store under a fresh probe.
+// owners records the leg that served each merged row. For the in-progress
+// arm, authoritativeInProgress checks relocated bindings and earlier work
+// legs after this merge, because a status-scoped list hides closed copies;
+// it updates the owner when a relocated copy supersedes the listed work row.
 func readCandidates(ctx context.Context, legs []Leg, c compiled, cs *crossStore) ([]beads.Bead, map[string]int, error) {
 	switch c.status {
 	case "":

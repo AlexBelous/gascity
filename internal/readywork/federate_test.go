@@ -391,3 +391,28 @@ func TestReadAnswersEveryStatusFromTheLiveHandle(t *testing.T) {
 		}
 	}
 }
+
+// A listed work copy may be deduplicated before the class binding is read.
+// The binding's live in-progress copy must replace it, not disappear with it.
+func TestInProgressAuthorityReturnsRelocatedCopy(t *testing.T) {
+	work, graph, id := seedCoResidentPair(t)
+	status, assignee := StatusInProgress, "worker-1"
+	for _, store := range []beads.Store{work, graph} {
+		if err := store.Update(id, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	candidate, err := work.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legs := []Leg{testLeg("city", work), {Label: "graph", Store: graph, ClassBinding: true}}
+	owners := map[string]int{id: 0}
+	rows, err := authoritativeInProgress(context.Background(), legs, []beads.Bead{candidate}, owners)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Title != "graph leg row" || owners[id] != 1 {
+		t.Fatalf("rows=%v owner=%d, want graph copy and owner", rows, owners[id])
+	}
+}

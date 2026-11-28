@@ -6367,6 +6367,10 @@ case "${1:-}" in
 JSON
     exit 0
     ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   config|migrate|list)
     exit 0
     ;;
@@ -6480,7 +6484,7 @@ exec %q "$@"
 	}
 }
 
-func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
+func TestGcBeadsBdInitPinsManagedDoltEnvWithoutMigrationAuthority(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -6504,7 +6508,7 @@ capture_dir="` + captureDir + `"
 cmd="${1:-}"
 record() {
   name="$1"
-  printf '%s|%s|%s|%s|%s\n' "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DIR:-}" > "$capture_dir/$name"
+  printf '%s|%s|%s|%s|%s|%s|%s\n' "${GC_DOLT_HOST:-}" "${GC_DOLT_PORT:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DIR:-}" "${BEADS_DOLT_SHARED_SERVER:-}" "${BD_ALLOW_REMOTE_MIGRATE:-}" > "$capture_dir/$name"
 }
 case "$cmd" in
   init)
@@ -6514,6 +6518,10 @@ case "$cmd" in
     done
     mkdir -p "$last/.beads"
     record init.env
+    exit 0
+    ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
     exit 0
     ;;
   config)
@@ -6585,6 +6593,8 @@ esac
 		"rig-db.example.com",
 		"3307",
 		filepath.Join(rigDir, ".beads"),
+		"",
+		"",
 	}, "|")
 	data, err := os.ReadFile(filepath.Join(captureDir, "init.env"))
 	if err != nil {
@@ -6592,6 +6602,9 @@ esac
 	}
 	if got := strings.TrimSpace(string(data)); got != wantPinned {
 		t.Fatalf("init.env = %q, want %q", got, wantPinned)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".beads", ".local_version")); !os.IsNotExist(err) {
+		t.Fatalf("ambiguous managed init published .local_version; err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "config.env")); !os.IsNotExist(err) {
 		t.Fatalf("config.env exists after init; err=%v", err)
@@ -6601,14 +6614,17 @@ esac
 		t.Fatalf("read list.env: %v", err)
 	}
 	parts := strings.Split(strings.TrimSpace(string(listData)), "|")
-	if len(parts) != 5 {
-		t.Fatalf("list.env = %q, want 5 fields", strings.TrimSpace(string(listData)))
+	if len(parts) != 7 {
+		t.Fatalf("list.env = %q, want 7 fields", strings.TrimSpace(string(listData)))
 	}
 	if parts[0] != "rig-db.example.com" || parts[1] != "3307" {
 		t.Fatalf("list.env host/port = %q|%q, want rig-db.example.com|3307", parts[0], parts[1])
 	}
 	if parts[4] != filepath.Join(rigDir, ".beads") {
 		t.Fatalf("list.env BEADS_DIR = %q, want %q", parts[4], filepath.Join(rigDir, ".beads"))
+	}
+	if parts[5] != "" || parts[6] != "" {
+		t.Fatalf("list.env leaked init-only migration flags: shared=%q allow_remote_migrate=%q", parts[5], parts[6])
 	}
 }
 
@@ -6645,6 +6661,10 @@ cmd="${1:-}"
 	case "$cmd" in
   init)
     : > "$capture_dir/init.called"
+    exit 0
+    ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
     exit 0
     ;;
   migrate)
@@ -6920,6 +6940,10 @@ case "$cmd" in
 JSON
     exit 0
     ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   migrate)
     # The ready path may complete pending SCHEMA migrations; only the bare
     # repo-id migration (no subcommand) is the contract this test pins.
@@ -7012,6 +7036,10 @@ func TestGcBeadsBdInitUsesExplicitDoltDatabaseForRegistration(t *testing.T) {
 	fakeBdScript := `#!/bin/sh
 set -eu
 case "${1:-}" in
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   config|migrate|list)
     exit 0
     ;;
@@ -7731,12 +7759,17 @@ case "$cmd" in
         has_force=true
       fi
     done
-    if [ "$has_force" != "true" ]; then
-      echo "bd init fallback must force reinitialize existing workspace" >&2
+    if [ "$has_force" = "true" ]; then
+      echo "verified-empty database must use plain init" >&2
       exit 2
     fi
+    printf '%%s\n' '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}' > "$BEADS_DIR/metadata.json"
     printf '1\n' > %q
     printf '%%s\n' "$@" > %q
+    exit 0
+    ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
     exit 0
     ;;
   config|migrate|list)
@@ -7771,6 +7804,9 @@ case "$query" in
   'CREATE DATABASE IF NOT EXISTS `+"`hq`"+`')
     : > %q
     ;;
+  *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
+    printf 'cnt\n0\n'; exit 0
+    ;;
   'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
     if [ ! -f %q ]; then
       echo "table not found: config" >&2
@@ -7803,10 +7839,13 @@ esac
 		t.Fatalf("expected bd init fallback to run: %v", err)
 	}
 	got := string(data)
-	for _, want := range []string{"--force", "--server", "-p", "gc", "--database", "hq", cityPath} {
+	for _, want := range []string{"--server", "-p", "gc", "--database", "hq", cityPath} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("bd init argv missing %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "--force") {
+		t.Fatalf("verified-empty init used --force: %s", got)
 	}
 	if strings.Contains(got, "-p hq") {
 		t.Fatalf("bd init should keep visible prefix gc while pinning database hq:\n%s", got)
@@ -7931,6 +7970,9 @@ case "$query" in
   'CREATE DATABASE IF NOT EXISTS `+"`hq`"+`')
     : > %q
     ;;
+  *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
+    printf 'cnt\n0\n'; exit 0
+    ;;
   'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
     if [ ! -f %q ]; then
       echo "table not found: config" >&2
@@ -7993,6 +8035,10 @@ func TestGcBeadsBdInitWaitsForSchemaVisibilityBeforeRuntimeRepair(t *testing.T) 
 	fakeBdScript := `#!/bin/sh
 set -eu
 case "${1:-}" in
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   init|config|migrate|list)
     exit 0
     ;;
@@ -8107,6 +8153,10 @@ case "${1:-}" in
     printf '%%s\n' "$*" >> %q
     exit 0
     ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
+    exit 0
+    ;;
   config|migrate|list)
     exit 0
     ;;
@@ -8206,19 +8256,22 @@ esac
 			t.Fatalf("bd init retry args missing %q:\n%s", want, gotArgs)
 		}
 	}
+	if strings.Contains(gotArgs, "--external") {
+		t.Fatalf("ambiguous schema retry received fresh-database authority, got:\n%s", gotArgs)
+	}
 	if strings.Contains(gotArgs, "--force") {
 		t.Fatalf("post-init schema retry should rerun plain init, got:\n%s", gotArgs)
 	}
 }
 
 // TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback pins
-// the retry sequence for a metadata-only scope whose forced init "succeeds"
-// but leaves the schema missing.
+// metadata preservation across a verified-empty plain init whose first attempt
+// succeeds without making the schema visible.
 //
 // bd >= 1.2 reads a .beads/dolt root with no metadata beside it as a pre-1.0
 // workspace ("legacy Dolt workspace detected") and refuses to init it, so the
-// retry must keep the canonical server-mode metadata in place and let the
-// re-exec's schema-missing branch re-seed with --force. Measured on the real
+// retry must retain canonical metadata, recheck emptiness and move its stub
+// aside for a second plain init. Measured on the real
 // binary (TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind).
 func TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback(t *testing.T) {
 	cityPath := t.TempDir()
@@ -8256,12 +8309,20 @@ case "${1:-}" in
     fi
     count=$((count + 1))
     printf '%%s\n' "$count" > %q
+    if [ -f "$BEADS_DIR/metadata.json.gc-init-stub" ]; then
+      printf 'stub=yes\n' >> %q
+    fi
     if [ -f "$BEADS_DIR/metadata.json" ]; then
       printf 'metadata=yes args=%%s\n' "$*" >> %q
     else
       printf 'metadata=no args=%%s\n' "$*" >> %q
     fi
     printf '%%s\n' "$*" >> %q
+    printf '%%s\n' '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}' > "$BEADS_DIR/metadata.json"
+    exit 0
+    ;;
+  version)
+    echo 'bd version 1.3.0-rc.2 (test)'
     exit 0
     ;;
   config|migrate|list)
@@ -8271,7 +8332,7 @@ case "${1:-}" in
     exit 0
     ;;
 esac
-`, initCountFile, initCountFile, initCountFile, initStateFile, initStateFile, initArgsFile)
+`, initCountFile, initCountFile, initCountFile, initStateFile, initStateFile, initStateFile, initArgsFile)
 	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -8297,6 +8358,9 @@ case "$query" in
     ;;
   'DROP DATABASE IF EXISTS `+"`beads_gc`"+`')
     exit 0
+    ;;
+  *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
+    printf 'cnt\n0\n'; exit 0
     ;;
   'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
     count=0
@@ -8334,14 +8398,18 @@ esac
 		t.Fatalf("read init state: %v", err)
 	}
 	gotState := string(stateData)
-	// Both inits must be forced AND both must keep the metadata: two
-	// identical lines, not one. A Contains over the same string twice proved
-	// only that one forced init ran; the retry that used to drop
-	// metadata.json and re-init plainly would have passed it.
-	want := "metadata=yes args=init --force --quiet --server -p gc --database hq"
-	if got := strings.Count(gotState, want); got != 2 {
-		t.Fatalf("forced-with-metadata inits = %d, want 2:\n%s", got, gotState)
+	if strings.Contains(gotState, "--external") {
+		t.Fatalf("forced fallback or retry received fresh-database authority:\n%s", gotState)
 	}
+	// Each retry moves its preserved metadata stub aside before a plain init.
+	if got := strings.Count(gotState, "stub=yes"); got != 2 {
+		t.Fatalf("metadata stub retained for %d inits, want 2:\n%s", got, gotState)
+	}
+	want := "metadata=no args=init --quiet --server -p gc --database hq"
+	if got := strings.Count(gotState, want); got != 2 {
+		t.Fatalf("plain inits = %d, want 2:\n%s", got, gotState)
+	}
+
 	countData, err := os.ReadFile(initCountFile)
 	if err != nil {
 		t.Fatalf("read init count: %v", err)
@@ -8501,12 +8569,18 @@ case "${1:-}" in
   version)
     if [ -f "$dir/bd-version" ]; then cat "$dir/bd-version"; fi
     ;;
+  ready)
+    if [ -f "$dir/ready-fails" ]; then echo "ready failed" >&2; exit 1; fi
+    ;;
   init)
     if [ -f "$dir/init-fails" ]; then
       echo "Error: failed to initialize the database" >&2
       exit 1
     fi
     : > "$dir/init-done"
+    if [ -f "$dir/fresh-probe" ]; then
+      printf '%s\n' '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}' > "${BEADS_DIR:?}/metadata.json"
+    fi
     ;;
   migrate)
     if [ -f "$dir/migrate-remote-refusal" ]; then
@@ -8556,7 +8630,19 @@ case "$query" in
     exit 0
     ;;
   *"FROM information_schema.tables WHERE table_schema = 'hq'"*)
-    if [ ! -f "$dir/database-absent" ]; then exit 0; fi
+    if [ -f "$dir/late-probe-error" ] || [ -f "$dir/late-probe-invalid" ] || [ -f "$dir/fresh-probe" ]; then
+      case "$query" in
+        *"table_name IN"*)
+          if [ -f "$dir/initial-empty-probed" ]; then
+            if [ -f "$dir/late-probe-error" ]; then echo "late probe failed" >&2; exit 1; fi
+            if [ -f "$dir/late-probe-invalid" ]; then printf 'cnt\ninvalid\n'; exit 0; fi
+          fi
+          : > "$dir/initial-empty-probed"
+          ;;
+      esac
+      printf 'cnt\n0\n'; exit 0
+    fi
+    if [ ! -f "$dir/database-absent" ] && [ %d -gt 0 ]; then printf 'cnt\n1\n'; exit 0; fi
     if [ -f "$dir/tables-present" ]; then printf 'cnt\n4\n'; else printf 'cnt\n0\n'; fi
     exit 0
     ;;
@@ -8619,7 +8705,7 @@ case "$query" in
     exit 0
     ;;
 esac
-`, dir, sqlLog, issueRows))
+`, dir, sqlLog, issueRows, issueRows))
 }
 
 // gcBeadsBdHealTest is one interrupted-bootstrap scenario: a city whose "hq"
@@ -8741,6 +8827,82 @@ func failedOnHeldInitLock(out []byte, err error) bool {
 		!strings.Contains(string(out), "flock: ")
 }
 
+// An empty classification must not authorize init when its under-lock
+// recheck fails, including a malformed SQL result. The refusal preserves both
+// scope files and performs neither bd init nor a database reset.
+func TestGcBeadsBdInitRefusesUnknownLateEmptyRecheck(t *testing.T) {
+	requireFlockForTest(t)
+	for _, marker := range []string{"late-probe-error", "late-probe-invalid"} {
+		t.Run(marker, func(t *testing.T) {
+			h := newGcBeadsBdHealTest(t, true, 0, "reset-done", marker)
+			metadata := filepath.Join(h.cityPath, ".beads", "metadata.json")
+			witness := filepath.Join(h.cityPath, ".beads", ".local_version")
+			before, err := os.ReadFile(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			witnessBytes := []byte("existing-witness\n")
+			if err := os.WriteFile(witness, witnessBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := h.runInit(t)
+			if err == nil || !strings.Contains(string(out), "could not confirm database 'hq' is still empty under the init lock") {
+				t.Fatalf("expected late recheck refusal, got %v:\n%s", err, out)
+			}
+			sql, bdArgs := h.logs(t)
+			if strings.Count(sql, "table_name IN") < 2 {
+				t.Fatalf("fixture did not reach initial and late probes:\n%s", sql)
+			}
+			if strings.Contains(sql, "DOLT_RESET") || strings.Contains(bdArgs, "init ") {
+				t.Fatalf("refusal mutated database: sql=%s bd=%s", sql, bdArgs)
+			}
+			after, err := os.ReadFile(metadata)
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("metadata changed: %q, %v", after, err)
+			}
+			afterWitness, err := os.ReadFile(witness)
+			if err != nil || !bytes.Equal(afterWitness, witnessBytes) {
+				t.Fatalf("witness changed: %q, %v", afterWitness, err)
+			}
+		})
+	}
+}
+
+// A verified-empty bootstrap must reopen before success; a failed reopen
+// retains its witness for retry and never grants remote migration authority.
+func TestGcBeadsBdInitVerifiedEmptyRequiresReopen(t *testing.T) {
+	requireFlockForTest(t)
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ready-fails-%t", fail), func(t *testing.T) {
+			markers := []string{"reset-done", "fresh-probe"}
+			if fail {
+				markers = append(markers, "ready-fails")
+			}
+			h := newGcBeadsBdHealTest(t, true, 0, markers...)
+			witness := filepath.Join(h.cityPath, ".beads", ".local_version")
+			original := []byte("existing-witness\n")
+			if err := os.WriteFile(witness, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := h.runInit(t)
+			if (err != nil) != fail {
+				t.Fatalf("unexpected init outcome %v:\n%s", err, out)
+			}
+			if fail && !strings.Contains(string(out), "could not reopen after verified-empty init") {
+				t.Fatalf("missing reopen refusal:\n%s", out)
+			}
+			sql, bdArgs := h.logs(t)
+			if !strings.Contains(bdArgs, "init --quiet --server") || strings.Contains(bdArgs, "init --force") || !strings.Contains(bdArgs, "ready") || strings.Contains(sql, "DOLT_RESET") {
+				t.Fatalf("unexpected calls: sql=%s bd=%s", sql, bdArgs)
+			}
+			after, err := os.ReadFile(witness)
+			if err != nil || !bytes.Equal(after, original) {
+				t.Fatalf("witness changed: %q, %v", after, err)
+			}
+		})
+	}
+}
+
 // TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing pins the recovery
 // for a gc-created database whose first bd bootstrap died between a
 // migration's DDL and its commit: the working set is dirty, there are no
@@ -8765,8 +8927,8 @@ func TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing(t *testing.T) {
 	if !strings.Contains(sql, "CALL DOLT_RESET('--hard')") {
 		t.Fatalf("expected DOLT_RESET('--hard') on the interrupted bootstrap, got:\n%s", sql)
 	}
-	if !strings.Contains(bdArgs, "init --force --quiet --server -p gc --database hq") {
-		t.Fatalf("expected a forced init after the reset, got:\n%s", bdArgs)
+	if !strings.Contains(bdArgs, "init --quiet --server -p gc --database hq") || strings.Contains(bdArgs, "init --force") {
+		t.Fatalf("expected verified-empty plain init after the reset, got:\n%s", bdArgs)
 	}
 	// Order: the reset must precede bd, or bd's guard fires on the dirty set.
 	// The bd stub logs to its own file, so compare against the reset's marker
@@ -8788,8 +8950,8 @@ func TestGcBeadsBdInitNeverResetsADatabaseWithIssues(t *testing.T) {
 	h := newGcBeadsBdHealTest(t, true, 3)
 
 	out, err := h.runInit(t)
-	if err != nil {
-		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	if err == nil || !strings.Contains(string(out), "holds bd tables") {
+		t.Fatalf("expected refusal on a populated database: %v\n%s", err, out)
 	}
 	sql, _ := h.logs(t)
 	if strings.Contains(sql, "DOLT_RESET") {
@@ -12629,6 +12791,10 @@ YAML
 	[ "${2:-}" = "schema" ] && exit 0
 	echo "unexpected bd command: $*" >&2
 	exit 64
+	;;
+  version)
+	echo 'bd version 1.3.0-rc.2 (test)'
+	exit 0
 	;;
   *)
 	echo "unexpected bd command: $*" >&2

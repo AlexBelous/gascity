@@ -9,11 +9,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/spf13/cobra"
 )
@@ -186,6 +188,110 @@ func TestRunDiscoveredCommand_FailsClosedWhenInvokingExecutableCannotBeResolved(
 	}
 }
 
+// supervisorURLScriptEntry writes a pack command that prints the supervisor
+// URL it was handed and returns its discovered entry.
+func supervisorURLScriptEntry(t *testing.T, dir string) config.DiscoveredCommand {
+	t.Helper()
+	scriptPath := filepath.Join(dir, "print-supervisor-url.sh")
+	script := "#!/bin/sh\necho \"supervisor=${GC_SUPERVISOR_URL-<unset>}\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return config.DiscoveredCommand{
+		BindingName: "test",
+		PackName:    "mypack",
+		Command:     []string{"url"},
+		RunScript:   scriptPath,
+		SourceDir:   dir,
+	}
+}
+
+// TestRunDiscoveredCommand_SupervisorURL pins GC_SUPERVISOR_URL: a pack
+// command running in a supervisor-registered city gets the loopback base URL
+// the CLI itself would use for the supervisor API, and nothing otherwise. An
+// ambient value never leaks through.
+func TestRunDiscoveredCommand_SupervisorURL(t *testing.T) {
+	cases := []struct {
+		name          string
+		register      bool
+		supervisorCfg string // "" leaves supervisor.toml absent
+		want          string
+		wantStderr    string
+	}{
+		{
+			name:          "registered city on default bind",
+			register:      true,
+			supervisorCfg: "[supervisor]\nport = 18561\n",
+			want:          "supervisor=http://127.0.0.1:18561",
+		},
+		{
+			name:          "wildcard bind maps to loopback like the CLI",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"0.0.0.0\"\nport = 18562\n",
+			want:          "supervisor=http://127.0.0.1:18562",
+		},
+		{
+			name:          "IPv6 loopback bind",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"::1\"\nport = 18563\n",
+			want:          "supervisor=http://[::1]:18563",
+		},
+		{
+			name:          "non-loopback bind is not exported",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"192.0.2.10\"\nport = 18564\n",
+			want:          "supervisor=<unset>",
+		},
+		{
+			name:          "city not registered with a supervisor",
+			register:      false,
+			supervisorCfg: "[supervisor]\nport = 18565\n",
+			want:          "supervisor=<unset>",
+		},
+		{
+			name:          "unreadable supervisor config warns and is not exported",
+			register:      true,
+			supervisorCfg: "[supervisor\n",
+			want:          "supervisor=<unset>",
+			wantStderr:    "not setting GC_SUPERVISOR_URL",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gcHome := t.TempDir()
+			t.Setenv("GC_HOME", gcHome)
+			t.Setenv("GC_SUPERVISOR_URL", "http://stale.example:1")
+			if tc.supervisorCfg != "" {
+				if err := os.WriteFile(filepath.Join(gcHome, "supervisor.toml"), []byte(tc.supervisorCfg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cityDir := t.TempDir()
+			if tc.register {
+				if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "testcity"); err != nil {
+					t.Fatalf("register city: %v", err)
+				}
+			}
+			entry := supervisorURLScriptEntry(t, t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := runDiscoveredCommand(entry, cityDir, "testcity", nil, strings.NewReader(""), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if got := strings.TrimSpace(stdout.String()); got != tc.want {
+				t.Errorf("stdout = %q, want %q", got, tc.want)
+			}
+			if tc.wantStderr == "" && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+}
+
 const packCommandProcessHelperArg = "pack-command-process-helper"
 
 type packCommandProcessInvocation struct {
@@ -239,7 +345,7 @@ func TestPackCommandExitHelper(t *testing.T) {
 		}()
 		return runPackCommandScenario(t, invocation.scenario, invocation.args, os.Stdout, os.Stderr)
 	}()
-	os.Exit(code)
+	exitTestProcess(code)
 }
 
 func parsePackCommandProcessInvocation(args []string) (packCommandProcessInvocation, bool) {
@@ -277,6 +383,7 @@ type packCommandProcessResult struct {
 	exitCode int
 	stdout   string
 	stderr   string
+	pid      int
 }
 
 func runPackCommandProcess(t *testing.T, cityPath, scenario string, args ...string) packCommandProcessResult {
@@ -312,7 +419,161 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String()), pid: cmd.ProcessState.Pid()}
+}
+
+// stripLeakGuardNoise removes BOTH test leak guards' own diagnostic lines from
+// captured subprocess stderr:
+//
+//   - the tmux guard (cmd/gc/tmux_leak_guard_test.go: sweepStaleTmuxTestServers,
+//     writeTmuxLeakReport, and tmuxLeakGuardedTestingM.runWith's teardown report)
+//   - the dolt guard (cmd/gc/path_helpers_test.go: sweepStaleCmdGCTestDoltProcesses,
+//     reapDoltProcessesUnderRoot, sweepOrphanDoltStoreDirs, writeDoltLeakReport,
+//     and doltLeakGuardedTestingM's teardown scan)
+//
+// TestMain wraps m in both (newDoltLeakGuardedTestingM inside,
+// newTmuxLeakGuardedTestingM outside) and re-runs in every re-exec'd
+// subprocess, so either guard's startup sweep or teardown leak check can emit
+// lines nondeterministically depending on unrelated concurrent sibling suites'
+// teardown timing — real CLI stderr assertions must not depend on that timing.
+//
+// Both guards' per-process detail lines share the "  pid=" prefix, so a single
+// case covers them. Only the header prefixes differ, and omitting the dolt one
+// is what made main CI red for ~26h (ga-vqhh23): the eager side reaped a stale
+// dolt server and announced it while the lazy side had nothing left to reap, so
+// TestPackCommandCobraHelpAndUnknownParity's stderr-equality assertion failed on
+// a difference that had nothing to do with cobra dispatch.
+func stripLeakGuardNoise(s string) string {
+	if s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	trailingNewline := false
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		trailingNewline = true
+		lines = lines[:len(lines)-1]
+	}
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "cmd/gc tmux leak guard: "):
+		case strings.HasPrefix(line, "cmd/gc test dolt leak guard: "):
+		case strings.HasPrefix(line, "  pid="):
+		case strings.HasPrefix(line, "  socket="):
+		default:
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	out := strings.Join(kept, "\n")
+	if trailingNewline {
+		out += "\n"
+	}
+	return out
+}
+
+// TestStripLeakGuardNoise expresses the acceptance criteria for isolating
+// captured subprocess stderr from BOTH test leak guards' harness-level
+// diagnostics (cmd/gc/tmux_leak_guard_test.go and cmd/gc/path_helpers_test.go):
+// stripLeakGuardNoise must remove exactly those guards' startup-sweep and
+// teardown-leak lines, in any position, while leaving real CLI stderr output
+// (and its line order) untouched. Without this,
+// TestPackCommandCobraHelpAndUnknownParity's eager/lazy stderr-equality
+// assertion — and the several exact-empty-stderr assertions elsewhere in this
+// file — are vulnerable to a concurrent sibling suite's teardown racing exactly
+// one of the two subprocess launches' startup sweep (ga-5pe5xv gate evidence:
+// "a concurrent tmux leak-guard stderr line captured by one parity side only";
+// ga-vqhh23: the same failure via the dolt guard, which kept main CI red ~26h).
+//
+// Coverage rule for whoever adds the NEXT guard to TestMain: a guard that
+// writes to os.Stderr from TestMain is captured by every re-exec'd subprocess
+// assertion in this file, so it must gain a case here in the same change. The
+// dolt guard did not, and the gap stayed invisible until a stale server
+// happened to exist during exactly one of two subprocess launches.
+func TestStripLeakGuardNoise(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no guard output left untouched",
+			in:   "Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "empty stays empty",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "strips a leading startup-sweep block, keeps real stderr after it",
+			in: "cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=12345 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a trailing teardown-leak block, keeps real stderr before it",
+			in: "Error: unknown command \"missing\" for \"gc backstage\"\n" +
+				"cmd/gc tmux leak guard: 1 tmux server(s) leaked by this run under /tmp/gct-1-a\n" +
+				"  socket=/tmp/gct-1-a/tmux-1000/test-city (killed)\n" +
+				"cmd/gc tmux leak guard: a test created a real tmux session without tearing its server down; city-name sockets (e.g. -L test-city) have exit-empty off and live forever unless killed (dip-73cr05)\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips a guard block sandwiched between two real stderr lines",
+			in: "Usage:\n" +
+				"cmd/gc tmux leak guard: startup sweep reaping 1 stale test tmux server(s) whose socket root is gone\n" +
+				"  pid=999 argv=\"tmux -u -L test-city new-session -s mayor\"\n" +
+				"  gc backstage repo\n",
+			want: "Usage:\n  gc backstage repo\n",
+		},
+		{
+			// The dolt leak guard is the tmux guard's sibling in TestMain
+			// (newDoltLeakGuardedTestingM wraps m; newTmuxLeakGuardedTestingM
+			// wraps that) and re-runs in every re-exec'd subprocess with the
+			// same nondeterminism, so its lines must be stripped for the same
+			// reason. Verbatim from the ga-vqhh23 CI failure (job 102498944987).
+			name: "strips the dolt guard's startup stale-sweep block",
+			in: "cmd/gc test dolt leak guard: startup sweep reaping 1 stale cmd/gc test dolt sql-server process(es)\n" +
+				"  pid=4242 argv=\"dolt sql-server --config /tmp/x/hq/.beads/config.yaml\"\n" +
+				"Error: unknown command \"missing\" for \"gc backstage\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips the dolt guard's teardown leak block",
+			in: "Error: unknown command \"missing\" for \"gc backstage\"\n" +
+				"cmd/gc test dolt leak guard: leaked 1 dolt sql-server process(es) under /tmp/gct-1-a\n" +
+				"  pid=4243 argv=\"dolt sql-server --config /tmp/gct-1-a/r001/.beads/config.yaml\"\n",
+			want: "Error: unknown command \"missing\" for \"gc backstage\"\n",
+		},
+		{
+			name: "strips the dolt guard's orphan-store-dir and scan-error lines",
+			in: "cmd/gc test dolt leak guard: startup sweep removed orphaned dolt store dir /tmp/tmp.abc\n" +
+				"cmd/gc test dolt leak guard: startup sweep error: permission denied\n" +
+				"Usage:\n",
+			want: "Usage:\n",
+		},
+		{
+			// The actual ga-vqhh23 regression: the eager side reaped a stale
+			// server and announced it, the lazy side had nothing left to reap.
+			// After stripping, both sides must compare equal.
+			name: "eager-with-dolt-noise and lazy-empty normalize to equal",
+			in: "cmd/gc test dolt leak guard: startup sweep reaping 1 stale cmd/gc test dolt sql-server process(es)\n" +
+				"  pid=4242 argv=\"dolt sql-server --config /tmp/x/hq/.beads/config.yaml\"\n",
+			want: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := stripLeakGuardNoise(test.in); got != test.want {
+				t.Fatalf("stripLeakGuardNoise(%q) = %q, want %q", test.in, got, test.want)
+			}
+		})
+	}
 }
 
 const testTmuxSocketParentRootEnv = "GC_TEST_TMUX_SOCKET_PARENT_ROOT"
@@ -1762,34 +2023,9 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 			want: "city-b-sync args:<--rig=" + targetRig + "><payload>\n",
 		},
 		{
-			name: "leaf city separate is child owned",
-			args: []string{"backstage", "hello", "--city", cityB, "payload"},
-			want: "city-a-hello args:<--city><" + cityB + "><payload>\n",
-		},
-		{
-			name: "leaf city equals is child owned",
-			args: []string{"backstage", "hello", "--city=" + cityB, "payload"},
-			want: "city-a-hello args:<--city=" + cityB + "><payload>\n",
-		},
-		{
-			name: "leaf empty scope is child owned",
-			args: []string{"backstage", "hello", "--city=", "--rig", "", "payload"},
-			want: "city-a-hello args:<--city=><--rig><><payload>\n",
-		},
-		{
-			name: "leaf repeated scopes are child owned",
+			name: "leaf repeated scopes ending on the bound city pass through",
 			args: []string{"backstage", "hello", "--city", cityB, "--city=" + cityA, "payload"},
 			want: "city-a-hello args:<--city><" + cityB + "><--city=" + cityA + "><payload>\n",
-		},
-		{
-			name: "leaf malformed help and rig are child owned",
-			args: []string{"backstage", "hello", "-h=maybe", "--rig=child-rig"},
-			want: "city-a-hello args:<-h=maybe><--rig=child-rig>\n",
-		},
-		{
-			name: "leaf valued help and city are child owned",
-			args: []string{"backstage", "hello", "--help=true", "--city", cityB},
-			want: "city-a-hello args:<--help=true><--city><" + cityB + ">\n",
 		},
 		{
 			name: "post terminator controls are child owned",
@@ -1818,6 +2054,235 @@ func TestE1LazyMissingTreeMatchesEagerFlagOwnership(t *testing.T) {
 				t.Fatalf("dispatch outcome = %+v, want exit=0 stdout=%q stderr empty", eager, test.want)
 			}
 		})
+	}
+}
+
+// TestPackLeafScopeAfterLeafNeverSilentlyRetargets pins gc dolt status
+// --city <other-city> run from inside city A: the leaf's city is captured when
+// the tree is built, so a scope flag that only appears after the leaf must
+// either name that same city or be refused, never ignored while the command
+// runs against the ambient city.
+func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+
+	cityA := setupPackExitCity(t)
+	cityB := setupPackExitCity(t)
+	writeE1ArgEchoCommand(t, cityA, "city-a-hello", "hello")
+	writeE1ArgEchoCommand(t, cityB, "city-b-hello", "hello")
+	targetRig := "target-rig"
+	targetRigDir := filepath.Join(t.TempDir(), targetRig)
+	if err := os.MkdirAll(targetRigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registerRigBindingForResolution(t, os.Getenv("GC_HOME"), cityB, "city-b", targetRig, targetRigDir)
+	localRig := "local-rig"
+	localRigDir := filepath.Join(t.TempDir(), localRig)
+	if err := os.MkdirAll(localRigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registerRigBindingForResolution(t, os.Getenv("GC_HOME"), cityA, "city-a", localRig, localRigDir)
+	// Registering a city rewrites its pack.toml; restore the pack under test.
+	if err := os.WriteFile(filepath.Join(cityA, "pack.toml"), []byte("[pack]\nname = \"backstage\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(cityA)
+	t.Setenv("GC_CITY_PATH", cityA)
+
+	refused := []struct {
+		name string
+		args []string
+	}{
+		{name: "other city separate", args: []string{"backstage", "hello", "--city", cityB, "payload"}},
+		{name: "other city equals", args: []string{"backstage", "hello", "--city=" + cityB}},
+		{name: "other city after payload", args: []string{"backstage", "hello", "payload", "--city", cityB}},
+		{name: "rig of other city", args: []string{"backstage", "hello", "--rig=" + targetRig}},
+		{name: "empty city", args: []string{"backstage", "hello", "--city="}},
+		{name: "empty rig", args: []string{"backstage", "hello", "--rig", ""}},
+		{name: "rig that does not resolve", args: []string{"backstage", "hello", "--rig=missing-rig"}},
+		{name: "valued true help beside other city", args: []string{"backstage", "hello", "--help=true", "--city", cityB}},
+		{name: "malformed help beside unresolved rig", args: []string{"backstage", "hello", "-h=maybe", "--rig=missing-rig"}},
+		{name: "same city then other city", args: []string{"backstage", "hello", "--city", cityA, "--city", cityB}},
+		{name: "bound city with rig of other city", args: []string{"backstage", "hello", "--city", cityA, "--rig=" + targetRig}},
+		{name: "bound city with rig that does not resolve", args: []string{"backstage", "hello", "--city", cityA, "--rig=missing-rig"}},
+		{name: "pre-leaf bound city with post-leaf rig of other city", args: []string{"--city", cityA, "backstage", "hello", "--rig=" + targetRig}},
+		{name: "pre-leaf bound city with post-leaf rig that does not resolve", args: []string{"--city", cityA, "backstage", "hello", "--rig=missing-rig"}},
+	}
+	for _, test := range refused {
+		t.Run("refuses "+test.name, func(t *testing.T) {
+			results := make(map[string]packCommandProcessResult, 2)
+			for _, scenario := range []string{"eager", "lazy"} {
+				var stdout, stderr bytes.Buffer
+				results[scenario] = packCommandProcessResult{
+					exitCode: runPackCommandScenario(t, scenario, test.args, &stdout, &stderr),
+					stdout:   stdout.String(),
+					stderr:   stderr.String(),
+				}
+			}
+			eager, lazy := results["eager"], results["lazy"]
+			if lazy != eager {
+				t.Fatalf("lazy dispatch differs from eager\neager: %+v\nlazy:  %+v", eager, lazy)
+			}
+			if eager.exitCode == 0 || eager.stdout != "" {
+				t.Fatalf("dispatch = %+v, want non-zero exit and no pack output (pack must not run against the ambient city)", eager)
+			}
+			for _, want := range []string{"not supported after", "--city", "cd"} {
+				if !strings.Contains(eager.stderr, want) {
+					t.Fatalf("stderr = %q, want it to contain %q", eager.stderr, want)
+				}
+			}
+		})
+	}
+
+	passed := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "same city runs",
+			args: []string{"backstage", "hello", "--city", cityA, "payload"},
+			want: "city-a-hello args:<--city><" + cityA + "><payload>\n",
+		},
+		{
+			name: "rig of the bound city reaches the script unchanged",
+			args: []string{"backstage", "hello", "--rig=" + localRig, "payload"},
+			want: "city-a-hello args:<--rig=" + localRig + "><payload>\n",
+		},
+		{
+			name: "bound city with its own rig",
+			args: []string{"backstage", "hello", "--city", cityA, "--rig=" + localRig, "payload"},
+			want: "city-a-hello args:<--city><" + cityA + "><--rig=" + localRig + "><payload>\n",
+		},
+		{
+			name: "pre-leaf bound city with post-leaf own rig",
+			args: []string{"--city", cityA, "backstage", "hello", "--rig=" + localRig, "payload"},
+			want: "city-a-hello args:<--city><" + cityA + "><--rig=" + localRig + "><payload>\n",
+		},
+	}
+	for _, test := range passed {
+		t.Run(test.name, func(t *testing.T) {
+			for _, scenario := range []string{"eager", "lazy"} {
+				var stdout, stderr bytes.Buffer
+				code := runPackCommandScenario(t, scenario, test.args, &stdout, &stderr)
+				if code != 0 || stdout.String() != test.want || stderr.String() != "" {
+					t.Fatalf("%s dispatch = exit %d stdout=%q stderr=%q, want exit 0 stdout=%q stderr empty", scenario, code, stdout.String(), stderr.String(), test.want)
+				}
+			}
+		})
+	}
+
+	t.Run("help beside other city is not refused", func(t *testing.T) {
+		for _, scenario := range []string{"eager", "lazy"} {
+			var stdout, stderr bytes.Buffer
+			code := runPackCommandScenario(t, scenario, []string{"backstage", "hello", "--help", "--city", cityB}, &stdout, &stderr)
+			if code != 0 || strings.Contains(stderr.String(), "not supported after") || strings.Contains(stdout.String(), "city-a-hello args:") {
+				t.Fatalf("%s help dispatch = exit %d stdout=%q stderr=%q, want help output without a scope refusal or script run", scenario, code, stdout.String(), stderr.String())
+			}
+		}
+	})
+}
+
+// TestDiscoveredCommandFallbackRefusesCrossCityScope pins that the root
+// fallback route applies the same post-leaf scope guard as the cobra leaf: a
+// --city naming another city is refused before the script runs, while the
+// bound city, help, and arguments after "--" are left alone.
+func TestDiscoveredCommandFallbackRefusesCrossCityScope(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+
+	cityA := setupPackExitCity(t)
+	cityB := setupPackExitCity(t)
+	writeE1ArgEchoCommand(t, cityA, "city-a-hello", "hello")
+	sourceDir := filepath.Join(cityA, "commands", "hello")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "testcity"},
+		PackCommands: []config.DiscoveredCommand{{
+			BindingName: "backstage",
+			PackName:    "backstage",
+			Command:     []string{"hello"},
+			RunScript:   filepath.Join(sourceDir, "run.sh"),
+			SourceDir:   sourceDir,
+		}},
+	}
+	t.Chdir(cityA)
+	t.Setenv("GC_CITY_PATH", cityA)
+
+	t.Run("other city is refused", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		outcome := tryDiscoveredCommandFallback([]string{"backstage", "hello", "--city", cityB}, cfg, cityA, &stdout, &stderr)
+		if !outcome.handled || outcome.exitCode != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not supported after") {
+			t.Fatalf("outcome = %+v stdout=%q stderr=%q, want exit 1 refusal without script output", outcome, stdout.String(), stderr.String())
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "bound city runs",
+			args: []string{"backstage", "hello", "--city", cityA},
+			want: "city-a-hello args:<--city><" + cityA + ">\n",
+		},
+		{
+			name: "after terminator passes through",
+			args: []string{"backstage", "hello", "--", "--city", cityB},
+			want: "city-a-hello args:<--><--city><" + cityB + ">\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			outcome := tryDiscoveredCommandFallback(test.args, cfg, cityA, &stdout, &stderr)
+			if !outcome.handled || outcome.exitCode != 0 || stdout.String() != test.want || stderr.Len() != 0 {
+				t.Fatalf("outcome = %+v stdout=%q stderr=%q, want exit 0 stdout=%q", outcome, stdout.String(), stderr.String(), test.want)
+			}
+		})
+	}
+
+	t.Run("help beside other city is not refused", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		outcome := tryDiscoveredCommandFallback([]string{"backstage", "hello", "--help", "--city", cityB}, cfg, cityA, &stdout, &stderr)
+		if !outcome.handled || outcome.exitCode != 0 || strings.Contains(stderr.String(), "not supported after") || strings.Contains(stdout.String(), "city-a-hello args:") {
+			t.Fatalf("outcome = %+v stdout=%q stderr=%q, want help without refusal or script run", outcome, stdout.String(), stderr.String())
+		}
+	})
+}
+
+// TestCoreCommandCityFlagStillSelectsCity guards that core commands, unlike
+// pack leaves, parse --city themselves: gc suspend --city <target> run from
+// inside another city suspends the target and leaves the ambient city alone.
+func TestCoreCommandCityFlagStillSelectsCity(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+	ambient := newRealCityDir(t, "ambient")
+	target := newRealCityDir(t, "target")
+	t.Chdir(ambient)
+	t.Setenv("GC_CITY_PATH", ambient)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"suspend", "--city", target}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc suspend --city %s = exit %d, stderr: %s", target, code, stderr.String())
+	}
+	state := filepath.Join(".gc", "runtime", "suspension-state.json")
+	if _, err := os.Stat(filepath.Join(target, state)); err != nil {
+		t.Fatalf("target city was not suspended: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ambient, state)); err == nil {
+		t.Fatalf("ambient city %s was suspended instead of the named city", ambient)
 	}
 }
 
@@ -1906,33 +2371,33 @@ func TestE1LazyExplicitScopeBeforeLeafWinsOutsideAmbientCity(t *testing.T) {
 	}{
 		{
 			name: "city separate root scope",
-			args: []string{"backstage", "--city", cityB, "hello", "--city", cityA, "payload"},
-			want: "selected-hello args:<--city><" + cityA + "><payload>\n",
+			args: []string{"backstage", "--city", cityB, "hello", "--city", cityB, "payload"},
+			want: "selected-hello args:<--city><" + cityB + "><payload>\n",
 		},
 		{
 			name: "city equals root scope",
-			args: []string{"backstage", "--city=" + cityB, "hello", "--city=" + cityA, "payload"},
-			want: "selected-hello args:<--city=" + cityA + "><payload>\n",
+			args: []string{"backstage", "--city=" + cityB, "hello", "--city=" + cityB, "payload"},
+			want: "selected-hello args:<--city=" + cityB + "><payload>\n",
 		},
 		{
 			name: "repeated pre-leaf city remains last wins",
-			args: []string{"backstage", "--city", cityA, "--city=" + cityB, "hello", "--city", cityA, "payload"},
-			want: "selected-hello args:<--city><" + cityA + "><payload>\n",
+			args: []string{"backstage", "--city", cityA, "--city=" + cityB, "hello", "--city", cityB, "payload"},
+			want: "selected-hello args:<--city><" + cityB + "><payload>\n",
 		},
 		{
 			name: "false help preserves later child city",
-			args: []string{"backstage", "--help=false", "--city", cityB, "hello", "--city", cityA, "payload"},
-			want: "selected-hello args:<--city><" + cityA + "><payload>\n",
+			args: []string{"backstage", "--help=false", "--city", cityB, "hello", "--city", cityB, "payload"},
+			want: "selected-hello args:<--city><" + cityB + "><payload>\n",
 		},
 		{
 			name: "rig separate root scope",
-			args: []string{"backstage", "--rig", targetRig, "hello", "--rig", "child-rig", "payload"},
-			want: "selected-hello args:<--rig><child-rig><payload>\n",
+			args: []string{"backstage", "--rig", targetRig, "hello", "--rig", targetRig, "payload"},
+			want: "selected-hello args:<--rig><" + targetRig + "><payload>\n",
 		},
 		{
 			name: "rig equals root scope",
-			args: []string{"backstage", "--rig=" + targetRig, "hello", "--rig=child-rig", "payload"},
-			want: "selected-hello args:<--rig=child-rig><payload>\n",
+			args: []string{"backstage", "--rig=" + targetRig, "hello", "--rig=" + targetRig, "payload"},
+			want: "selected-hello args:<--rig=" + targetRig + "><payload>\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1943,6 +2408,16 @@ func TestE1LazyExplicitScopeBeforeLeafWinsOutsideAmbientCity(t *testing.T) {
 			}
 		})
 	}
+
+	// A later scope that names a different city than the pre-leaf one is
+	// refused rather than ignored.
+	t.Run("later city other than the pre-leaf city is refused", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runPackCommandScenario(t, "lazy", []string{"backstage", "--city", cityB, "hello", "--city", cityA, "payload"}, &stdout, &stderr)
+		if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not supported after") {
+			t.Fatalf("later other-city scope: code=%d stdout=%q stderr=%q, want refusal", code, stdout.String(), stderr.String())
+		}
+	})
 }
 
 func TestE1ScopeTopologyCycleFailsClosed(t *testing.T) {
@@ -2098,7 +2573,11 @@ func TestE1InheritedCitySelectsScopedJSONSchema(t *testing.T) {
 	}
 }
 
-func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
+// TestE1ScopeLookingArgsAfterLeafOwnership pins who owns a --city or --rig after
+// a pack leaf: gc reads it as a scope selector, so a token that names the
+// leaf's own city reaches the script unchanged and any other token is refused
+// before the script runs. Everything after a literal "--" belongs to the script.
+func TestE1ScopeLookingArgsAfterLeafOwnership(t *testing.T) {
 	cityA := setupPackExitCity(t)
 	cityB := setupPackExitCity(t)
 	script := "#!/bin/sh\nprintf 'args:'\nfor arg in \"$@\"; do printf '<%s>' \"$arg\"; done\nprintf '\\n'\n"
@@ -2119,27 +2598,28 @@ func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
-		want string
+		want string // script output; empty means the leaf must refuse
 	}{
 		{
-			name: "city separate value",
-			args: []string{"backstage", "hello", "--city", cityB},
-			want: "args:<--city><" + cityB + ">\n",
+			name: "city separate value names the leaf city",
+			args: []string{"backstage", "hello", "--city", cityA},
+			want: "args:<--city><" + cityA + ">\n",
 		},
 		{
-			name: "rig equals value",
+			name: "city separate value names another city",
+			args: []string{"backstage", "hello", "--city", cityB},
+		},
+		{
+			name: "rig equals value that does not resolve",
 			args: []string{"backstage", "hello", "--rig=child-rig"},
-			want: "args:<--rig=child-rig>\n",
 		},
 		{
 			name: "empty city equals value",
 			args: []string{"backstage", "hello", "--city="},
-			want: "args:<--city=>\n",
 		},
 		{
 			name: "empty rig separate value",
 			args: []string{"backstage", "hello", "--rig", ""},
-			want: "args:<--rig><>\n",
 		},
 		{
 			name: "after terminator",
@@ -2149,7 +2629,6 @@ func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
 		{
 			name: "valued true help and city after selected leaf",
 			args: []string{"backstage", "hello", "--help=true", "--city", cityB},
-			want: "args:<--help=true><--city><" + cityB + ">\n",
 		},
 		{
 			name: "valued true help and city after terminator",
@@ -2161,8 +2640,14 @@ func TestE1ScopeLookingArgsAfterLeafPassThrough(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run(test.args, &stdout, &stderr)
+			if test.want == "" {
+				if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not supported after") {
+					t.Fatalf("scope after leaf was not refused: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				}
+				return
+			}
 			if code != 0 || stdout.String() != test.want || stderr.Len() != 0 {
-				t.Fatalf("scope-looking child args were consumed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+				t.Fatalf("child args were consumed: code=%d stdout=%q stderr=%q want=%q", code, stdout.String(), stderr.String(), test.want)
 			}
 		})
 	}
@@ -2567,7 +3052,7 @@ func TestPackCommandTreeCandidateSnapshotFieldCountRatchet(t *testing.T) {
 		want int
 	}{
 		{name: "candidate", typ: reflect.TypeOf(packCommandTreeCandidate{}), want: 3},
-		{name: "discovered command", typ: reflect.TypeOf(config.DiscoveredCommand{}), want: 9},
+		{name: "discovered command", typ: reflect.TypeOf(config.DiscoveredCommand{}), want: 10},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := test.typ.NumField(); got != test.want {
@@ -2639,6 +3124,34 @@ func TestPackCommandExitReturnsThroughRun(t *testing.T) {
 	}
 }
 
+// TestPackCommandHelperLeavesNoTempRoot is ga-gcast6 / ga-5qipy6: the helper
+// re-exec ends its process from inside m.Run, which skips TestMain's teardown.
+// Each helper left its temp root behind in this process's root, and once it
+// was two minutes old the next helper's TestMain swept it, announcing the
+// removal on that helper's stderr: a stderr assertion then failed on a repeat
+// run (-count>1) or late in a shard. A helper removes what TestMain made for
+// it before it exits.
+func TestPackCommandHelperLeavesNoTempRoot(t *testing.T) {
+	cityPath := setupPackExitCity(t)
+	for _, scenario := range []string{"eager", "lazy"} {
+		t.Run(scenario, func(t *testing.T) {
+			result := runPackCommandProcess(t, cityPath, scenario, "backstage", "hello")
+			if result.exitCode != 42 {
+				t.Fatalf("helper exit code = %d, want 42; stderr=%q", result.exitCode, result.stderr)
+			}
+			for _, prefix := range []string{testCmdGCTempRootPrefix, testCmdGCShardTempRootPrefix} {
+				left, err := filepath.Glob(filepath.Join(os.TempDir(), prefix+strconv.Itoa(result.pid)+"-*"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(left) > 0 {
+					t.Fatalf("helper pid %d left its test temp root behind: %v", result.pid, left)
+				}
+			}
+		})
+	}
+}
+
 func TestPackCommandCobraHelpAndUnknownParity(t *testing.T) {
 	cityPath := setupPackExitCity(t)
 	tests := []struct {
@@ -2672,13 +3185,13 @@ func TestPackCommandCobraHelpAndUnknownParity(t *testing.T) {
 			name:           "known namespace miss",
 			args:           []string{"backstage", "missing"},
 			wantExit:       1,
-			wantStderrText: []string{`unknown command "missing"`, "Usage:", "gc backstage", "hello", "repo"},
+			wantStderrText: []string{`unknown command "missing"`, `Run "gc backstage --help" for usage.`},
 		},
 		{
 			name:           "known intermediate miss",
 			args:           []string{"backstage", "repo", "missing"},
 			wantExit:       1,
-			wantStderrText: []string{`unknown command "missing"`, "Usage:", "gc backstage repo", "sync"},
+			wantStderrText: []string{`unknown command "missing"`, `Run "gc backstage repo --help" for usage.`},
 		},
 	}
 	for _, test := range tests {
@@ -2718,12 +3231,12 @@ func TestPackCommandGroupMissRejectsUnknownSubcommands(t *testing.T) {
 		{
 			name: "namespace",
 			args: []string{"backstage", "missing"},
-			want: []string{`unknown command "missing"`, "Usage:", "gc backstage", "hello", "repo"},
+			want: []string{`unknown command "missing"`, `Run "gc backstage --help" for usage.`},
 		},
 		{
 			name: "intermediate",
 			args: []string{"backstage", "repo", "missing"},
-			want: []string{`unknown command "missing"`, "Usage:", "gc backstage repo", "sync"},
+			want: []string{`unknown command "missing"`, `Run "gc backstage repo --help" for usage.`},
 		},
 	}
 	for _, test := range tests {
@@ -2933,7 +3446,7 @@ func TestResolveDiscoveredCommandFallbackSelectsNestedUnknown(t *testing.T) {
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}
-	for _, text := range []string{`gc: unknown command "missing"`, "Usage:", "gc private-binding repo"} {
+	for _, text := range []string{`gc: unknown command "missing"`, `Run "gc private-binding repo --help" for usage.`} {
 		if !strings.Contains(stderr.String(), text) {
 			t.Fatalf("stderr missing %q:\n%s", text, stderr.String())
 		}
@@ -3795,7 +4308,7 @@ func TestDiscoveredNamespace_UnknownSubcommandErrors(t *testing.T) {
 // silent-config-drift bug: a pack command invoked from an operator shell used to
 // inherit NONE of the city's [dolt] block, so `gc dolt restart` regenerated
 // dolt-config.yaml from the pack script's own defaults (auto-GC on,
-// read_timeout 15000) and silently reverted the city's configured values. The
+// read_timeout 120000) and silently reverted the city's configured values. The
 // provider-lifecycle path has always projected these; the directly-invoked path
 // must agree with it, or a shell restart writes a different server config than
 // the supervisor would.
@@ -3937,6 +4450,161 @@ wait_timeout_seconds = 120
 	for key, n := range counts {
 		if n != 1 {
 			t.Errorf("env key %s appears %d times, want 1", key, n)
+		}
+	}
+}
+
+// nativeHelpScript answers --help itself and reports what it was given.
+const nativeHelpScript = `#!/bin/sh
+case "$1" in
+  -h|--help)
+    printf 'NATIVE USAGE argc=%s arg1=%s pack=%s\n' "$#" "$1" "$GC_PACK_NAME"
+    exit 0 ;;
+esac
+echo should-not-run
+`
+
+type nativeHelpCase struct {
+	name string
+	// script is the run script body; missing leaves RunScript pointing at a
+	// file that does not exist.
+	script  string
+	missing bool
+	native  bool
+	timeout time.Duration
+	// wantNative is true when the script's own stdout must be shown instead
+	// of the static help.
+	wantNative bool
+}
+
+func nativeHelpCases() []nativeHelpCase {
+	return []nativeHelpCase{
+		{name: "opted in renders script help", script: nativeHelpScript, native: true, wantNative: true},
+		{name: "unset keeps static help", script: nativeHelpScript},
+		{name: "non-zero exit falls back", script: "#!/bin/sh\necho partial-help\necho boom >&2\nexit 3\n", native: true},
+		{name: "empty stdout falls back", script: "#!/bin/sh\nexit 0\n", native: true},
+		{name: "hung script falls back", script: "#!/bin/sh\nsleep 5\n", native: true, timeout: 300 * time.Millisecond},
+		{name: "spawn error falls back", missing: true, native: true},
+	}
+}
+
+// nativeHelpEntry writes tc's script and static help into a temp pack and
+// returns the discovered command plus the city dir.
+func nativeHelpEntry(t *testing.T, tc nativeHelpCase) (config.DiscoveredCommand, string) {
+	t.Helper()
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "pack")
+	sourceDir := filepath.Join(packDir, "commands", "status")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(sourceDir, "run.sh")
+	if !tc.missing {
+		if err := os.WriteFile(scriptPath, []byte(tc.script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	helpPath := filepath.Join(sourceDir, "help.md")
+	if err := os.WriteFile(helpPath, []byte("Long discovered help.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if tc.timeout > 0 {
+		prev := nativeHelpTimeout
+		nativeHelpTimeout = tc.timeout
+		t.Cleanup(func() { nativeHelpTimeout = prev })
+	}
+	return config.DiscoveredCommand{
+		BindingName: "ops",
+		PackName:    "ops",
+		Command:     []string{"status"},
+		Description: "Show status",
+		RunScript:   scriptPath,
+		HelpFile:    helpPath,
+		SourceDir:   sourceDir,
+		PackDir:     packDir,
+		NativeHelp:  tc.native,
+	}, dir
+}
+
+func checkNativeHelpOutput(t *testing.T, tc nativeHelpCase, stdout, stderr string, elapsed time.Duration) {
+	t.Helper()
+	if strings.Contains(stdout, "should-not-run") {
+		t.Fatalf("help executed the command body, stdout:\n%s", stdout)
+	}
+	if strings.Contains(stdout+stderr, "boom") || strings.Contains(stdout, "partial-help") {
+		t.Fatalf("a failed script's output leaked into help, stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if tc.wantNative {
+		// The script sees exactly --help, never the caller's real argv.
+		if !strings.Contains(stdout, "NATIVE USAGE argc=1 arg1=--help pack=ops") {
+			t.Fatalf("stdout missing script-delegated help, got:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "Long discovered help.") {
+			t.Fatalf("delegated help should replace static help, got:\n%s", stdout)
+		}
+		return
+	}
+	if !strings.Contains(stdout, "Long discovered help.") {
+		t.Fatalf("stdout missing static help, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "NATIVE USAGE") {
+		t.Fatalf("script help rendered without a usable opt-in, got:\n%s", stdout)
+	}
+	if tc.timeout > 0 && elapsed > 4*time.Second {
+		t.Fatalf("help took %v, want it bounded by the %v timeout", elapsed, tc.timeout)
+	}
+}
+
+func TestAddDiscoveredCommandsToRoot_NativeHelp(t *testing.T) {
+	for _, tc := range nativeHelpCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			entry, dir := nativeHelpEntry(t, tc)
+			root := &cobra.Command{Use: "gc"}
+			addDiscoveredCommandsToRoot(root, []config.DiscoveredCommand{entry}, dir, "testcity", &bytes.Buffer{}, &bytes.Buffer{}, true)
+
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs([]string{"ops", "status", "--title", "x", "--help"})
+			start := time.Now()
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute: %v\nstderr=%s", err, stderr.String())
+			}
+			checkNativeHelpOutput(t, tc, stdout.String(), stderr.String(), time.Since(start))
+		})
+	}
+}
+
+func TestTryDiscoveredCommandFallback_NativeHelp(t *testing.T) {
+	for _, tc := range nativeHelpCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			entry, dir := nativeHelpEntry(t, tc)
+			cfg := &config.City{
+				Workspace:    config.Workspace{Name: "testcity"},
+				PackCommands: []config.DiscoveredCommand{entry},
+			}
+
+			var stdout, stderr bytes.Buffer
+			start := time.Now()
+			outcome := tryDiscoveredCommandFallback([]string{"ops", "status", "--title", "x", "--help"}, cfg, dir, &stdout, &stderr)
+			elapsed := time.Since(start)
+			if !outcome.handled || outcome.classification != packCommandClassification || outcome.exitCode != 0 {
+				t.Fatalf("outcome = %+v, want handled pack-command help with exit 0", outcome)
+			}
+			checkNativeHelpOutput(t, tc, stdout.String(), stderr.String(), elapsed)
+		})
+	}
+}
+
+func TestDiscoveredCommandFromPackCommandInfo_CarriesNativeHelp(t *testing.T) {
+	for _, native := range []bool{true, false} {
+		info := config.PackCommandInfo{
+			PackName: "ops",
+			PackDir:  t.TempDir(),
+			Entry:    config.PackCommandEntry{Name: "status", Script: "run.sh", NativeHelp: native},
+		}
+		if got := discoveredCommandFromPackCommandInfo(info).NativeHelp; got != native {
+			t.Errorf("NativeHelp = %v, want %v", got, native)
 		}
 	}
 }

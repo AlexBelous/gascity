@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
 // writeRPPScript creates an executable RPP shell script and returns its path.
@@ -236,9 +238,9 @@ func TestRuntimeCheckCmd_WarnsAndPassesThroughWhenCityConfigFailsToLoad(t *testi
 	t.Setenv("GC_CITY", cityDir)
 
 	var stderr bytes.Buffer
-	target, note := resolveRuntimeCheckTarget("someruntime", &stderr)
-	if target != "someruntime" || note != "" {
-		t.Fatalf("target, note = %q, %q; want passthrough with no resolution note", target, note)
+	target, note, promptDelivery := resolveRuntimeCheckTarget("someruntime", &stderr)
+	if target != "someruntime" || note != "" || promptDelivery != "" {
+		t.Fatalf("target, note, promptDelivery = %q, %q, %q; want passthrough with no resolution note", target, note, promptDelivery)
 	}
 	if !strings.Contains(stderr.String(), "warning: city config not loaded") {
 		t.Errorf("stderr = %q, want the config-load warning", stderr.String())
@@ -250,11 +252,132 @@ func TestRuntimeCheckCmd_UndeclaredBareNamePassesThrough(t *testing.T) {
 	t.Setenv("GC_CITY", cityDir)
 
 	var stderr bytes.Buffer
-	target, note := resolveRuntimeCheckTarget("undeclared", &stderr)
-	if target != "undeclared" || note != "" {
-		t.Fatalf("target, note = %q, %q; want silent passthrough to PATH resolution", target, note)
+	target, note, promptDelivery := resolveRuntimeCheckTarget("undeclared", &stderr)
+	if target != "undeclared" || note != "" || promptDelivery != "" {
+		t.Fatalf("target, note, promptDelivery = %q, %q, %q; want silent passthrough to PATH resolution", target, note, promptDelivery)
 	}
 	if got := stderr.String(); got != "" {
 		t.Errorf("stderr = %q, want empty for a cleanly-loaded city without the name", got)
+	}
+}
+
+// writeRuntimePackCityWithPromptDelivery is like writeRuntimePackCity but the
+// runtime declares prompt_delivery = "nudge-fallback" while its script does
+// not implement nudge — the false-claim case FR5 (ga-s5y62b.2) exists to
+// catch: nothing today verifies the declaration is true.
+func writeRuntimePackCityWithPromptDelivery(t *testing.T, runtimeName string) string {
+	t.Helper()
+	cityDir := t.TempDir()
+	packDir := filepath.Join(cityDir, "packs", "rtpack")
+	scriptsDir := filepath.Join(packDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+state=%q
+op="$1"
+name="$2"
+case "$op" in
+  start)      cat > /dev/null; touch "$state/$name.running" ;;
+  stop)       rm -f "$state/$name.running" ;;
+  is-running) if [ -f "$state/$name.running" ]; then echo true; else echo false; fi ;;
+  *) exit 2 ;;
+esac
+`, state)
+	if err := os.WriteFile(filepath.Join(scriptsDir, "provider.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	packToml := fmt.Sprintf(`
+[pack]
+name = "rtpack"
+schema = 1
+
+[runtimes.%s]
+command = "scripts/provider.sh"
+prompt_delivery = "nudge-fallback"
+`, runtimeName)
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `
+[workspace]
+name = "demo"
+
+[imports.rtpack]
+source = "packs/rtpack"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir
+}
+
+func TestRuntimeCheckCmd_NudgeFallbackDeclarationIsSmokeTested(t *testing.T) {
+	cityDir := writeRuntimePackCityWithPromptDelivery(t, "samplert")
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeCheckCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"samplert"})
+
+	err := cmd.Execute()
+	if !errors.Is(err, errExit) {
+		t.Fatalf("Execute = %v, want errExit: pack declares prompt_delivery=nudge-fallback but the runtime's nudge op is unimplemented\nstdout:\n%s", err, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "FAIL required: nudge") {
+		t.Errorf("output should FAIL the nudge check for a declared-but-unimplemented nudge-fallback runtime; got:\n%s", stdout.String())
+	}
+}
+
+// cityOnlyRPPScript wraps the script at path in reference.CityOnlyScript:
+// like a runtime keying its server per city, it refuses every op that names
+// no city.
+func cityOnlyRPPScript(t *testing.T, path string) string {
+	t.Helper()
+	dir := t.TempDir()
+	wrapper := filepath.Join(dir, "city-only")
+	if err := os.WriteFile(wrapper, []byte(reference.CityOnlyScript(path, filepath.Join(dir, "ops.log"))), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return wrapper
+}
+
+// Kills a gc runtime check run from a shell outside any city that runs its
+// ops in no city, which a runtime serving only cities refuses.
+func TestRuntimeCheckCmd_RunsOutsideACity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeCheckCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{cityOnlyRPPScript(t, conformantRPPScript(t))})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "0 failed") {
+		t.Errorf("output should report zero failures:\n%s", out)
+	}
+}
+
+// Kills a gc runtime check that swallows a failed final server-stop in its
+// private city: the server may outlive the run, so the check warns on
+// stderr, as gc stop does for a failed server teardown.
+func TestRuntimeCheckCmd_WarnsOfAFailedFinalServerStop(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	bodies := reference.Bodies()
+	bodies["server-stop"] = `echo "server still up" >&2; exit 1`
+	runtimePath := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(runtimePath, []byte(reference.Script(t.TempDir(), bodies)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeCheckCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{cityOnlyRPPScript(t, runtimePath)})
+	_ = cmd.Execute() // the server checks FAIL; the warning is what is checked
+
+	if got := stderr.String(); !strings.Contains(got, "gc runtime check: warning: server-stop in private city ") || !strings.Contains(got, "server still up") {
+		t.Errorf("stderr should warn of the failed final server-stop; got:\n%s\nstdout:\n%s", got, stdout.String())
 	}
 }

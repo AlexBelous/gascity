@@ -1,17 +1,27 @@
 package providerledger
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
+
+// updateLedgerDoc regenerates the TESTING.md checked runtime provider block
+// from the Go ledger when set. Run, from the repository root:
+//
+//	GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testutil/providerledger:providerledger_test -- -test.run='^TestCatalogMatchesProductionWiringAndDocumentation$' -update
+var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked runtime provider ledger block from the Go ledger")
 
 func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	validWaiver := &Waiver{
-		Owner:   "ga-80po0c.3",
+		Owner:   "example-owner",
 		Expires: now.Add(30 * 24 * time.Hour),
 		Reason:  "tracked legacy contract gap",
 	}
@@ -45,19 +55,6 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 			want: "exactly one of proof, waiver, or not-applicable reason",
 		},
 		{
-			name: "waiver is expired",
-			claim: ContractClaim{
-				Contract:    ContractRuntimeProvider,
-				Disposition: DispositionWaived,
-				Waiver: &Waiver{
-					Owner:   "ga-80po0c.3",
-					Expires: now.Add(-time.Hour),
-					Reason:  "expired gap",
-				},
-			},
-			want: "waiver owned by ga-80po0c.3 expired",
-		},
-		{
 			name: "waiver has no owner",
 			claim: ContractClaim{
 				Contract:    ContractRuntimeProvider,
@@ -68,19 +65,6 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 				},
 			},
 			want: "waiver owner is required",
-		},
-		{
-			name: "waiver exceeds bounded horizon",
-			claim: ContractClaim{
-				Contract:    ContractRuntimeProvider,
-				Disposition: DispositionWaived,
-				Waiver: &Waiver{
-					Owner:   "ga-80po0c.3",
-					Expires: now.Add(maxWaiverHorizon + time.Hour),
-					Reason:  "parked gap",
-				},
-			},
-			want: "waiver owned by ga-80po0c.3 exceeds",
 		},
 		{
 			name: "not applicable has no reason",
@@ -136,7 +120,7 @@ func TestValidateRejectsInvalidContractClaims(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			entry := validRuntimeEntry("runtime.fixture", "exact:fixture", tt.claim)
-			err := Validate([]Entry{entry}, now)
+			err := Validate([]Entry{entry})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Validate() error = %v, want containing %q", err, tt.want)
 			}
@@ -314,7 +298,6 @@ func TestProof(t *testalias.T) {
 }
 
 func TestValidateRequiresEveryPortContract(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	entry := validRuntimeEntry("runtime.fixture", "exact:fixture", ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -322,14 +305,13 @@ func TestValidateRequiresEveryPortContract(t *testing.T) {
 	})
 	entry.Claims = nil
 
-	err := Validate([]Entry{entry}, now)
+	err := Validate([]Entry{entry})
 	if err == nil || !strings.Contains(err.Error(), "missing required contract runtime.Provider") {
 		t.Fatalf("Validate() error = %v, want missing required contract", err)
 	}
 }
 
 func TestValidateRejectsUnknownCatalogName(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	entry := validRuntimeEntry("runtime.fixture", "exact:fixture", ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -337,14 +319,13 @@ func TestValidateRejectsUnknownCatalogName(t *testing.T) {
 	})
 	entry.Catalog.Name = "runtime.typo"
 
-	err := Validate([]Entry{entry}, now)
+	err := Validate([]Entry{entry})
 	if err == nil || !strings.Contains(err.Error(), "unknown catalog") {
 		t.Fatalf("Validate() error = %v, want unknown-catalog error", err)
 	}
 }
 
 func TestValidateRequiresProductionRoleForDiscoveryBindings(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	claim := ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -377,7 +358,7 @@ func TestValidateRequiresProductionRoleForDiscoveryBindings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := Validate([]Entry{tt.entry}, now)
+			err := Validate([]Entry{tt.entry})
 			if err == nil || !strings.Contains(err.Error(), "discovery binding requires role production_provider") {
 				t.Fatalf("Validate() error = %v, want production-role error", err)
 			}
@@ -386,12 +367,10 @@ func TestValidateRequiresProductionRoleForDiscoveryBindings(t *testing.T) {
 }
 
 func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
-
 	t.Run("role without type", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.DoubleType = nil
-		err := Validate([]Entry{entry}, now)
+		err := Validate([]Entry{entry})
 		if err == nil || !strings.Contains(err.Error(), "reusable_double role requires a double type") {
 			t.Fatalf("Validate() error = %v, want missing-double-type error", err)
 		}
@@ -400,7 +379,7 @@ func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
 	t.Run("role without boundary", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.DoubleBoundary = ""
-		err := Validate([]Entry{entry}, now)
+		err := Validate([]Entry{entry})
 		if err == nil || !strings.Contains(err.Error(), "reusable_double role requires a repository-relative double boundary") {
 			t.Fatalf("Validate() error = %v, want missing-double-boundary error", err)
 		}
@@ -409,7 +388,7 @@ func TestValidateRequiresReusableDoubleTypeWithReusableRole(t *testing.T) {
 	t.Run("type without role", func(t *testing.T) {
 		entry := reusableRuntimeEntry("runtime.fake", "exact:fake", "Fake", "NewFake")
 		entry.Roles = []Role{RoleProductionProvider}
-		err := Validate([]Entry{entry}, now)
+		err := Validate([]Entry{entry})
 		if err == nil || !strings.Contains(err.Error(), "double type requires role reusable_double") {
 			t.Fatalf("Validate() error = %v, want missing-reusable-role error", err)
 		}
@@ -421,7 +400,7 @@ func TestRenderMarkdownShowsReusableOnlyBoundary(t *testing.T) {
 	entry.Roles = []Role{RoleReusableDouble}
 	entry.Catalog = nil
 
-	if err := Validate([]Entry{entry}, time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)); err != nil {
+	if err := Validate([]Entry{entry}); err != nil {
 		t.Fatalf("Validate(reusable-only entry): %v", err)
 	}
 	got := RenderMarkdown([]Entry{entry})
@@ -431,7 +410,6 @@ func TestRenderMarkdownShowsReusableOnlyBoundary(t *testing.T) {
 }
 
 func TestValidateRejectsDuplicateSourceBindings(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	claim := ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -444,14 +422,13 @@ func TestValidateRejectsDuplicateSourceBindings(t *testing.T) {
 	second.Catalog = nil
 	second.Source = &SourceRef{File: "cmd/gc/./providers.go", Function: "newFixture", Reason: "same normalized source"}
 
-	err := Validate([]Entry{first, second}, now)
+	err := Validate([]Entry{first, second})
 	if err == nil || !strings.Contains(err.Error(), "source binding cmd/gc/providers.go#newFixture is also owned") {
 		t.Fatalf("Validate() error = %v, want duplicate-source error", err)
 	}
 }
 
 func TestValidateRejectsContractNotRequiredByPort(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	entry := validRuntimeEntry("runtime.fixture", "exact:fixture", ContractClaim{
 		Contract:            ContractRuntimeProvider,
 		Disposition:         DispositionNotApplicable,
@@ -464,14 +441,13 @@ func TestValidateRejectsContractNotRequiredByPort(t *testing.T) {
 		NotApplicableReason: "fixture",
 	})
 
-	err := Validate([]Entry{entry}, now)
+	err := Validate([]Entry{entry})
 	if err == nil || !strings.Contains(err.Error(), "contract runtime.Unknown is not required by port runtime.Provider") {
 		t.Fatalf("Validate() error = %v, want inapplicable-contract error", err)
 	}
 }
 
 func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
-	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	constructorA := SymbolRef{ImportPath: "example.test/provider", Name: "NewA"}
 	constructorB := SymbolRef{ImportPath: "example.test/provider", Name: "NewB"}
 	claim := func(constructor SymbolRef) ContractClaim {
@@ -496,7 +472,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	}
 
 	t.Run("missing pair", func(t *testing.T) {
-		err := Validate([]Entry{entry}, now)
+		err := Validate([]Entry{entry})
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewB is missing required contract runtime.Provider") {
 			t.Fatalf("Validate() error = %v, want missing constructor-contract pair", err)
 		}
@@ -505,7 +481,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	t.Run("duplicate pair", func(t *testing.T) {
 		duplicate := entry
 		duplicate.Claims = []ContractClaim{claim(constructorA), claim(constructorA), claim(constructorB)}
-		err := Validate([]Entry{duplicate}, now)
+		err := Validate([]Entry{duplicate})
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewA contract runtime.Provider is duplicated") {
 			t.Fatalf("Validate() error = %v, want duplicate constructor-contract pair", err)
 		}
@@ -514,7 +490,7 @@ func TestValidateRequiresExactlyOneClaimPerConstructorContract(t *testing.T) {
 	t.Run("undeclared constructor", func(t *testing.T) {
 		undeclared := entry
 		undeclared.Claims = []ContractClaim{claim(constructorA), claim(constructorB), claim(SymbolRef{ImportPath: "example.test/provider", Name: "NewC"})}
-		err := Validate([]Entry{undeclared}, now)
+		err := Validate([]Entry{undeclared})
 		if err == nil || !strings.Contains(err.Error(), "constructor example.test/provider.NewC is not declared by the entry") {
 			t.Fatalf("Validate() error = %v, want undeclared-constructor error", err)
 		}
@@ -545,8 +521,8 @@ func TestCatalogBindsFakeAndBothSubprocessConstructors(t *testing.T) {
 				}
 				subprocessDefaultProof = claim.Proof
 			}
-			if claim.Waiver != nil && claim.Waiver.Owner == "ga-80po0c.1.2" {
-				t.Errorf("obsolete ga-80po0c.1.2 waiver remains on %s", renderSymbolRef(claim.Constructor))
+			if claim.Waiver != nil && claim.Waiver.Owner != runtimeContractWaiverOwner {
+				t.Errorf("waiver owner drifted from runtimeContractWaiverOwner: got %q on %s", claim.Waiver.Owner, renderSymbolRef(claim.Constructor))
 			}
 		}
 	}
@@ -609,14 +585,30 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	if got, want := renderSymbolRefs(withDirProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, internal/runtime/acp.acpConformanceDir, sync/atomic.AddInt64"; got != want {
 		t.Errorf("ACP WithDir allowed calls = %q, want %q", got, want)
 	}
-	if defaultWaiver == nil || defaultWaiver.Owner != "ga-80po0c.3" {
-		t.Errorf("ACP default waiver = %+v, want ga-80po0c.3 ownership", defaultWaiver)
+	if defaultWaiver == nil {
+		t.Fatal("acp.NewSeamBacked waiver is missing")
+	}
+	if defaultWaiver.Owner != runtimeContractWaiverOwner {
+		t.Errorf("ACP default waiver = %+v, want %s ownership", defaultWaiver, runtimeContractWaiverOwner)
+	}
+	// The default constructor now has its own direct proof attempt
+	// (TestACPDefaultDirConformance); the reason must point to that gap
+	// (currently: no clean Darwin-lane run yet, tracked by ga-csh74h) rather
+	// than resting on the WithDir proof, which does not exercise NewSeamBacked.
+	if strings.Contains(defaultWaiver.Reason, "WithDir proof does not exercise") {
+		t.Errorf("ACP default waiver reason still reads as the pre-ga-uz5t3a.10 generic reason: %q", defaultWaiver.Reason)
+	}
+	if !strings.Contains(defaultWaiver.Reason, "TestACPDefaultDirConformance") {
+		t.Errorf("ACP default waiver reason should name the implemented conformance test: %q", defaultWaiver.Reason)
+	}
+	if !strings.Contains(defaultWaiver.Reason, "ga-csh74h") {
+		t.Errorf("ACP default waiver reason should name the tracked Darwin-lane blocker: %q", defaultWaiver.Reason)
 	}
 }
 
 func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 	var proof *ProofRef
-	var t3Waiver *Waiver
+	var t3Proof *ProofRef
 
 	for _, entry := range Catalog() {
 		if entry.ID != "runtime.builtin.exec" {
@@ -624,31 +616,41 @@ func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
 		}
 		for _, claim := range entry.Claims {
 			switch claim.Constructor {
-			case repoSymbol("internal/runtime/exec", "NewSeamBacked"):
+			case repoSymbol("internal/runtime/exec", "NewSeamBackedForCity"):
 				if claim.Disposition != DispositionProved {
 					t.Errorf("exec seam-backed disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
 				proof = claim.Proof
 			case repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"):
-				if claim.Disposition != DispositionWaived {
-					t.Errorf("legacy T3 exec-prefix disposition = %q, want %q", claim.Disposition, DispositionWaived)
+				if claim.Disposition != DispositionProved {
+					t.Errorf("legacy T3 exec-prefix disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
-				t3Waiver = claim.Waiver
+				t3Proof = claim.Proof
 			}
 		}
 	}
 
 	if proof == nil {
-		t.Fatal("exec.NewSeamBacked proof is missing")
+		t.Fatal("exec.NewSeamBackedForCity proof is missing")
 	}
 	if proof.File != "internal/runtime/exec/exec_test.go" || proof.Test != "TestExecConformance" {
-		t.Errorf("exec.NewSeamBacked proof = %s#%s, want exec conformance entrypoint", proof.File, proof.Test)
+		t.Errorf("exec.NewSeamBackedForCity proof = %s#%s, want exec conformance entrypoint", proof.File, proof.Test)
 	}
 	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime/exec.execConformanceScript, sync/atomic.AddInt64"; got != want {
-		t.Errorf("exec.NewSeamBacked allowed calls = %q, want %q", got, want)
+		t.Errorf("exec.NewSeamBackedForCity allowed calls = %q, want %q", got, want)
 	}
-	if t3Waiver == nil || t3Waiver.Owner != "ga-80po0c.3" {
-		t.Errorf("legacy T3 exec-prefix waiver = %+v, want ga-80po0c.3 ownership", t3Waiver)
+
+	if t3Proof == nil {
+		t.Fatal("legacy T3 exec-prefix proof is missing")
+	}
+	if t3Proof.File != "internal/runtime/t3bridge/conformance_test.go" || t3Proof.Test != "TestT3Bridge_RunProviderConformance" {
+		t.Errorf("legacy T3 exec-prefix proof = %s#%s, want T3 bridge conformance entrypoint", t3Proof.File, t3Proof.Test)
+	}
+	if got, want := renderSymbolRefs(t3Proof.AllowedCalls), "internal/runtime/t3bridge.t3BridgeConformanceConfig, internal/runtime/t3bridge.t3BridgeConformanceCurrentSessionName, internal/runtime/t3bridge.t3BridgeConformanceNextSessionName"; got != want {
+		t.Errorf("legacy T3 exec-prefix allowed calls = %q, want %q", got, want)
+	}
+	if t3Proof.Options == nil || !t3Proof.Options.DuplicateStartReconnects {
+		t.Errorf("legacy T3 exec-prefix proof options = %+v, want DuplicateStartReconnects: true", t3Proof.Options)
 	}
 }
 
@@ -684,6 +686,58 @@ func TestCatalogBindsAutoCompositionToConformantFakes(t *testing.T) {
 	// ledger from overstating the proof as whole-composition coverage.
 	if got, want := proof.Scope, "default-route conformance; ACP route covered by focused auto routing tests"; got != want {
 		t.Errorf("auto.New proof scope = %q, want %q", got, want)
+	}
+}
+
+func TestCatalogBindsHybridCompositionToLocalRoute(t *testing.T) {
+	var proof *ProofRef
+	var wrapper *ContractClaim
+
+	for _, entry := range Catalog() {
+		for i, claim := range entry.Claims {
+			switch claim.Constructor {
+			case repoSymbol("internal/runtime/hybrid", "New"):
+				if entry.ID != "runtime.composition.hybrid" {
+					t.Errorf("hybrid.New is claimed by %q, want runtime.composition.hybrid", entry.ID)
+				}
+				if claim.Disposition != DispositionProved {
+					t.Errorf("hybrid composition disposition = %q, want %q", claim.Disposition, DispositionProved)
+				}
+				proof = claim.Proof
+			case repoSymbol("cmd/gc", "newHybridProvider"):
+				wrapper = &entry.Claims[i]
+			}
+		}
+	}
+
+	if proof == nil {
+		t.Fatal("hybrid.New proof is missing")
+	}
+	if proof.File != "internal/runtime/hybrid/conformance_test.go" || proof.Test != "TestHybridConformance" {
+		t.Errorf("hybrid.New proof = %s#%s, want hybrid conformance entrypoint", proof.File, proof.Test)
+	}
+	if got, want := renderSymbolRefs(proof.AllowedCalls), "fmt.Sprintf, internal/runtime.NewFake, sync/atomic.AddInt64"; got != want {
+		t.Errorf("hybrid.New allowed calls = %q, want %q", got, want)
+	}
+	// The conformance factory routes every session to the local backend, so
+	// the shared contract never reaches the remote route; the scope keeps the
+	// rendered ledger from overstating the proof as whole-composition coverage.
+	if got, want := proof.Scope, "local-route conformance via RunProviderTests; remote-route delegation covered separately by internal/runtime/hybrid's fake-backed unit tests"; got != want {
+		t.Errorf("hybrid.New proof scope = %q, want %q", got, want)
+	}
+
+	// cmd/gc.newHybridProvider builds the K8s backend before it consults its
+	// routing predicate, so the contract cannot run against the wrapper
+	// without a Kubernetes client configuration. The proof above must not be
+	// read as covering it: the wrapper stays waived, with its reason on record.
+	if wrapper == nil {
+		t.Fatal("cmd/gc.newHybridProvider claim is missing")
+	}
+	if wrapper.Disposition != DispositionWaived {
+		t.Errorf("cmd/gc.newHybridProvider disposition = %q, want %q", wrapper.Disposition, DispositionWaived)
+	}
+	if wrapper.Waiver == nil || !strings.Contains(wrapper.Waiver.Reason, "K8s backend before") {
+		t.Errorf("cmd/gc.newHybridProvider waiver = %+v, want a reason naming the K8s-before-routing construction order", wrapper.Waiver)
 	}
 }
 
@@ -749,6 +803,85 @@ func NewExternalFake() *Fake { return nil }
 	}
 	if gotText, wantText := renderReusableDoubles(got), renderReusableDoubles(want); gotText != wantText {
 		t.Fatalf("doubles = %s, want %s", gotText, wantText)
+	}
+}
+
+func TestDiscoverRuntimeProviderDoublesImportsProcessGroupDeclarations(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "valid aliases",
+			source: `package processgroup
+import ("errors"; "time")
+var ErrProcessNotConfirmedDead = errors.New("not confirmed dead")
+const ManagedProcessReapGrace = 3 * time.Second
+func ignoredBody() { missingBodySymbol() }
+`,
+		},
+		{
+			name: "missing alias target",
+			source: `package processgroup
+const ManagedProcessReapGrace = 3
+`,
+			want: "undefined: processgroup.ErrProcessNotConfirmedDead",
+		},
+		{
+			name: "invalid dependency declaration",
+			source: `package processgroup
+var ErrProcessNotConfirmedDead MissingType
+const ManagedProcessReapGrace = 3
+`,
+			want: "type-check declaration dependency",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "runtime")
+			files := map[string]string{
+				"runtime/runtime.go": `package runtime
+import "github.com/gastownhall/gascity/internal/processgroup"
+type Provider interface { Run() }
+var ErrProcessNotConfirmedDead = processgroup.ErrProcessNotConfirmedDead
+const ManagedProcessReapGrace = processgroup.ManagedProcessReapGrace
+`,
+				"runtime/fake.go": `package runtime
+type Fake struct{}
+func (*Fake) Run() {}
+func NewFake() *Fake { return nil }
+`,
+				"processgroup/ownership.go": tt.source,
+			}
+			for name, source := range files {
+				path := filepath.Join(root, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := DiscoverRuntimeProviderDoubles(dir)
+			if tt.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("DiscoverRuntimeProviderDoubles() error = %v, want containing %q", err, tt.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DiscoverRuntimeProviderDoubles: %v", err)
+			}
+			want := []ReusableDouble{{
+				Type:         repoSymbol("internal/runtime", "Fake"),
+				Constructors: []SymbolRef{repoSymbol("internal/runtime", "NewFake")},
+			}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("doubles = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
@@ -1076,6 +1209,36 @@ func buildRuntimeRegistry() {
 	_, err := DiscoverRuntimeCatalog(source)
 	if err == nil || !strings.Contains(err.Error(), "fallback constructor set") {
 		t.Fatalf("DiscoverRuntimeCatalog() error = %v, want unledgered-fallback error", err)
+	}
+}
+
+func TestDiscoverRuntimeCatalogFallbackFactoryPrecedesOptions(t *testing.T) {
+	const prefix = `package main
+import (
+	registryalias "github.com/gastownhall/gascity/internal/runtime/registry"
+	tmuxalias "github.com/gastownhall/gascity/internal/runtime/tmux"
+)
+func buildRuntimeRegistry() {
+	r := registryalias.New()
+	tmuxFactory := func() { return tmuxalias.NewSeamBackedWithConfig(), nil }
+	host := registryalias.WithHostCapabilities(nil)
+	must(r.Register("tmux", tmuxFactory, host))
+`
+	withOptions, err := DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback(tmuxFactory, host)\nreturn r\n}"))
+	if err != nil {
+		t.Fatalf("DiscoverRuntimeCatalog(SetFallback with options) error = %v", err)
+	}
+	bare, err := DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback(tmuxFactory)\nreturn r\n}"))
+	if err != nil {
+		t.Fatalf("DiscoverRuntimeCatalog(bare SetFallback) error = %v", err)
+	}
+	if !reflect.DeepEqual(withOptions, bare) {
+		t.Fatalf("registration options changed the discovered catalog:\nwith options: %+v\nbare:         %+v", withOptions, bare)
+	}
+
+	_, err = DiscoverRuntimeCatalog([]byte(prefix + "r.SetFallback()\nreturn r\n}"))
+	if err == nil || !strings.Contains(err.Error(), "must have a factory") {
+		t.Fatalf("DiscoverRuntimeCatalog(SetFallback without a factory) error = %v, want missing-factory error", err)
 	}
 }
 
@@ -1544,7 +1707,10 @@ func TestValidateSourceRefsBindsManualCompositionConstructor(t *testing.T) {
 func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	root := repoRoot(t)
 	entries := Catalog()
-	if err := Validate(entries, time.Now().UTC()); err != nil {
+	// Structure only: the waiver dates are judged against today by
+	// internal/testpolicy/waiverexpiry, the one never-cached date check, so
+	// this test's verdict cannot go stale on the calendar.
+	if err := Validate(entries); err != nil {
 		t.Fatalf("Validate(Catalog): %v", err)
 	}
 
@@ -1572,9 +1738,22 @@ func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	if err := ValidateProofRefs(root, entries); err != nil {
 		t.Fatalf("ValidateProofRefs: %v", err)
 	}
-	doc, err := os.ReadFile(filepath.Join(root, "TESTING.md"))
+	testingMDPath := filepath.Join(root, "TESTING.md")
+	doc, err := os.ReadFile(testingMDPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if *updateLedgerDoc {
+		updated, err := ReplaceMarkdownBlock(string(doc), RenderMarkdown(entries))
+		if err != nil {
+			t.Fatalf("replace TESTING.md ledger block: %v", err)
+		}
+		if updated != string(doc) {
+			if err := os.WriteFile(testingMDPath, []byte(updated), 0o644); err != nil {
+				t.Fatalf("write TESTING.md: %v", err)
+			}
+			doc = []byte(updated)
+		}
 	}
 	if err := CheckMarkdown(string(doc), entries); err != nil {
 		t.Fatalf("CheckMarkdown: %v", err)
@@ -1615,7 +1794,8 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	first[0].Claims[0].Contract = ContractID("mutated.contract")
 	first[0].Claims[0].Proof.File = "mutated-proof.go"
 	first[0].Claims[0].Proof.AllowedCalls[0].Name = "MutatedCall"
-	first[3].Claims[0].Waiver.Owner = "mutated-owner"
+	// Catalog()[5] is k8s, an entry whose runtime.Provider claim is still waived.
+	first[5].Claims[0].Waiver.Owner = "mutated-owner"
 	first[len(first)-1].Source.Function = "mutatedSource"
 
 	second := Catalog()
@@ -1640,10 +1820,10 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if got := second[0].Claims[0].Proof.AllowedCalls[0].Name; got != "Sprintf" {
 		t.Errorf("Catalog() proof allowed call leaked mutation: %q", got)
 	}
-	if second[3].Claims[0].Waiver.Owner != "ga-80po0c.3" {
-		t.Errorf("Catalog() waiver leaked mutation: %q", second[3].Claims[0].Waiver.Owner)
+	if second[5].Claims[0].Waiver.Owner != runtimeContractWaiverOwner {
+		t.Errorf("Catalog() waiver leaked mutation: %q", second[5].Claims[0].Waiver.Owner)
 	}
-	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
+	if second[len(second)-1].Source.Function != "newHybridProvider" {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)
 	}
 }
@@ -1662,6 +1842,39 @@ func TestCheckMarkdownRejectsDrift(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), RenderMarkdown(entries)) {
 		t.Fatalf("CheckMarkdown() error = %v, want actionable expected block", err)
+	}
+}
+
+func TestReplaceMarkdownBlockRewritesOnlyTheMarkedBlock(t *testing.T) {
+	doc := "before\n" + MarkdownStart + "\nstale\n" + MarkdownEnd + "\nafter\n"
+	replacement := MarkdownStart + "\nfresh\n" + MarkdownEnd
+
+	got, err := ReplaceMarkdownBlock(doc, replacement)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	if want := "before\n" + replacement + "\nafter\n"; got != want {
+		t.Fatalf("ReplaceMarkdownBlock() = %q, want %q", got, want)
+	}
+}
+
+func TestReplaceMarkdownBlockRejectsMissingMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"no markers", "plain document\n", "exactly one"},
+		{"duplicated start", MarkdownStart + MarkdownStart + MarkdownEnd, "exactly one"},
+		{"out of order", MarkdownEnd + "\nbody\n" + MarkdownStart, "out of order"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ReplaceMarkdownBlock(tt.doc, "replacement")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ReplaceMarkdownBlock(%q) error = %v, want containing %q", tt.doc, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -1727,6 +1940,14 @@ func renderRegistrations(registrations []RuntimeRegistration) string {
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	// GC_TEST_REPO_ROOT lets `bazel test` point whole-repo scan guards at a
+	// real checkout; runfiles trees cannot stand in for the repository.
+	if root := bazeltest.OverrideRoot(); root != "" {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+			t.Fatalf("GC_TEST_REPO_ROOT=%s has no go.mod: %v", root, err)
+		}
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -1740,5 +1961,226 @@ func repoRoot(t *testing.T) string {
 			t.Fatal("could not find repository root")
 		}
 		dir = parent
+	}
+}
+
+// TestValidateRequiresOptionsProofToUseOptionsRunner pins the ledger-level
+// pairing of ProofRef.Options and ProofRef.Runner: a proof that declares
+// options must name RunProviderTestsWithOptions, and a proof that declares
+// none must name RunProviderTests.
+func TestValidateRequiresOptionsProofToUseOptionsRunner(t *testing.T) {
+	tests := []struct {
+		name    string
+		options *ProofOptions
+		runner  SymbolRef
+		want    string
+	}{
+		{
+			name:    "options declared with the plain runner",
+			options: &ProofOptions{DuplicateStartReconnects: true},
+			runner:  runtimeProviderRunner,
+			want:    "proof runner is internal/runtime/runtimetest.RunProviderTests, want internal/runtime/runtimetest.RunProviderTestsWithOptions",
+		},
+		{
+			name:   "no options declared with the options runner",
+			runner: runtimeProviderRunnerWithOptions,
+			want:   "proof runner is internal/runtime/runtimetest.RunProviderTestsWithOptions, want internal/runtime/runtimetest.RunProviderTests",
+		},
+		{
+			name:    "options declared with the options runner",
+			options: &ProofOptions{DuplicateStartReconnects: true},
+			runner:  runtimeProviderRunnerWithOptions,
+		},
+		{
+			name:   "no options declared with the plain runner",
+			runner: runtimeProviderRunner,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := validRuntimeEntry("runtime.fixture", "exact:fixture", ContractClaim{
+				Contract:    ContractRuntimeProvider,
+				Disposition: DispositionProved,
+				Proof: &ProofRef{
+					File:    "internal/runtime/fake_conformance_test.go",
+					Test:    "TestFakeConformance",
+					Runner:  tt.runner,
+					Options: tt.options,
+				},
+			})
+			err := Validate([]Entry{entry})
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateProofRefsChecksContractRunnerOptions pins the options-literal
+// rules the AST proof validator applies to RunProviderTestsWithOptions: the
+// third argument must be an inline runtimetest.Options literal that sets only
+// DuplicateStartReconnects, to a literal bool equal to the ledger's
+// ProofOptions, so a proved claim cannot hide a skip or a weakened
+// expectation behind a runner option the static check cannot read.
+func TestValidateProofRefsChecksContractRunnerOptions(t *testing.T) {
+	const imports = `import (
+	fmtalias "fmt"
+	runtimealias "github.com/gastownhall/gascity/internal/runtime"
+	contractalias "github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	testalias "testing"
+)
+`
+	reconnects := &ProofOptions{DuplicateStartReconnects: true}
+	noKnob := &ProofOptions{}
+	tests := []struct {
+		name     string
+		options  *ProofOptions
+		preamble string
+		trailing string
+		want     string
+	}{
+		{
+			name:     "explicit true matching the ledger",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true}`,
+		},
+		{
+			name:     "empty literal when the ledger declares no knob",
+			options:  noKnob,
+			trailing: `, contractalias.Options{}`,
+		},
+		{
+			name:     "explicit false when the ledger declares no knob",
+			options:  noKnob,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: false}`,
+		},
+		{
+			name:    "options argument missing",
+			options: reconnects,
+			want:    "requires the test parameter, one inline factory, and an options literal",
+		},
+		{
+			name:     "extra argument after the options literal",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true}, "extra"`,
+			want:     "requires the test parameter, one inline factory, and an options literal",
+		},
+		{
+			name:     "options passed without being declared",
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true}`,
+			want:     "requires the test parameter and one inline factory",
+		},
+		{
+			name:     "options held in a variable",
+			options:  reconnects,
+			preamble: "var opts contractalias.Options\n",
+			trailing: `, opts`,
+			want:     "options argument must be an inline internal/runtime/runtimetest.Options composite literal",
+		},
+		{
+			name:     "options literal of another package's type",
+			options:  reconnects,
+			trailing: `, fmtalias.Options{DuplicateStartReconnects: true}`,
+			want:     "options argument must be an inline internal/runtime/runtimetest.Options composite literal",
+		},
+		{
+			name:     "options literal of an unqualified local type",
+			options:  reconnects,
+			trailing: `, Options{DuplicateStartReconnects: true}`,
+			want:     "options argument must be an inline internal/runtime/runtimetest.Options composite literal",
+		},
+		{
+			name:     "options literal that is not a named type",
+			options:  reconnects,
+			trailing: `, []bool{true}`,
+			want:     "options argument must be an inline internal/runtime/runtimetest.Options composite literal",
+		},
+		{
+			name:     "positional field",
+			options:  reconnects,
+			trailing: `, contractalias.Options{true}`,
+			want:     "options literal fields must use key: value form",
+		},
+		{
+			name:     "non-identifier field key",
+			options:  reconnects,
+			trailing: `, contractalias.Options{"DuplicateStartReconnects": true}`,
+			want:     "options literal has a non-identifier field key",
+		},
+		{
+			name:     "SkipStartError beside the knob",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true, SkipStartError: func(error) bool { return true }}`,
+			want:     "options literal field SkipStartError is not allowed",
+		},
+		{
+			name:     "SkipStartError without the knob",
+			options:  reconnects,
+			trailing: `, contractalias.Options{SkipStartError: func(error) bool { return true }}`,
+			want:     "options literal field SkipStartError is not allowed",
+		},
+		{
+			name:     "knob set from a variable",
+			options:  reconnects,
+			preamble: "var reconnect bool\n",
+			trailing: `, contractalias.Options{DuplicateStartReconnects: reconnect}`,
+			want:     "options field DuplicateStartReconnects must be a literal bool",
+		},
+		{
+			name:     "knob set from an expression",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: !false}`,
+			want:     "options field DuplicateStartReconnects must be a literal bool",
+		},
+		{
+			name:     "knob false where the ledger declares true",
+			options:  reconnects,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: false}`,
+			want:     "options field DuplicateStartReconnects is false, want true",
+		},
+		{
+			name:     "knob true where the ledger declares none",
+			options:  noKnob,
+			trailing: `, contractalias.Options{DuplicateStartReconnects: true}`,
+			want:     "options field DuplicateStartReconnects is true, want false",
+		},
+		{
+			name:     "knob omitted where the ledger declares true",
+			options:  reconnects,
+			trailing: `, contractalias.Options{}`,
+			want:     "options literal must set DuplicateStartReconnects: true explicitly",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			body := "func TestProof(t *testalias.T) {\n" + tt.preamble +
+				"contractalias.RunProviderTestsWithOptions(t, func(_ *testalias.T) (any, any, string) {\n" +
+				"return runtimealias.NewFake(), nil, \"session\"\n}" + tt.trailing + ")\n}\n"
+			if err := os.WriteFile(filepath.Join(root, "provider_test.go"), []byte("package fixture\n"+imports+body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			entry := proofFixtureEntry("provider_test.go", "TestProof")
+			entry.Claims[0].Proof.Runner = runtimeProviderRunnerWithOptions
+			entry.Claims[0].Proof.Options = tt.options
+			err := ValidateProofRefs(root, []Entry{entry})
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("ValidateProofRefs() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateProofRefs() error = %v, want containing %q", err, tt.want)
+			}
+		})
 	}
 }

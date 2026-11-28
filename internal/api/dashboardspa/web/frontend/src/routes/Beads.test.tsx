@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BeadsPage } from './Beads';
 import { setActiveCity } from '../api/cityBase';
@@ -10,6 +10,7 @@ import type { SupervisorBead } from '../supervisor/beadReads';
 
 const PROJECT = 'gascity';
 const beadQueries: URLSearchParams[] = [];
+let boardBeads: SupervisorBead[];
 const supervisorWrites: Array<{
   method: string;
   path: string;
@@ -19,6 +20,7 @@ const supervisorWrites: Array<{
 beforeEach(() => {
   setActiveCity('test-city');
   beadQueries.length = 0;
+  boardBeads = [sampleBead()];
   supervisorWrites.length = 0;
   invalidate('beads:board:');
   invalidate('sessions');
@@ -31,7 +33,7 @@ beforeEach(() => {
       const method = requestMethod(input, init);
       if (url.pathname === '/v0/city/test-city/beads' && method === 'GET') {
         beadQueries.push(url.searchParams);
-        return jsonResponse(beadListPayload(url.searchParams.has('type') ? [] : [sampleBead()]));
+        return jsonResponse(beadListPayload(url.searchParams.has('type') ? [] : boardBeads));
       }
       if (url.pathname === '/v0/city/test-city/beads' && method === 'POST') {
         supervisorWrites.push({
@@ -138,24 +140,77 @@ describe('BeadsPage', () => {
     expect(screen.getByRole('button', { name: /new bead/i })).toBeTruthy();
   });
 
+  it('filters the board by routed agent even before a session claims the bead', async () => {
+    const base = sampleBead(false);
+    boardBeads = [
+      { ...base, metadata: { 'gc.routed_to': 'reviewer' } },
+      {
+        ...base,
+        id: `${PROJECT}-0002`,
+        title: 'Claimed review',
+        status: 'in_progress',
+        assignee: 'session-42',
+        metadata: { 'gc.routed_to': 'reviewer' },
+      },
+      {
+        ...base,
+        id: `${PROJECT}-0003`,
+        title: 'Another role',
+        assignee: 'reviewer',
+        metadata: { 'gc.routed_to': 'rig/reviewer' },
+      },
+      { ...base, id: `${PROJECT}-0004`, title: 'Unrouted work' },
+    ];
+    renderPage();
+
+    const board = await screen.findByRole('region', { name: PROJECT });
+    const row = within(board).getByRole('button', { name: /sample bead/i });
+    expect(within(row).getByText('For agent: reviewer')).toBeTruthy();
+    const filter = screen.getByRole('combobox', { name: /for agent/i });
+    // The routed-agent filter is client-side: it must never issue a new read.
+    const queriesAfterLoad = beadQueries.length;
+    expect(queriesAfterLoad).toBeGreaterThan(0);
+
+    fireEvent.change(filter, { target: { value: 'reviewer' } });
+    expect(within(board).getByText('Sample bead')).toBeTruthy();
+    expect(within(board).getByText('Claimed review')).toBeTruthy();
+    expect(within(board).queryByText('Another role')).toBeNull();
+    expect(within(board).queryByText('Unrouted work')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /^in progress$/i }));
+    expect(within(board).queryByText('Sample bead')).toBeNull();
+    expect(within(board).getByText('Claimed review')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /^in progress$/i }));
+    fireEvent.change(filter, { target: { value: '' } });
+    expect(within(board).getByText('Unrouted work')).toBeTruthy();
+    expect(beadQueries).toHaveLength(queriesAfterLoad);
+    expect(supervisorWrites).toHaveLength(0);
+  });
+
   it('requests direct supervisor current engineering beads without type fan-out or closed history', async () => {
     renderPage();
 
     await screen.findByText('Sample bead');
 
-    expect(beadQueries.length).toBe(1);
-    const [query] = beadQueries;
+    // One windowed read plus the dedicated in-progress leg (gp-6xd F1) —
+    // never a per-type fan-out or a closed-history scan.
+    expect(beadQueries.length).toBe(2);
+    const [query, inProgressLeg] = beadQueries;
     expect(query?.get('limit')).toBe('1000');
     expect(query?.has('all')).toBe(false);
     expect(query?.has('type')).toBe(false);
     expect(query?.has('showAll')).toBe(false);
+    expect(inProgressLeg?.get('status')).toBe('in_progress');
+    expect(inProgressLeg?.has('all')).toBe(false);
+    expect(inProgressLeg?.has('type')).toBe(false);
   });
 
   it('refetches with all=true when the operator activates the closed status control', async () => {
     renderPage();
 
     await screen.findByText('Sample bead');
-    expect(beadQueries.length).toBe(1);
+    expect(beadQueries.length).toBe(2);
     for (const query of beadQueries) {
       expect(query.has('all')).toBe(false);
     }
@@ -163,18 +218,21 @@ describe('BeadsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /^closed$/i }));
 
     // Activating `closed` flips the data scope, forcing exactly one fresh
-    // read that now carries all=true (closed beads included).
-    await waitFor(() => expect(beadQueries.length).toBe(2));
-    const closedQuery = beadQueries.at(-1);
+    // read (window + in-progress leg) whose window now carries all=true
+    // (closed beads included). The leg never carries all — in-progress work is
+    // never closed.
+    await waitFor(() => expect(beadQueries.length).toBe(4));
+    const closedQuery = beadQueries.at(-2);
     expect(closedQuery?.get('all')).toBe('true');
     expect(closedQuery?.has('type')).toBe(false);
+    expect(beadQueries.at(-1)?.has('all')).toBe(false);
 
     // Deactivating `closed` must revert to an open-only fetch — otherwise the
     // chip would read inactive while the board silently keeps scanning closed
     // history (the showClosed/chip desync this dual-state wiring must avoid).
     fireEvent.click(screen.getByRole('button', { name: /^closed$/i }));
-    await waitFor(() => expect(beadQueries.length).toBe(3));
-    const reopenedQuery = beadQueries.at(-1);
+    await waitFor(() => expect(beadQueries.length).toBe(6));
+    const reopenedQuery = beadQueries.at(-2);
     expect(reopenedQuery?.has('all')).toBe(false);
     expect(reopenedQuery?.has('type')).toBe(false);
   });
@@ -187,11 +245,13 @@ describe('BeadsPage', () => {
       target: { value: 'east' },
     });
 
-    await waitFor(() => expect(beadQueries.length).toBe(2));
+    await waitFor(() => expect(beadQueries.length).toBe(4));
+    // Both legs of the fresh read carry the rig filter.
     const latestQuery = beadQueries.at(-1);
     expect(latestQuery?.get('rig')).toBe('east');
     expect(latestQuery?.has('all')).toBe(false);
     expect(latestQuery?.has('type')).toBe(false);
+    expect(beadQueries.at(-2)?.get('rig')).toBe('east');
   });
 
   it('lists only real rig names in the rig dropdown — no filesystem paths or non-rig dirs', async () => {
@@ -211,6 +271,24 @@ describe('BeadsPage', () => {
       .map((option) => option.value)
       .filter((value) => value.length > 0);
     expect(optionValues).toEqual(['east', 'west']);
+  });
+
+  it('labels sling agents by agent name, with the provider label as context', async () => {
+    renderPage();
+
+    await screen.findByText('Sample bead');
+    fireEvent.click(screen.getByRole('button', { name: /new bead/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    const agentSelect = within(dialog).getByLabelText(/agent/i) as HTMLSelectElement;
+    const agentLabels = () =>
+      Array.from(agentSelect.options).map((option) => option.textContent ?? '');
+
+    // display_name is the provider's label ("Claude Code"), shared by every
+    // agent on that provider, so it cannot be what tells the options apart.
+    expect(agentLabels()).toEqual(['mayor (Claude Code)']);
+    fireEvent.change(within(dialog).getByLabelText(/^rig$/i), { target: { value: 'west' } });
+    expect(agentLabels()).toEqual(['west/mechanic (Claude Code)']);
   });
 
   it('deep-links to and selects a bead from the bead query param', async () => {
@@ -245,6 +323,7 @@ describe('BeadsPage', () => {
         body: {
           title: 'Route failing work',
           description: 'Please investigate the failed deployment.',
+          rig: 'east',
         },
       },
       {
@@ -292,10 +371,7 @@ describe('BeadsPage', () => {
 
 function renderPage(path = '/beads') {
   return render(
-    <MemoryRouter
-      initialEntries={[path]}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={[path]}>
       <NowProvider intervalMs={1_000_000}>
         <OperatorConfigProvider
           operator={{
@@ -325,7 +401,7 @@ function beadListPayload(items: ReadonlyArray<SupervisorBead>): {
   return { items, total: items.length };
 }
 
-function sampleBead(): SupervisorBead {
+function sampleBead(assigned = true): SupervisorBead {
   return {
     id: `${PROJECT}-0001`,
     title: 'Sample bead',
@@ -337,7 +413,7 @@ function sampleBead(): SupervisorBead {
     status: 'open',
     priority: 0,
     issue_type: 'task',
-    assignee: 'mayor',
+    ...(assigned ? { assignee: 'mayor' } : {}),
     labels: [],
     created_at: '2026-01-01T00:00:00Z',
   };
@@ -346,7 +422,8 @@ function sampleBead(): SupervisorBead {
 function agent(name: string, rig: string): unknown {
   return {
     name,
-    display_name: name,
+    // The supervisor fills display_name from the agent's provider.
+    display_name: 'Claude Code',
     rig,
     available: true,
     running: true,

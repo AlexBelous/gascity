@@ -38,6 +38,7 @@ func discoveredCommandFromPackCommandInfo(info config.PackCommandInfo) config.Di
 		PackDir:     info.PackDir,
 		PackName:    info.PackName,
 		BindingName: info.PackName,
+		NativeHelp:  info.Entry.NativeHelp,
 	}
 }
 
@@ -116,6 +117,9 @@ var stdin = func() io.Reader { return os.Stdin }
 
 // expandScriptTemplate expands Go text/template variables in the script
 // path. On any error, returns the raw script string (graceful fallback).
+//
+// Pack commands are resolved without an agent, so the rig-derived fields —
+// including DefaultBranch — stay at their zero value here by construction.
 func expandScriptTemplate(script, cityPath, cityName, packDir string) string {
 	if !strings.Contains(script, "{{") {
 		return script
@@ -379,23 +383,29 @@ func (candidate packCommandTreeCandidate) request(args []string) (packCommandTre
 	return packCommandTreeRequest(probe, args)
 }
 
+// resolveCityForExplicitScope resolves the city as if --city and --rig had
+// been parsed with the given values, leaving the global flags untouched. An
+// unset scope keeps the ambient value.
+func resolveCityForExplicitScope(city, rig string, citySet, rigSet bool) (string, error) {
+	previousCity, previousRig := cityFlag, rigFlag
+	if citySet {
+		cityFlag = city
+	}
+	if rigSet {
+		rigFlag = rig
+	}
+	defer func() {
+		cityFlag, rigFlag = previousCity, previousRig
+	}()
+	return resolveCity()
+}
+
 func resolvePackCommandTreeCandidate(request packCommandTreePreparation) (packCommandTreeCandidate, bool) {
 	if request.binding == "" || request.hasEmptyExplicitScope() {
 		return packCommandTreeCandidate{}, false
 	}
 
-	previousCity, previousRig := cityFlag, rigFlag
-	if request.citySet {
-		cityFlag = request.city
-	}
-	if request.rigSet {
-		rigFlag = request.rig
-	}
-	defer func() {
-		cityFlag, rigFlag = previousCity, previousRig
-	}()
-
-	cityPath, err := resolveCity()
+	cityPath, err := resolveCityForExplicitScope(request.city, request.rig, request.citySet, request.rigSet)
 	if err != nil {
 		return packCommandTreeCandidate{}, false
 	}

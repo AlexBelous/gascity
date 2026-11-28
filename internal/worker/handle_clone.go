@@ -6,6 +6,8 @@ func profileFamily(profile Profile) string {
 	switch profile {
 	case ProfileCodexTmuxCLI:
 		return "codex"
+	case ProfileCursorTmuxCLI:
+		return "cursor"
 	case ProfileGeminiTmuxCLI:
 		return "gemini"
 	case ProfileKimiTmuxCLI:
@@ -58,6 +60,7 @@ func cloneRuntimeConfig(cfg runtime.Config) runtime.Config {
 	cfg.Env = cloneStringMap(cfg.Env)
 	cfg.MCPServers = runtime.NormalizeMCPServerConfigs(cfg.MCPServers)
 	cfg.ProcessNames = append([]string(nil), cfg.ProcessNames...)
+	cfg.NotReadyMarkers = append([]string(nil), cfg.NotReadyMarkers...)
 	cfg.PreStart = append([]string(nil), cfg.PreStart...)
 	cfg.SessionSetup = append([]string(nil), cfg.SessionSetup...)
 	cfg.SessionLive = append([]string(nil), cfg.SessionLive...)

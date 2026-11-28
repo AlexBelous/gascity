@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -14,13 +15,14 @@ import (
 // least-recently-woken first (wakeFairnessTime → sortCandidatesByWakeFairness). A
 // same-tick sleep→re-wake (max-age kill / idle kill) clears last_woke_at via
 // SleepPatch BEFORE the startCandidate is appended, so the re-woken session must
-// sort by its cleared-fallback key (CreatedAt), competing fairly instead of
-// jumping the queue on a stale last_woke_at.
+// sort by its cleared-fallback key (slept_at, stamped by the same SleepPatch;
+// falling further back to CreatedAt only when slept_at is also unset),
+// competing fairly instead of jumping the queue on a stale last_woke_at.
 //
 // This pins two things across the W5 A→B read cutover:
 //  1. wakeFairnessTime returns the right key for every coupling-mirror scenario
-//     (cleared last_woke_at → CreatedAt fallback; valid last_woke_at honored; both
-//     empty → zero) and sorts accordingly.
+//     (cleared last_woke_at → slept_at fallback → CreatedAt when slept_at is also
+//     unset; valid last_woke_at honored; all empty → zero) and sorts accordingly.
 //  2. The captured Info twin agrees with the raw pointer for that key — a fairness
 //     time computed off session.Info equals wakeFairnessTime over the same bead.
 //     In Commit A wakeFairnessTime still reads the raw pointer, so this catches a
@@ -30,10 +32,19 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 	base := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 
 	// infoFairnessTime mirrors wakeFairnessTime's rule off the typed twin: parse
-	// last_woke_at, else fall back to CreatedAt, else zero. Kept local so the pin
+	// last_woke_at, else reset_committed_at while a reset is pending, else
+	// slept_at, else fall back to CreatedAt, else zero. Kept local so the pin
 	// stays honest even after wakeFairnessTime itself moves onto Info.
 	infoFairnessTime := func(i session.Info) time.Time {
 		if t, err := time.Parse(time.RFC3339, i.LastWokeAt); err == nil {
+			return t
+		}
+		if strings.TrimSpace(i.ContinuationResetPending) == "true" {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(i.ResetCommittedAt)); err == nil {
+				return t
+			}
+		}
+		if t, err := time.Parse(time.RFC3339, i.SleptAt); err == nil {
 			return t
 		}
 		if !i.CreatedAt.IsZero() {
@@ -69,6 +80,16 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 		return bead
 	}
 
+	// applyDrainAck mirrors the drain-ack coupling: AcknowledgeDrainPatch also
+	// clears last_woke_at (the dominant real-world path for wake_mode=fresh
+	// roles) and, like SleepPatch, stamps slept_at as the fallback fairness key.
+	applyDrainAck := func(bead beads.Bead) beads.Bead {
+		for k, v := range session.AcknowledgeDrainPatch(base, false) {
+			bead.Metadata[k] = v
+		}
+		return bead
+	}
+
 	valid := base.Add(-30 * time.Minute).Format(time.RFC3339)
 
 	scenarios := []struct {
@@ -77,18 +98,20 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 		want time.Time
 	}{
 		{
-			name: "max-age-kill-clears-last-woke-at-falls-back-to-created",
+			// SleepPatch stamps slept_at=base alongside clearing last_woke_at, so
+			// the fallback now lands on the slept_at tier (base), not CreatedAt.
+			name: "max-age-kill-clears-last-woke-at-falls-back-to-slept-at",
 			bead: applySleep(beadWithMeta("ga-maxage", base.Add(-2*time.Hour), map[string]string{
 				"template": "worker", "last_woke_at": valid,
 			})),
-			want: base.Add(-2 * time.Hour),
+			want: base,
 		},
 		{
-			name: "idle-kill-clears-last-woke-at-falls-back-to-created",
+			name: "idle-kill-clears-last-woke-at-falls-back-to-slept-at",
 			bead: applySleep(beadWithMeta("ga-idle", base.Add(-90*time.Minute), map[string]string{
 				"template": "worker", "last_woke_at": valid, "sleep_reason": "idle",
 			})),
-			want: base.Add(-90 * time.Minute),
+			want: base,
 		},
 		{
 			name: "valid-last-woke-at-honored",
@@ -111,6 +134,28 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 			}),
 			want: time.Time{},
 		},
+		{
+			// The actual production gap: AcknowledgeDrainPatch is the dominant
+			// real-world drain path for wake_mode=fresh roles, and (until this fix)
+			// it clears last_woke_at without stamping slept_at, collapsing straight
+			// to the CreatedAt floor. This scenario pins the fixed behavior: the
+			// drain-ack's own slept_at stamp (base) wins over the far-older
+			// CreatedAt.
+			name: "drain-ack-clears-last-woke-at-falls-back-to-slept-at",
+			bead: applyDrainAck(beadWithMeta("ga-drainack", base.Add(-5*time.Hour), map[string]string{
+				"template": "worker", "last_woke_at": valid,
+			})),
+			want: base,
+		},
+		{
+			// A malformed slept_at must fall through the middle tier to CreatedAt
+			// rather than being treated as present-but-zero.
+			name: "malformed-slept-at-falls-through-to-created",
+			bead: beadWithMeta("ga-badslept", base.Add(-70*time.Minute), map[string]string{
+				"template": "worker", "slept_at": "not-a-timestamp",
+			}),
+			want: base.Add(-70 * time.Minute),
+		},
 	}
 
 	for _, sc := range scenarios {
@@ -130,9 +175,10 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 	}
 
 	// Same-tick re-wake ordering (#2574): two sessions slept THIS tick (last_woke_at
-	// cleared) sort by CreatedAt among themselves and ahead of one that still carries
-	// a newer valid last_woke_at. sortCandidatesByWakeFairness must rotate the budget
-	// onto the longest-waiting sessions rather than defer them on a stale key.
+	// cleared) sort by their shared slept_at among themselves and ahead of one that
+	// still carries a newer valid last_woke_at. sortCandidatesByWakeFairness must
+	// rotate the budget onto the longest-waiting sessions rather than defer them on
+	// a stale key.
 	oldSlept := candidateFor(applySleep(beadWithMeta("ga-old", base.Add(-3*time.Hour), map[string]string{
 		"template": "worker", "last_woke_at": valid,
 	})))
@@ -146,7 +192,16 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 	cands := []startCandidate{recentlyWoken, newSlept, oldSlept}
 	sortCandidatesByWakeFairness(cands)
 	gotOrder := []string{cands[0].info.ID, cands[1].info.ID, cands[2].info.ID}
-	wantOrder := []string{"ga-old", "ga-new", "ga-recent"}
+	// ga-old and ga-new both fall back to slept_at=base (applySleep stamps the same
+	// base on both, regardless of their distinct CreatedAt), so they tie on the
+	// fairness key; sort.SliceStable then resolves the tie by original input-slice
+	// order (ga-new precedes ga-old in cands), not by CreatedAt. ga-recent's own
+	// last_woke_at (base-10m) is chronologically earlier than the tied base, so it
+	// still sorts first. This fully reverses the pre-slept_at-tier order
+	// ([]string{"ga-old", "ga-new", "ga-recent"}), which was really just
+	// FIFO-by-creation once last_woke_at was cleared with no slept_at tier to fall
+	// back to.
+	wantOrder := []string{"ga-recent", "ga-new", "ga-old"}
 	for i := range wantOrder {
 		if gotOrder[i] != wantOrder[i] {
 			t.Fatalf("fairness sort order = %v, want %v", gotOrder, wantOrder)
@@ -161,4 +216,89 @@ func mustParseRFC3339(t *testing.T, s string) time.Time {
 		t.Fatalf("parsing %q: %v", s, err)
 	}
 	return parsed
+}
+
+// TestWakeFairnessResetPendingRanksByResetCommit pins wake order after a
+// fresh-mode cycle or restart handoff. RestartRequestPatch clears last_woke_at
+// while the runtime it described is stopped. A reset-pending session ranks by
+// reset_committed_at, the moment its last incarnation stopped, so it sorts
+// after a pool session created before that commit and before one created after
+// it. A pending flag without a parseable commit time is not a reset tier.
+func TestWakeFairnessResetPendingRanksByResetCommit(t *testing.T) {
+	base := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	resetAt := base.Add(-time.Minute)
+
+	seed := func(id string, created time.Time, meta map[string]string) startCandidate {
+		return startCandidate{info: sessiontest.SeedBead(t, beads.Bead{
+			ID:        id,
+			Type:      session.BeadType,
+			Title:     id,
+			Labels:    []string{session.LabelSession},
+			CreatedAt: created,
+			Metadata:  meta,
+		})}
+	}
+
+	cycledMeta := map[string]string{
+		"template":     "worker",
+		"last_woke_at": base.Add(-6 * time.Minute).Format(time.RFC3339),
+		"slept_at":     base.Add(-5 * 24 * time.Hour).Format(time.RFC3339),
+	}
+	for k, v := range session.RestartRequestPatchAt("", resetAt) {
+		cycledMeta[k] = v
+	}
+	cycled := seed("cycled-session", base.Add(-16*24*time.Hour), cycledMeta)
+
+	if got := wakeFairnessTime(cycled); !got.Equal(resetAt) {
+		t.Fatalf("wakeFairnessTime(reset-pending) = %v, want reset_committed_at %v", got, resetAt)
+	}
+
+	// A reset marker without its commit time is not a reset tier: fall through.
+	half := seed("half-reset", base.Add(-16*24*time.Hour), map[string]string{
+		"template":                   "worker",
+		"continuation_reset_pending": "true",
+		"slept_at":                   base.Add(-5 * 24 * time.Hour).Format(time.RFC3339),
+	})
+	if got, want := wakeFairnessTime(half), base.Add(-5*24*time.Hour); !got.Equal(want) {
+		t.Fatalf("wakeFairnessTime(pending without commit) = %v, want slept_at %v", got, want)
+	}
+
+	// A valid last_woke_at outranks the reset tier.
+	wokeAt := base.Add(-2 * time.Minute)
+	wokeMeta := map[string]string{
+		"template": "worker",
+		"slept_at": base.Add(-5 * 24 * time.Hour).Format(time.RFC3339),
+	}
+	for k, v := range session.RestartRequestPatchAt("", resetAt) {
+		wokeMeta[k] = v
+	}
+	wokeMeta["last_woke_at"] = wokeAt.Format(time.RFC3339)
+	woke := seed("woke-after-reset", base.Add(-16*24*time.Hour), wokeMeta)
+	if got := wakeFairnessTime(woke); !got.Equal(wokeAt) {
+		t.Fatalf("wakeFairnessTime(pending with last_woke_at) = %v, want last_woke_at %v", got, wokeAt)
+	}
+
+	// A malformed reset_committed_at is not a reset tier: fall through.
+	malformed := seed("malformed-reset", base.Add(-16*24*time.Hour), map[string]string{
+		"template":                   "worker",
+		"continuation_reset_pending": "true",
+		"reset_committed_at":         "not-a-timestamp",
+		"slept_at":                   base.Add(-5 * 24 * time.Hour).Format(time.RFC3339),
+	})
+	if got, want := wakeFairnessTime(malformed), base.Add(-5*24*time.Hour); !got.Equal(want) {
+		t.Fatalf("wakeFairnessTime(pending with malformed commit) = %v, want slept_at %v", got, want)
+	}
+
+	waitingPool := seed("pool-waiting", resetAt.Add(-3*time.Minute), map[string]string{"template": "worker"})
+	newPool := seed("pool-new", resetAt.Add(time.Minute), map[string]string{"template": "worker"})
+
+	cands := []startCandidate{cycled, newPool, waitingPool}
+	sortCandidatesByWakeFairness(cands)
+	got := []string{cands[0].info.ID, cands[1].info.ID, cands[2].info.ID}
+	want := []string{"pool-waiting", "cycled-session", "pool-new"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("fairness sort order = %v, want %v", got, want)
+		}
+	}
 }

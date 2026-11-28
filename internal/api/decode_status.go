@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
 )
 
 // statusViewFromGen translates the generated StatusBody (served by GET
@@ -23,6 +24,16 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 			TotalAgents:   int(body.Agents.Total),
 			RunningAgents: int(body.Agents.Running),
 		},
+	}
+	if body.RuntimeSessions != nil {
+		p := body.RuntimeSessions
+		out.RuntimeSessions = &observation.RuntimeSessions{Schema: p.Schema, ObservedAt: p.ObservedAt, ProviderComplete: p.ProviderComplete}
+		if p.Sessions != nil {
+			out.RuntimeSessions.Sessions = make([]observation.RuntimeSessionStatus, 0, len(*p.Sessions))
+			for _, row := range *p.Sessions {
+				out.RuntimeSessions.Sessions = append(out.RuntimeSessions.Sessions, observation.RuntimeSessionStatus{ID: row.Id, Template: row.Template, AgentName: row.AgentName, RuntimeName: row.RuntimeName, Provider: row.Provider, Running: row.Running})
+			}
+		}
 	}
 	if body.Partial != nil {
 		out.Partial = *body.Partial
@@ -73,12 +84,13 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 	if body.StoreHealth != nil {
 		sh := body.StoreHealth
 		view := StatusStoreHealthView{
-			Path:        sh.Path,
-			SizeBytes:   sh.SizeBytes,
-			LiveRows:    int(sh.LiveRows),
-			RatioMB:     sh.RatioMbPerRow,
-			Warning:     sh.Warning,
-			ThresholdMB: sh.ThresholdMbPerRow,
+			Path:         sh.Path,
+			SizeBytes:    sh.SizeBytes,
+			LiveRows:     int(sh.LiveRows),
+			RowsMeasured: sh.RowsMeasured,
+			RatioMB:      sh.RatioMbPerRow,
+			Warning:      sh.Warning,
+			ThresholdMB:  sh.ThresholdMbPerRow,
 		}
 		if sh.LastGcAt != nil {
 			view.LastGCAt = *sh.LastGcAt
@@ -160,6 +172,7 @@ func statusBeadsDiagnosticFromGen(g *genclient.BeadsDiagnostic) *beads.BeadsDiag
 	if g.PreflightReason != nil {
 		out.PreflightReason = *g.PreflightReason
 	}
+	out.Proxied = statusProxiedDiagnosticFromGen(g.Proxied)
 	return out
 }
 
@@ -173,6 +186,9 @@ func statusAgentViewFromGen(g genclient.StatusAgentDetail) StatusAgentView {
 	}
 	if g.SessionName != nil {
 		out.SessionName = *g.SessionName
+	}
+	if g.SessionId != nil {
+		out.SessionID = *g.SessionId
 	}
 	if g.GroupName != nil {
 		out.GroupName = *g.GroupName
@@ -192,4 +208,41 @@ func statusRigViewFromGen(g genclient.StatusRigDetail) StatusRigView {
 		Path:      g.Path,
 		Suspended: g.Suspended,
 	}
+}
+
+// statusProxiedDiagnosticFromGen carries the controller's proxied-native
+// account through to the CLI view, so `gc status --json` prints beads.proxied
+// on the API route as the local route does.
+func statusProxiedDiagnosticFromGen(g *genclient.ProxiedDiagnostic) *beads.ProxiedDiagnostic {
+	if g == nil {
+		return nil
+	}
+	out := &beads.ProxiedDiagnostic{}
+	if g.Endpoint.Port != nil {
+		out.Endpoint.Port = int(*g.Endpoint.Port)
+	}
+	if g.Endpoint.Pid != nil {
+		out.Endpoint.PID = int(*g.Endpoint.Pid)
+	}
+	if g.Endpoint.Generation != nil {
+		out.Endpoint.Generation = *g.Endpoint.Generation
+	}
+	out.Cursors.Main = int(g.Cursors.Main)
+	out.Cursors.Ignored = int(g.Cursors.Ignored)
+	if g.Evidence != nil {
+		out.Evidence = *g.Evidence
+	}
+	if g.IdlePolicy != nil {
+		out.IdlePolicy = *g.IdlePolicy
+	}
+	if g.Verdict != nil {
+		out.Verdict = beads.ProxiedVerdict(*g.Verdict)
+	}
+	if g.Detail != nil {
+		out.Detail = *g.Detail
+	}
+	if g.Demoted != nil {
+		out.Demoted = *g.Demoted
+	}
+	return out
 }

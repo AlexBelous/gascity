@@ -23,12 +23,14 @@ func newHookCurrentCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Prints the work bead this session most recently claimed with gc hook --claim.
 
 The claim protocol stamps the claimed bead id onto the calling session's own
-bead, because a pool session's shell never receives $GC_BEAD_ID or
-$GC_TRIGGER_BEAD_ID — those exist only in the controller's dispatch condition
-environment. A formula step that must close the bead it is running reads it back
-here:
+bead, because the environment cannot name it: $GC_BEAD_ID exists only in the
+controller's dispatch condition environment, never in a session shell, and no
+session shell carries the id of the bead that triggered its spawn. A
+demand-spawned session sees only $GC_SPAWN_ORIGIN=demand, a presence marker
+that names no bead; the pool is pull. A formula step that must close the bead
+it is running reads the stamp back here:
 
-    BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"
+    BEAD_ID="${GC_BEAD_ID:-$(gc hook current --id-only)}"
 
 The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
 session identity and when the session has claimed nothing, so a caller that

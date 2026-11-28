@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -718,6 +719,31 @@ esac
 	}
 }
 
+// TestUpdate_unsetMetadataIsRefusedBeforeTheScriptRuns pins the exec
+// protocol's refusal of a metadata unset. Its update document has no removal
+// field, so a script would see only the sets and report success with the key
+// still set; the whole update is refused before the script is asked.
+func TestUpdate_unsetMetadataIsRefusedBeforeTheScriptRuns(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "update-ran")
+	script := writeScript(t, dir, `
+case "$1" in
+  update) touch "`+marker+`" ;;
+esac
+exit 0
+`)
+	err := NewStore(script).Update("EX-1", beads.UpdateOpts{
+		Metadata:      map[string]string{"kept": "v"},
+		UnsetMetadata: []string{"gone"},
+	})
+	if !errors.Is(err, beads.ErrUnsetMetadataUnsupported) {
+		t.Fatalf("Update with UnsetMetadata = %v, want ErrUnsetMetadataUnsupported", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the provider script ran its update (stat: %v); the refusal must come before any write", statErr)
+	}
+}
+
 func TestUpdate_assigneeRoundTripsThroughConformanceScript(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available")
@@ -1193,6 +1219,108 @@ esac
 	}
 }
 
+// A non-string gc.exclude_claimants must fail closed. Coercing the raw JSON
+// text onto the bead lets sling copy a value that matches no claimant. Get
+// rejects the bead; list reads skip it, as the native store does, so one bad
+// row does not fail the whole list.
+func TestGetRejectsAndListSkipsNonStringExcludeClaimants(t *testing.T) {
+	for _, value := range []string{`["reviewer-one"]`, `42`, `null`} {
+		t.Run("get/"+value, func(t *testing.T) {
+			dir := t.TempDir()
+			script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":`+value+`,"flag":true}}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+			s := NewStore(script)
+			_, err := s.Get("EX-1")
+			if err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) || !strings.Contains(err.Error(), "must be a string") {
+				t.Fatalf("Get %s: got %v, want error naming %s", value, err, beadmeta.ExcludeClaimantsMetadataKey)
+			}
+			if !errors.Is(err, beads.ErrMetadataParse) {
+				t.Fatalf("Get %s: got %v, want ErrMetadataParse", value, err)
+			}
+		})
+		t.Run("list/"+value, func(t *testing.T) {
+			dir := t.TempDir()
+			script := writeScript(t, dir, `
+case "$1" in
+  list)
+    echo '[{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":`+value+`}},{"id":"EX-2","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":"reviewer-one"}}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+			s := NewStore(script)
+			got, err := s.ListOpen()
+			if err != nil {
+				t.Fatalf("List %s: got error %v, want bad row skipped", value, err)
+			}
+			if len(got) != 1 || got[0].ID != "EX-2" {
+				t.Fatalf("List %s: got %+v, want only EX-2", value, got)
+			}
+			if got[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey] != "reviewer-one" {
+				t.Fatalf("List %s: EX-2 exclude = %q, want reviewer-one", value, got[0].Metadata[beadmeta.ExcludeClaimantsMetadataKey])
+			}
+		})
+	}
+}
+
+func TestGet_stringExcludeClaimantsRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":"reviewer-one","flag":true,"retries":3}}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Get("EX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[beadmeta.ExcludeClaimantsMetadataKey] != "reviewer-one" {
+		t.Errorf("exclude = %q, want reviewer-one", got.Metadata[beadmeta.ExcludeClaimantsMetadataKey])
+	}
+	if got.Metadata["flag"] != "true" {
+		t.Errorf("flag = %q, want true (non-string coercion unchanged)", got.Metadata["flag"])
+	}
+	if got.Metadata["retries"] != "3" {
+		t.Errorf("retries = %q, want 3 (non-string coercion unchanged)", got.Metadata["retries"])
+	}
+}
+
+func TestCreateAndUpdateRejectNonStringExcludeClaimants(t *testing.T) {
+	bad := `{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"` + beadmeta.ExcludeClaimantsMetadataKey + `":["reviewer-one"]}}`
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  create)
+    cat > /dev/null
+    echo '`+bad+`'
+    ;;
+  update)
+    cat > /dev/null
+    echo '`+bad+`'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+	if _, err := s.Create(beads.Bead{Title: "test"}); err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) {
+		t.Fatalf("Create: got %v, want error naming %s", err, beadmeta.ExcludeClaimantsMetadataKey)
+	}
+	if err := s.Update("EX-1", beads.UpdateOpts{}); err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) {
+		t.Fatalf("Update: got %v, want error naming %s", err, beadmeta.ExcludeClaimantsMetadataKey)
+	}
+}
+
 // --- Error handling ---
 
 func TestErrorPropagation(t *testing.T) {
@@ -1495,5 +1623,29 @@ esac
 	// script-side limit would cut rows before the Go-side seek filter runs.
 	if strings.Contains(argsText, "--limit=7") {
 		t.Fatalf("list args should not limit before seek filtering: %s", argsText)
+	}
+}
+
+// A script that reports why a bead was closed (bd's close_reason field) has
+// that reason read onto the bead (gastownhall/gascity#2663).
+func TestGetReadsCloseReason(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  get)
+    echo '{"id":"'"$1"'","title":"done","status":"closed","type":"task","created_at":"2026-02-27T10:00:00Z","close_reason":"fixed in commit abc123; tests pass"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	b, err := s.Get("EX-9")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Errorf("CloseReason = %q, want %q", b.CloseReason, "fixed in commit abc123; tests pass")
 	}
 }

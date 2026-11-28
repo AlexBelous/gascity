@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -23,6 +24,11 @@ type Session struct {
 	// Entries that aren't relevant for display (file-history-snapshot,
 	// progress hooks) are filtered out.
 	Messages []*Entry
+
+	// DetachedUsage holds per-invocation usage parsed from the whole transcript
+	// for providers that record usage apart from assistant messages (Codex).
+	// Consumers associate it against the full message list before paging.
+	DetachedUsage []TailUsage
 
 	// OrphanedToolUseIDs contains tool_use IDs with no matching result.
 	OrphanedToolUseIDs map[string]bool
@@ -42,6 +48,9 @@ type Session struct {
 type SessionDiagnostics struct {
 	MalformedLineCount int
 	MalformedTail      bool
+	// DroppedRecordCount counts records the transcript writer reported it
+	// could not record (gc ACP captures under backpressure).
+	DroppedRecordCount int
 }
 
 // PaginationInfo describes the pagination state of a session response.
@@ -156,7 +165,9 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -238,7 +249,9 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -408,6 +421,15 @@ func parseFile(path string) ([]*Entry, error) {
 	return entries, err
 }
 
+// ReadFileRecords reads every JSONL record from a transcript in file order,
+// before any active-branch selection. BuildDag drops entries without a uuid,
+// so records such as queue-operation task notifications never reach a caller
+// that reads a session. Callers that must observe those records — rather than
+// render a conversation — need this instead of a Read* helper.
+func ReadFileRecords(path string) ([]*Entry, error) {
+	return parseFile(path)
+}
+
 // parseFileDetailed reads all JSONL lines from a file into entries and
 // returns load diagnostics for malformed lines and torn tails.
 func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
@@ -442,6 +464,7 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 		raw := make([]byte, len(line))
 		copy(raw, line)
 		e.Raw = raw
+		attachClaudeAPIErrorEvent(&e)
 		entries = append(entries, &e)
 	}
 	if err := scanner.Err(); err != nil {
@@ -1059,10 +1082,11 @@ func FindCodexSessionFileByIDNoWindow(searchPaths []string, workDir, sessionID s
 // roots) like findCodexSessionFileIn, guarding against symlink cycles via seen.
 func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string]bool) string {
 	cleaned := filepath.Clean(sessDir)
-	if seen[cleaned] {
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil || seen[resolved] {
 		return ""
 	}
-	seen[cleaned] = true
+	seen[resolved] = true
 	yearDirs, extraRoots := splitCodexSessionRoots(cleaned)
 	sort.Sort(sort.Reverse(sort.StringSlice(yearDirs)))
 	for _, year := range yearDirs {
@@ -1077,11 +1101,7 @@ func findCodexRolloutBySuffixIn(sessDir, workDir, suffix string, seen map[string
 		}
 	}
 	for _, root := range extraRoots {
-		resolved, err := filepath.EvalSymlinks(filepath.Join(cleaned, root))
-		if err != nil {
-			continue
-		}
-		if path := findCodexRolloutBySuffixIn(resolved, workDir, suffix, seen); path != "" {
+		if path := findCodexRolloutBySuffixIn(filepath.Join(cleaned, root), workDir, suffix, seen); path != "" {
 			return path
 		}
 	}
@@ -1245,6 +1265,15 @@ func splitCodexSessionRoots(dir string) (yearDirs, extraRoots []string) {
 // chronological order for efficiency. Also recurses into symlinked
 // subdirectories that aren't date components (e.g., aimux session roots).
 func findCodexSessionFileIn(sessDir, workDir string) string {
+	return findCodexSessionFileInWithSeen(sessDir, workDir, make(map[string]bool))
+}
+
+func findCodexSessionFileInWithSeen(sessDir, workDir string, seen map[string]bool) string {
+	resolved, err := filepath.EvalSymlinks(sessDir)
+	if err != nil || seen[resolved] {
+		return ""
+	}
+	seen[resolved] = true
 	yearDirs, extraRoots := splitCodexSessionRoots(sessDir)
 
 	// Scan year dirs in reverse chronological order.
@@ -1255,11 +1284,7 @@ func findCodexSessionFileIn(sessDir, workDir string) string {
 
 	// Scan symlinked session roots (aimux-managed accounts).
 	for _, root := range extraRoots {
-		resolved, err := filepath.EvalSymlinks(filepath.Join(sessDir, root))
-		if err != nil {
-			continue
-		}
-		if path := findCodexSessionFileIn(resolved, workDir); path != "" {
+		if path := findCodexSessionFileInWithSeen(filepath.Join(sessDir, root), workDir, seen); path != "" {
 			return path
 		}
 	}
@@ -1472,13 +1497,18 @@ func DefaultGeminiSearchPaths() []string {
 }
 
 // DefaultKimiSearchPaths returns the default search paths for Kimi Code
-// session files (~/.kimi/sessions).
+// session files: legacy ~/.kimi/sessions, native ~/.kimi-code/sessions, and
+// $KIMI_CODE_HOME/sessions when that variable is set to a non-blank value.
 func DefaultKimiSearchPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
-	return []string{filepath.Join(home, ".kimi", "sessions")}
+	roots := []string{filepath.Join(home, ".kimi", "sessions"), filepath.Join(home, ".kimi-code", "sessions")}
+	if codeHome := strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")); codeHome != "" {
+		roots = append(roots, filepath.Join(codeHome, "sessions"))
+	}
+	return roots
 }
 
 // DefaultAntigravitySearchPaths returns the default search paths for Antigravity JSONL
@@ -1660,12 +1690,16 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		slug := ProjectSlug(path)
-		if seenSlugs[slug] {
-			continue
+		// Current Claude versions replace every UTF-16 code unit outside
+		// [A-Za-z0-9] with "-", underscores included. Keep the legacy
+		// spelling as a candidate for transcripts written earlier.
+		for _, slug := range []string{claudeSanitizedProjectSlug(path), ProjectSlug(path)} {
+			if seenSlugs[slug] {
+				continue
+			}
+			seenSlugs[slug] = true
+			slugs = append(slugs, slug)
 		}
-		seenSlugs[slug] = true
-		slugs = append(slugs, slug)
 	}
 	return slugs
 }
@@ -1696,6 +1730,27 @@ func addDarwinClaudePathAliases(path string, add func(string)) {
 	case strings.HasPrefix(path, "/private/var/"):
 		add("/var/" + strings.TrimPrefix(path, "/private/var/"))
 	}
+}
+
+// claudeSanitizedProjectSlug is the project directory name current Claude
+// Code versions write: every UTF-16 code unit outside [A-Za-z0-9] becomes "-"
+// (Claude is a JavaScript program, so a character outside the Basic
+// Multilingual Plane becomes two).
+func claudeSanitizedProjectSlug(absPath string) string {
+	var b strings.Builder
+	b.Grow(len(absPath))
+	for _, r := range absPath {
+		if 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' {
+			b.WriteRune(r)
+			continue
+		}
+		n := utf16.RuneLen(r)
+		if n < 1 {
+			n = 1
+		}
+		b.WriteString(strings.Repeat("-", n))
+	}
+	return b.String()
 }
 
 // ProjectSlug converts an absolute path to the project directory slug

@@ -24,9 +24,15 @@ import (
 // a field added to beads.Bead is either compared by beadCopyDifference or listed
 // here — never silently unwitnessed.
 //
-// The reasons matter as much as the names. An exemption is a promise that a copy
-// which changed this field is still a faithful copy, and three of these five are
-// only true because something else witnesses the same state.
+// The reasons matter as much as the names. An exemption is normally a promise that
+// a copy which changed this field is still a faithful copy, and two of these six
+// are only true because something else witnesses the same state.
+// IndefinitelyDeferred and SourceStatus are the two exemptions that do not carry
+// that promise: the destination cannot hold them, so bd's richer status genuinely
+// does not cross. They are exempt because comparing them would refuse every copy
+// of an infra row bd records as deferred, blocked or any other folded status
+// without preserving anything — not because the copy stays faithful. Do not cite
+// them as precedent for exempting a field the destination could hold.
 var beadCopyExemptFields = map[string]string{
 	"Revision": "store-internal optimistic-concurrency token. Each store mints and bumps its own; the destination's row is a fresh create, so its revision is unrelated to the source's by construction.",
 	"ClaimFence": "store-internal ownership fence, maintained per store like Revision. " +
@@ -35,6 +41,19 @@ var beadCopyExemptFields = map[string]string{
 		"cannot mint dangling cross-boundary edges. The edges it would have produced are witnessed by verifyInfraCopy's DepList comparison.",
 	"Dependencies": "create-time dependency shorthand, stripped by infraMigrationRow for the same reason as Needs, " +
 		"and witnessed the same way — through the source's own materialized dep rows rather than the create-time field.",
+	"IndefinitelyDeferred": "not a property of the copy but of READING the source. It is the read-time normalization of bd's " +
+		"richer status vocabulary (beads.normalizedBdReadState), re-derived on every work-store read; the destination stores " +
+		"Gas City's three-state status verbatim and has no richer status to normalize. Both sides therefore agree on the " +
+		"Status this stage does compare, and the field itself is json:\"-\" while SQLiteStore persists beads through " +
+		"bead_json — so it is structurally absent from the destination and comparing it would refuse EVERY copy of a " +
+		"deferred infra row, identically on each retry. What does not cross is the deferral itself: the binding reads such " +
+		"a row as plainly open.",
+	"SourceStatus": "not a property of the copy but of READING the source, like IndefinitelyDeferred. It is the status " +
+		"bd recorded before the read folded it into Status (beads.mapBdStatus), re-derived on every work-store read; the " +
+		"destination stores Gas City's three-state status verbatim and reports no source status. Both sides therefore " +
+		"agree on the Status this stage does compare, and the field itself is json:\"-\" while SQLiteStore persists " +
+		"beads through bead_json — so comparing it would refuse EVERY copy of an infra row bd records as anything but " +
+		"open, in_progress or closed, identically on each retry. What does not cross is bd's richer status itself.",
 }
 
 // infraEqualityFixture is a source row with every durable field populated to a
@@ -67,8 +86,15 @@ func infraEqualityFixture() beads.Bead {
 		NoHistory:    true,
 		DeferUntil:   &deferred,
 		IsBlocked:    &blocked,
+		CloseReason:  "superseded by the next lifecycle row",
 		Revision:     7,
 		ClaimFence:   3,
+		// Set so the exempt mutations below model the loss that actually
+		// happens — a source row carrying bd's deferred status against a
+		// destination that cannot hold it — rather than the destination
+		// inventing one.
+		IndefinitelyDeferred: true,
+		SourceStatus:         "deferred",
 	}
 }
 
@@ -101,6 +127,10 @@ func beadCopyFieldMutations() map[string]func(beads.Bead) beads.Bead {
 			b.DeferUntil = nil
 			return b
 		},
+		"CloseReason": func(b beads.Bead) beads.Bead {
+			b.CloseReason = ""
+			return b
+		},
 		// Unlike every other entry, this mutation is not a LOSS — it is a value
 		// the destination must never carry at all. infraMigrationRow strips it,
 		// so any non-nil value on the destination is a readiness projection the
@@ -122,6 +152,11 @@ func beadCopyExemptMutations() map[string]func(beads.Bead) beads.Bead {
 		"ClaimFence":   func(b beads.Bead) beads.Bead { b.ClaimFence = 0; return b },
 		"Needs":        func(b beads.Bead) beads.Bead { b.Needs = nil; return b },
 		"Dependencies": func(b beads.Bead) beads.Bead { b.Dependencies = nil; return b },
+		// The fixture carries the marker, so clearing it here is the real loss:
+		// a destination that cannot hold what the source read produced. This is
+		// the mutation that must NOT be refused, or the migration wedges.
+		"IndefinitelyDeferred": func(b beads.Bead) beads.Bead { b.IndefinitelyDeferred = false; return b },
+		"SourceStatus":         func(b beads.Bead) beads.Bead { b.SourceStatus = ""; return b },
 	}
 }
 
@@ -340,10 +375,29 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 		Ref:         "step-3",
 		NoHistory:   true,
 		DeferUntil:  &deferred,
-		Metadata:    beads.StringMap{"gc.session_name": "worker-1"},
+		Metadata:    beads.StringMap{"test_session_name": "worker-1"},
+		// The source row carries the status-based deferral marker the work
+		// store produces for a bd-`deferred` row. The destination cannot hold
+		// it — it is json:"-" and SQLiteStore persists through bead_json — so
+		// the faithful subtest below is what proves the equality stage does not
+		// refuse a copy over a field no destination row can ever carry. The
+		// drop subtests inherit it and must still refuse for their own field.
+		IndefinitelyDeferred: true,
 	})
 	if err != nil {
 		t.Fatalf("seeding the source: %v", err)
+	}
+	// The marker reaches the source store only because MemStore.Create seeds
+	// Status directly rather than going through an explicit transition, which
+	// clears it. Assert it on the equality stage's OWN view of the source
+	// rather than assume it: if that ever changes, these subtests must fail
+	// loudly instead of comparing false against false and proving nothing.
+	seeded, err := readInfraSnapshot(source)
+	if err != nil {
+		t.Fatalf("reading the seeded source: %v", err)
+	}
+	if len(seeded) != 1 || !seeded[0].IndefinitelyDeferred {
+		t.Fatalf("the equality stage's view of the source does not carry the deferral marker: %+v", seeded)
 	}
 
 	for _, tc := range []struct {
@@ -366,7 +420,7 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 			if _, err := creator.CreateWithForeignID(tc.drop(infraMigrationRow(row))); err != nil {
 				t.Fatalf("writing the lossy row: %v", err)
 			}
-			if _, err := verifyInfraCopy(reopen, source); err == nil {
+			if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err == nil {
 				t.Fatalf("the equality stage blessed a copy that dropped %s; that copy would get a convergence marker", tc.field)
 			}
 		})
@@ -381,7 +435,7 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 		if _, err := creator.CreateWithForeignID(infraMigrationRow(row)); err != nil {
 			t.Fatalf("writing the faithful row: %v", err)
 		}
-		proven, err := verifyInfraCopy(reopen, source)
+		proven, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{})
 		if err != nil {
 			t.Fatalf("the equality stage refused a faithful copy through the deployed destination: %v", err)
 		}
@@ -399,8 +453,10 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 // It does NOT cover the edge payload, and that is the point of saying so here:
 // the payload is not a field of beads.Dep at all — it is a sidecar the source
 // carries in its dependencies.metadata column and the destination keeps in kv.
-// No reflection over this struct could ever see it. See infraDepDifference's
-// doc comment for why this stage cannot witness it, and the bead that closes it.
+// No reflection over this struct could ever see it, so growing this table can
+// never close it. It is witnessed next door by infraPayloadDifference, which
+// asks both stores about each pair rather than comparing two slices; see
+// TestInfraEdgePayloadDifferenceComparesPayloadsBothWays.
 func TestInfraDepDifferenceWitnessesEveryDepField(t *testing.T) {
 	compared := map[string]func(beads.Dep) beads.Dep{
 		"DependsOnID": func(d beads.Dep) beads.Dep { d.DependsOnID = "gcg-998"; return d },
@@ -484,7 +540,7 @@ func TestVerifyInfraCopyStripsTheReadinessProjection(t *testing.T) {
 		if _, err := creator.CreateWithForeignID(carried); err != nil {
 			t.Fatalf("writing the row that kept is_blocked: %v", err)
 		}
-		if _, err := verifyInfraCopy(reopen, source); err == nil {
+		if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err == nil {
 			t.Fatal("the equality stage blessed a copy carrying is_blocked; the binding would serve that projection forever")
 		}
 	})
@@ -498,7 +554,7 @@ func TestVerifyInfraCopyStripsTheReadinessProjection(t *testing.T) {
 		if _, err := creator.CreateWithForeignID(infraMigrationRow(row)); err != nil {
 			t.Fatalf("writing the stripped row: %v", err)
 		}
-		if _, err := verifyInfraCopy(reopen, source); err != nil {
+		if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err != nil {
 			t.Fatalf("the equality stage refused the stripped copy: %v", err)
 		}
 		// Read it back through a fresh handle: the strip has to survive the
@@ -541,17 +597,17 @@ func TestVerifyInfraCopyRefusesAnInventedDependencyEdge(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination, reopen := infraEqualityDestination(t)
-	if _, err := importInfraSnapshot(destination, source, rows); err != nil {
+	if err := importInfraRows(t, destination, source, rows); err != nil {
 		t.Fatalf("importing: %v", err)
 	}
-	if _, err := verifyInfraCopy(reopen, source); err != nil {
+	if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err != nil {
 		t.Fatalf("the equality stage refused a faithful copy: %v", err)
 	}
 
 	if err := destination.DepAdd(a.ID, c.ID, "blocks"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifyInfraCopy(reopen, source); err == nil {
+	if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err == nil {
 		t.Fatal("the equality stage blessed a destination holding a dep edge the work store does not have")
 	}
 }
@@ -596,6 +652,106 @@ func TestInfraDepDifferenceComparesEdgesBothWays(t *testing.T) {
 	}
 }
 
+// TestVerifyInfraCopyRefusesAStrippedEdgePayload proves the equality stage
+// ACTUALLY ASKS about payloads, which no other test in this slice can show.
+//
+// Every other one drives the copy, and the copy carries payloads correctly — so
+// deleting the payload comparison out of verifyInfraCopy leaves all of them
+// green. The gap is only visible against a destination that received a faithful
+// copy and then lost the payload, which is exactly the state a future
+// regression in the writer would produce.
+//
+// Stripping is done by re-adding the edge with a bare DepAdd: on this
+// destination that is not a no-op, because setGraphEdgeMetadataTx clears the
+// pair's sidecar before deciding it has nothing to store. That destructive
+// re-add is the regression itself, reproduced.
+func TestVerifyInfraCopyRefusesAStrippedEdgePayload(t *testing.T) {
+	backing, from, to, _ := seedInfraEdgeSource(t)
+	const payload = `{"gate":"waits_for","threshold":3}`
+	source := &payloadCarryingSource{
+		Store:    backing,
+		payloads: map[[2]string]string{{from.ID, to.ID}: payload},
+	}
+
+	rows, err := readInfraSnapshot(source)
+	if err != nil {
+		t.Fatalf("readInfraSnapshot: %v", err)
+	}
+	destination, reopen := infraEqualityDestination(t)
+	if err := importInfraRows(t, destination, source, rows); err != nil {
+		t.Fatalf("importing: %v", err)
+	}
+	// The source's edge onto work is a gate in the binding (D9): verified
+	// against the plan that minted it.
+	plan := plannedInfraCopy(t, source)
+	if _, _, err := verifyInfraCopy(reopen, source, plan); err != nil {
+		t.Fatalf("the equality stage refused a faithful copy: %v", err)
+	}
+
+	if err := destination.DepAdd(from.ID, to.ID, "blocks"); err != nil {
+		t.Fatalf("stripping the payload: %v", err)
+	}
+	if _, _, err := verifyInfraCopy(reopen, source, plan); err == nil {
+		t.Fatal("the equality stage blessed a destination that holds every edge and none of their payloads; a copy that lost every formula gate would get a convergence marker")
+	}
+}
+
+// TestInfraPayloadDifferenceComparesPayloadsBothWays is the edge-payload half
+// of the equality stage, and the reason the carry is safe rather than merely
+// present.
+//
+// A copy that moved every edge and dropped every gate produces an identical
+// beads.Dep set on both sides, so infraDepDifference clears it and the marker
+// lands on a binding that has quietly lost its formula gating. Only this
+// comparison sees that. Both directions: dropped, invented, changed. The
+// engines' two spellings of "carries nothing" ("{}" from Dolt, nothing from
+// SQLite) never reach it: each store's read normalizes them to absent
+// (beads.DepMetadataCarries), pinned in the beads batch-read tests.
+func TestInfraPayloadDifferenceComparesPayloadsBothWays(t *testing.T) {
+	const from, to, work = "mc-from", "mc-to", "mc-work"
+	infra := map[string]bool{from: true, to: true}
+	deps := []beads.Dep{
+		{IssueID: from, DependsOnID: to, Type: "blocks"},
+		{IssueID: from, DependsOnID: work, Type: "blocks"},
+	}
+	const gate = `{"gate":"waits_for","threshold":3}`
+	carrying := func(payload string) map[beads.DepPair]string {
+		return map[beads.DepPair]string{{IssueID: from, DependsOnID: to}: payload}
+	}
+	none := map[beads.DepPair]string{}
+	difference := func(want, got map[beads.DepPair]string) string {
+		return infraPayloadDifference(from, deps, deps, infra, want, got)
+	}
+
+	if diff := difference(carrying(gate), carrying(gate)); diff != "" {
+		t.Errorf("a faithfully carried payload was refused: %s", diff)
+	}
+	if diff := difference(carrying(gate), none); diff == "" {
+		t.Error("a destination that dropped the payload compared equal; the equality stage would bless a copy that lost every formula gate")
+	}
+	if diff := difference(none, carrying(gate)); diff == "" {
+		t.Error("a destination that invented a payload compared equal")
+	}
+	if diff := difference(carrying(gate), carrying(`{"gate":"waits_for","threshold":9}`)); diff == "" {
+		t.Error("a destination whose payload differs in content compared equal")
+	}
+
+	// An edge only the DESTINATION holds. The source's only edge leaves
+	// infra, so the wantDeps walk contributes no pair at all: every pair
+	// here comes from the destination's own list, which is what makes this
+	// the one case that dies if that walk is deleted.
+	sourceDeps := []beads.Dep{{IssueID: from, DependsOnID: work, Type: "blocks"}}
+	if diff := infraPayloadDifference(from, sourceDeps, deps, infra, none, carrying(gate)); diff == "" {
+		t.Error("a payload on an edge only the destination holds compared equal; the walk over the destination's deps finds nothing")
+	}
+
+	// A source that cannot be asked is not a source that answered
+	// "nothing": the payload read refuses it.
+	if _, err := readInfraPayloads(nil, nil, map[string][]beads.Dep{from: deps}, func(beads.Dep) bool { return true }); !errors.Is(err, beads.ErrDepMetadataUnsupported) {
+		t.Errorf("reading payloads from a store that cannot be asked = %v, want ErrDepMetadataUnsupported", err)
+	}
+}
+
 // countingInfraSource records how many times the equality stage re-read the
 // work store.
 type countingInfraSource struct {
@@ -629,12 +785,12 @@ func TestVerifyInfraCopyReReadsTheSourceAtVerificationTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination, reopen := infraEqualityDestination(t)
-	if _, err := importInfraSnapshot(destination, source, rows); err != nil {
+	if err := importInfraRows(t, destination, source, rows); err != nil {
 		t.Fatalf("importing: %v", err)
 	}
 
 	before := source.lists
-	if _, err := verifyInfraCopy(reopen, source); err != nil {
+	if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err != nil {
 		t.Fatalf("the equality stage refused a faithful copy: %v", err)
 	}
 	if source.lists == before {
@@ -645,7 +801,7 @@ func TestVerifyInfraCopyReReadsTheSourceAtVerificationTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifyInfraCopy(reopen, source); err == nil {
+	if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err == nil {
 		t.Fatalf("the equality stage blessed a copy that stranded %s (%s)", late.ID, late.Title)
 	}
 	if _, err := destination.Get(early.ID); err != nil {
@@ -682,6 +838,14 @@ func (s *unlinkingInfraSource) List(query beads.ListQuery) ([]beads.Bead, error)
 		}
 	}
 	return s.Store.List(query)
+}
+
+// DepMetadata forwards the leaf's edge-payload read. The subject here is which
+// bytes the equality stage reads, not what an edge carries, and a double that
+// stays silent about the capability is refused as unanswerable before the
+// unlink this test turns on can ever happen.
+func (s *unlinkingInfraSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	return depMetadataThrough(s.Store, issueID, dependsOnID)
 }
 
 // TestEnsureInfraClassMigratedProvesEqualityAgainstTheReopenedDatabase pins the
@@ -938,4 +1102,32 @@ func TestInfraSnapshotLeavesSyntheticConvoysInTheWorkStore(t *testing.T) {
 	if got := len(rows); got != 4 {
 		t.Fatalf("snapshot carried %d rows, want exactly the 4 infra beads; ids=%v", got, carried)
 	}
+}
+
+// importInfraRows plans rows out of source and imports them into destination,
+// the copy step on its own: no prepare, no budget.
+func importInfraRows(t *testing.T, destination, source beads.Store, rows []beads.Bead) error {
+	t.Helper()
+	plan, err := infraSourceEdgePayloadRefusal(source, rows, nil)
+	if errors.Is(err, beads.ErrDepMetadataUnsupported) {
+		// A double that cannot be asked about payloads still has edges to
+		// copy; planned with no payloads, they are copied carrying none.
+		plan = infraCopyPlan{rows: rows, infraIDs: map[string]bool{}}
+		for _, b := range rows {
+			plan.infraIDs[b.ID] = true
+		}
+		plan.down, err = readInfraDownEdges(nil, source, sortedMapKeys(plan.infraIDs))
+	}
+	if err != nil {
+		return err
+	}
+	_, all, err := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
+	if err != nil {
+		return err
+	}
+	if err := planInfraCityBoundary(t.TempDir(), nil, &plan, all, false); err != nil {
+		return err
+	}
+	_, err = importInfraSnapshot(destination, plan, infraPrepared{}, infraEngineClock{})
+	return err
 }

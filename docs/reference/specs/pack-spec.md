@@ -85,6 +85,7 @@ A pack may contain the following abstract content:
 | Named sessions | `[[named_session]]` in `pack.toml` | current |
 | Services | `[[service]]` in `pack.toml` | current |
 | Providers | `[providers.<name>]` in `pack.toml` | current |
+| Runtimes | `[runtimes.<name>]` in `pack.toml` | current |
 | Formulas | `formulas/` | preferred |
 | Orders | `orders/<name>.toml` | preferred |
 | Skills | `skills/` | preferred |
@@ -181,6 +182,7 @@ Conceptually, the file may contain these tables:
 | `[[named_session]]` | Pack-provided named sessions. | current |
 | `[[service]]` | Pack-provided services. | current |
 | `[providers.<name>]` | Pack-provided provider presets. | current |
+| `[runtimes.<name>]` | Pack-shipped runtime provider executables. | current |
 | `[[patches.agent]]` | Pack-level agent patches. | current |
 | `[global]` | Pack-wide live session commands. | current |
 | `[[pricing]]` | Pack-provided pricing estimates. | current |
@@ -240,7 +242,7 @@ Rig-scoped requirements are validated while loading the pack for a rig.
 Pack imports are named dependencies.
 
 ```toml
-[imports.gascity]
+[imports.gc]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gascity"
 version = "^1"
 ```
@@ -264,6 +266,7 @@ selector are part of the same source string.
 |---|---|---|---|
 | `source` | string | yes | Durable source for the pack root. Must not be empty. GitHub-hosted packs below a repository root should use dereferenceable `/tree/<ref>/<path>` URLs. |
 | `version` | string | no | Compatibility constraint for versioned sources. |
+| `agents_exclude` | array of strings | no | Local agent names to remove on this import edge. Invalid names fail loading; valid unmatched names warn and do nothing. Backing named sessions are removed with their excluded agents. |
 
 Public import TOML must not use fields named `path`, `ref`, `commit`, or
 `hash`. Registry handles such as `main:gascity` are command-time lookup handles
@@ -455,7 +458,72 @@ the effective city wins.
 
 Provider fields are the same provider fields accepted in `city.toml`.
 
-### 1.2.8. Formula Directory
+### 1.2.8. `[runtimes.<name>]`
+
+The `[runtimes]` table declares pack-shipped runtime provider executables. Each
+`[runtimes.<name>]` entry binds a selection name to a Runtime Provider Protocol
+(RPP) executable:
+
+```toml
+[runtimes.cloudflare]
+command = "gc-runtime-cloudflare"   # bare name, resolved on PATH
+protocol = 0
+```
+
+| Field | Meaning | Status |
+|---|---|---|
+| `command` | Required. The runtime executable. A bare name (no path separator) is resolved on PATH at session start. A relative path (any other value containing a separator) is anchored at the declaring pack directory during load. An absolute path is used as written. | required |
+| `protocol` | The RPP version the executable speaks. `0` is the only version today; any other value fails composition. | current |
+| `prompt_delivery` | Opts this runtime into a non-default oversized-prompt delivery strategy. Unset (default) or `"nudge-fallback"`; any other value fails composition. | current |
+
+`<name>` must not contain `:`, `/`, or whitespace, since `:` is reserved for
+prefix-form selection names (`exec:...`) and `/` and whitespace keep selection
+names shell- and TOML-friendly.
+
+`prompt_delivery` controls what happens when a rendered startup prompt is too
+large for an OS `exec()` argv (see the argv-safety guard in
+`cmd/gc/prompt_delivery.go`). A runtime `gc` does not already classify as
+argv-safe or nudge-capable hard-fails on an oversized prompt by default —
+unset is that default. Declaring `prompt_delivery = "nudge-fallback"`
+asserts the executable has a working post-start Nudge path (the same RPP
+Nudge operation builtin nudge-fallback runtimes like `tmux` use) that an
+oversized prompt can reroute through instead of argv. Like `command`, this
+is a pack-composition-time assertion: `gc` accepts the declaration as
+written and does not verify it against the runtime executable, at compose
+time or via the `pack-runtimes` doctor check below. Pack authors can
+self-verify ahead of production: `gc runtime check <name>` resolves the
+declaration and smoke-tests it by invoking the runtime's `nudge` operation
+against a throwaway conformance session, failing the run (`required: nudge`)
+when nudge is absent or broken. A runtime whose handshake declares
+`carrier.ops` reports the same probe as `capability carrier.ops: nudge`,
+alongside that carrier's other required driving operations. That
+smoke-tests the operation, not that an oversized prompt reroutes end to
+end — a pack that never runs it and declares `nudge-fallback` falsely still
+will not fail until an oversized prompt actually reaches that runtime at
+session start.
+
+City composition registers declared runtimes into a city-wide selection
+registry (`City.Runtimes`), including runtimes declared by rig-imported packs.
+Selection is city-wide: set `city.toml` `[session].provider` to the declared
+name (`provider = "cloudflare"` for the entry above), or override it for one
+invocation with `GC_SESSION`. An agent's `session` field does not select a
+runtime; it names a session transport (`acp`, `tmux`, or omitted). Name
+collisions with builtin runtimes or other packs are composition errors. The
+only re-declaration that dedupes is the same pack *directory* reached twice
+through a diamond import graph with the same command and protocol; two
+distinct pack directories collide even when their pack name, command, and
+protocol all coincide, so a runtime's provenance is never silently
+re-attributed.
+
+`gc runtime check <name>` and `gc runtime conformance <name>` both accept a
+declared name and run against that pack's executable: `check` is the smoke
+test (handshake, lifecycle round-trip, declared capabilities, optional
+probes), and `conformance` is the full requirement-coded RPP suite. A
+`pack-runtimes` doctor check verifies each declared executable is installed
+and that its RPP handshake works. An executable with no `protocol` op is the
+documented version-0 floor and passes; a present-but-broken handshake fails.
+
+### 1.2.9. Formula Directory
 
 A pack's formula directory is the well-known `formulas/` directory at the pack
 root. The only formula directory the pack loader collects is `formulas/`.
@@ -466,7 +534,7 @@ directories are collected before higher-priority pack directories.
 > **Compatibility:** Older material may mention `[formulas].dir`. That field is
 > invalid in `pack.toml`; new packs should put formulas under `formulas/`.
 
-### 1.2.9. `[[patches.agent]]`
+### 1.2.10. `[[patches.agent]]`
 
 Agent patches modify an existing agent by identity.
 
@@ -499,7 +567,7 @@ The specified append fields are:
 Pack-level patch paths in `prompt_template`, `session_setup_script`, and
 `overlay_dir` resolve relative to the patching pack directory.
 
-### 1.2.10. Doctor Directory
+### 1.2.11. Doctor Directory
 
 Pack doctor checks are authored under `doctor/`. Each immediate child directory
 under `doctor/` defines one check when it contains a runnable check script.
@@ -530,7 +598,7 @@ metadata:
 > **Compatibility:** Legacy `pack.toml` `[[doctor]]` entries remain loader
 > compatibility for existing packs. New packs should use `doctor/<name>/`.
 
-### 1.2.11. Command Directory
+### 1.2.12. Command Directory
 
 Pack commands are authored under `commands/`. Each directory containing `run.sh`
 defines one command leaf. Nested directories imply nested command words.
@@ -555,10 +623,32 @@ An optional `command.toml` may override the default command words or script:
 | `description` | string | no | Short help text. |
 | `run` | string | no | Entrypoint path relative to the command directory. Defaults to `run.sh`. |
 
+A command runs with the invoking environment plus these variables:
+
+| Variable | Value |
+|---|---|
+| `GC_BIN` | The `gc` executable that invoked the command. Use it for recursive `gc` calls. |
+| `GC_CITY`, `GC_CITY_PATH` | The city root. |
+| `GC_CITY_NAME` | The city name. |
+| `GC_CITY_RUNTIME_DIR` | The city's runtime state directory. |
+| `GC_PACK_DIR` | The root of the pack that defines the command. |
+| `GC_PACK_NAME` | That pack's name. |
+| `GC_PACK_STATE_DIR` | The pack's state directory for this city. |
+| `GC_SUPERVISOR_URL` | Base URL of the supervisor API serving the city, such as `http://127.0.0.1:8372`. City routes are under `$GC_SUPERVISOR_URL/v0/city/<name>/`, where `<name>` is the name the city is registered under (normally `GC_CITY_NAME`). Set only when the city is registered with a supervisor whose API address is plain `http` on loopback, the address `gc` itself uses; otherwise unset. An inherited value is never passed through. |
+
+**Scope flags.** `--city` and `--rig` are reserved for `gc`. A `--city` or `--rig`
+after the command words must name the command's own city, or a rig of it, and
+then reaches the script unchanged. Any other value, including an empty one, makes
+`gc` print an error and exit 1 without running the script, because the command
+is already bound to its city. To target another city, put the flag before the
+pack binding (`gc --city <dir> <binding> ...`) or `cd` to that city. Everything
+after a literal `--` belongs to the script, and `--help` is never refused. A
+command that needs a flag of its own picks another name.
+
 > **Compatibility:** Legacy `pack.toml` `[[commands]]` entries remain loader
 > compatibility for existing packs. New packs should use `commands/<path>/`.
 
-### 1.2.12. `[global]`
+### 1.2.13. `[global]`
 
 The `[global]` table declares pack-wide live session commands.
 
@@ -575,7 +665,7 @@ When `[global].session_live` is loaded, `{{.ConfigDir}}` is resolved to the
 concrete pack directory. Other template variables remain for per-agent
 expansion.
 
-### 1.2.13. `[[pricing]]`
+### 1.2.14. `[[pricing]]`
 
 Each `[[pricing]]` table declares an estimated model-pricing entry for one
 provider/model pair.
@@ -608,7 +698,7 @@ Pack pricing entries are lower priority than city-level `[[pricing]]` entries
 and higher priority than the built-in default pricing table. Pricing entries
 are estimates for decision support, not invoice reconciliation.
 
-### 1.2.14. Authoring Summary
+### 1.2.15. Authoring Summary
 
 New packs should use these authoring constructs:
 
@@ -629,6 +719,7 @@ New packs should use these authoring constructs:
 | `[[named_session]]` | Pack named sessions. |
 | `[[service]]` | Pack services. |
 | `[providers.<name>]` | Pack provider presets. |
+| `[runtimes.<name>]` | Pack-shipped runtime provider executables. |
 | `[[patches.agent]]` | Pack-level agent patches. |
 | `[global]` | Pack-wide live session commands. |
 | `[[pricing]]` | Pack pricing estimates. |
@@ -768,6 +859,11 @@ top-level `[imports.<binding>]` in `pack.toml`.
 If a pack import has an empty binding name or empty `source`, loading must
 fail.
 
+An import may set `agents_exclude` to a list of local agent names. Selectors
+are validated with the agent-name grammar; an invalid selector fails loading,
+while a valid selector that matches no agent is a warning and otherwise has no
+effect.
+
 ### 2.2. Versioning
 
 `PackImport.version` is a compatibility constraint for versioned sources.
@@ -839,6 +935,16 @@ When loading a pack for a rig-level surface:
 2. The loader drops agents and named sessions whose `scope` is `city`.
 3. For kept agents and named sessions whose `dir` is empty, the loader sets
    `dir` to the consuming rig's `name`.
+
+After cached results are retrieved and `transitive = false` filtering is
+applied, each import edge applies its `agents_exclude` selectors before
+binding stamping or dependency qualification. Matching uses the agent's local
+`name`, not its eventual qualified name. Named sessions whose backing
+`template` has a matching local name are removed with the agent. The filter is
+edge-local: importing the same source twice may exclude different agents on
+each edge. Providers, commands, doctors, runtimes, skills, formulas, orders,
+globals, requirements, and other non-agent content are unaffected. A cached
+pack result is never mutated by this filtering.
 
 Agents contributed by an `[imports.<binding>]` table are stamped with that
 binding at both the city level and the rig level. The consuming surface's own

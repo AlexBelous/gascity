@@ -14,7 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 // Store implements [beads.Store] by delegating each operation to a
@@ -35,6 +37,15 @@ type Store struct {
 	// restart, which is an accepted limitation for this delegating store.
 	localMu      sync.Mutex
 	localStrings map[string]map[string]string
+
+	// payloadBlind is DeclarePayloadBlind's grant.
+	payloadBlind bool
+
+	// importMu guards the remembered answer to whether the script offers the
+	// optional import op (ImportSupported).
+	importMu    sync.Mutex
+	importKnown bool
+	importOK    bool
 }
 
 // SetEnv sets environment variables passed to the script process.
@@ -104,6 +115,9 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, s.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return "", fmt.Errorf("exec beads %s: %w", args[0], err)
+	}
 	// WaitDelay ensures Go forcibly closes I/O pipes after the context
 	// expires, even if grandchild processes still hold them open.
 	cmd.WaitDelay = 2 * time.Second
@@ -161,7 +175,14 @@ func parseBead(data string) (beads.Bead, error) {
 	if err := json.Unmarshal([]byte(data), &w); err != nil {
 		return beads.Bead{}, fmt.Errorf("parsing JSON: %w", err)
 	}
-	return w.toBead(), nil
+	b, err := w.toBead()
+	if err != nil {
+		if w.ID != "" {
+			return beads.Bead{}, fmt.Errorf("parsing bead %s: %w", w.ID, err)
+		}
+		return beads.Bead{}, err
+	}
+	return b, nil
 }
 
 // parseBeadList parses a JSON array of beads. Returns empty slice for
@@ -174,15 +195,55 @@ func parseBeadList(data string) ([]beads.Bead, error) {
 	if err := json.Unmarshal([]byte(data), &ws); err != nil {
 		return nil, fmt.Errorf("parsing JSON: %w", err)
 	}
-	result := make([]beads.Bead, len(ws))
+	result := make([]beads.Bead, 0, len(ws))
 	for i := range ws {
-		result[i] = ws[i].toBead()
+		b, err := ws[i].toBead()
+		if err != nil {
+			if errors.Is(err, beads.ErrMetadataParse) {
+				// Match the native store: a bead with unparseable metadata is
+				// unreadable, so it is skipped (and cannot be claimed) rather
+				// than failing the whole list.
+				continue
+			}
+			id := ws[i].ID
+			if id == "" {
+				id = fmt.Sprintf("#%d", i)
+			}
+			return nil, fmt.Errorf("parsing bead %s: %w", id, err)
+		}
+		result = append(result, b)
 	}
 	return result, nil
 }
 
+// decodeOptionalBead validates a script's echoed bead when stdout is JSON.
+// Empty output and non-JSON text stay success: update scripts are not
+// required to echo the bead they wrote. A single echoed bead with a non-string
+// gc.exclude_claimants is rejected, as Get and Create reject it. A list of
+// echoed beads is validated the way [parseBeadList] validates one: rows with
+// bad metadata are skipped, so the list branch yields no metadata error.
+func decodeOptionalBead(out string) error {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil
+	}
+	var err error
+	switch out[0] {
+	case '{':
+		_, err = parseBead(out)
+	case '[':
+		_, err = parseBeadList(out)
+	default:
+		return nil
+	}
+	if err != nil && errors.Is(err, beads.ErrMetadataParse) {
+		return err
+	}
+	return nil
+}
+
 // toBead converts the wire format to a Gas City Bead.
-func (w *beadWire) toBead() beads.Bead {
+func (w *beadWire) toBead() (beads.Bead, error) {
 	var priority *int
 	if w.Priority != nil {
 		cloned := *w.Priority
@@ -191,6 +252,10 @@ func (w *beadWire) toBead() beads.Bead {
 	status := w.Status
 	if strings.TrimSpace(status) == "" {
 		status = "open"
+	}
+	metadata, err := coerceMetadata(w.Metadata)
+	if err != nil {
+		return beads.Bead{}, err
 	}
 	return beads.Bead{
 		ID:          w.ID,
@@ -207,11 +272,21 @@ func (w *beadWire) toBead() beads.Bead {
 		Needs:       w.Needs,
 		Description: w.Description,
 		Labels:      w.Labels,
-		Metadata:    coerceMetadata(w.Metadata),
+		Metadata:    metadata,
 		Ephemeral:   w.Ephemeral,
 		NoHistory:   w.NoHistory,
 		DeferUntil:  cloneTimePtr(w.DeferUntil),
+		CloseReason: closeReasonFor(status, w.CloseReason),
+	}, nil
+}
+
+// closeReasonFor keeps a script's close_reason only on a closed bead: a bead
+// that is not closed has no close reason.
+func closeReasonFor(status, reason string) string {
+	if status != "closed" {
+		return ""
 	}
+	return reason
 }
 
 func cloneTimePtr(v *time.Time) *time.Time {
@@ -224,12 +299,20 @@ func cloneTimePtr(v *time.Time) *time.Time {
 
 // coerceMetadata converts raw JSON metadata values to strings. Backing stores
 // may return numbers or booleans; the domain model is map[string]string.
-func coerceMetadata(raw map[string]json.RawMessage) map[string]string {
+//
+// gc.exclude_claimants is a comma-separated identity list. A non-string JSON
+// value must not become its raw text: that text matches no claimant, so the
+// exclusion would fail open. It is reported as beads.ErrMetadataParse: Get and
+// Create reject the bead, and list reads skip it.
+func coerceMetadata(raw map[string]json.RawMessage) (map[string]string, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	m := make(map[string]string, len(raw))
 	for k, v := range raw {
+		if k == beadmeta.ExcludeClaimantsMetadataKey && (len(v) == 0 || v[0] != '"') {
+			return nil, fmt.Errorf("metadata %s must be a string: %w", k, beads.ErrMetadataParse)
+		}
 		var s string
 		if json.Unmarshal(v, &s) == nil {
 			m[k] = s
@@ -238,7 +321,7 @@ func coerceMetadata(raw map[string]json.RawMessage) map[string]string {
 			m[k] = strings.TrimSpace(string(v))
 		}
 	}
-	return m
+	return m, nil
 }
 
 // Create persists a new bead: script create (stdin: JSON)
@@ -279,16 +362,24 @@ func (s *Store) Get(id string) (beads.Bead, error) {
 
 // Update modifies fields of an existing bead: script update <id> (stdin: JSON)
 func (s *Store) Update(id string, opts beads.UpdateOpts) error {
+	// The exec protocol's update document has no removal field; a script
+	// would see only the sets and report success with the keys still set.
+	if len(opts.UnsetMetadata) > 0 {
+		return fmt.Errorf("exec beads update %q: %w", id, beads.ErrUnsetMetadataUnsupported)
+	}
 	data, err := marshalUpdate(opts)
 	if err != nil {
 		return fmt.Errorf("exec beads update: marshaling: %w", err)
 	}
-	_, err = s.run(data, "update", id)
+	out, err := s.run(data, "update", id)
 	if err != nil {
 		if isNotFoundError(err) {
 			return fmt.Errorf("updating bead %q: %w", id, beads.ErrNotFound)
 		}
 		return fmt.Errorf("updating bead %q: %w", id, err)
+	}
+	if err := decodeOptionalBead(out); err != nil {
+		return fmt.Errorf("exec beads update: %w", err)
 	}
 	return nil
 }
@@ -317,6 +408,13 @@ func (s *Store) Close(id string) error {
 
 // Reopen sets a bead's status to "open": script reopen <id>
 func (s *Store) Reopen(id string) error {
+	// metadata.close_reason is a closer's input; a reopened bead must not hand
+	// it to its next close, so it is cleared before the reopen, as BdStore does.
+	if b, err := s.Get(id); err == nil && b.Status != "open" && strings.TrimSpace(b.Metadata["close_reason"]) != "" {
+		if err := s.SetMetadata(id, "close_reason", ""); err != nil {
+			return fmt.Errorf("reopening bead %q: clearing close_reason: %w", id, err)
+		}
+	}
 	_, err := s.run(nil, "reopen", id)
 	if err != nil {
 		if isNotFoundError(err) {
@@ -582,5 +680,28 @@ func (s *Store) DepList(id, direction string) ([]beads.Dep, error) {
 	return deps, nil
 }
 
-// Compile-time interface check.
-var _ beads.Store = (*Store)(nil)
+// DeclarePayloadBlind records that this store's provider keeps no dependency
+// payload anywhere it could be read from: the exec protocol has no payload
+// field (a create request carries none and dep-add takes three arguments), and
+// the provider is not backed by bd, where a graph plan can have written one.
+// Whether the provider is bd-backed is the caller's knowledge, not the
+// protocol's, so the store declares nothing until the caller that built it
+// grants it (cmd/gc's exec store opener).
+func (s *Store) DeclarePayloadBlind() {
+	s.payloadBlind = true
+}
+
+// DepMetadataAbsentByProtocol reports the declaration DeclarePayloadBlind
+// granted.
+func (s *Store) DepMetadataAbsentByProtocol() (string, bool) {
+	if s == nil || !s.payloadBlind {
+		return "", false
+	}
+	return "exec", true
+}
+
+// Compile-time interface checks.
+var (
+	_ beads.Store                       = (*Store)(nil)
+	_ beads.DepMetadataAbsentByProtocol = (*Store)(nil)
+)

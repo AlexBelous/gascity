@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
 
 const moduleImportPath = "github.com/gastownhall/gascity"
@@ -57,7 +59,11 @@ const (
 	DispositionNotApplicable Disposition = "not_applicable"
 )
 
-var runtimeProviderRunner = repoSymbol("internal/runtime/runtimetest", "RunProviderTests")
+var (
+	runtimeProviderRunner            = repoSymbol("internal/runtime/runtimetest", "RunProviderTests")
+	runtimeProviderRunnerWithOptions = repoSymbol("internal/runtime/runtimetest", "RunProviderTestsWithOptions")
+	runtimetestOptionsType           = repoSymbol("internal/runtime/runtimetest", "Options")
+)
 
 const (
 	// RuntimeBuiltinCatalog names cmd/gc's static runtime provider registry.
@@ -65,6 +71,8 @@ const (
 	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
 	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
+	// It is pinned by TestRuntimeWaiverOwnerIsPinnedAndWellFormed: changing it
+	// re-owns every runtime waiver at once, so it needs to be a deliberate edit.
 	runtimeContractWaiverOwner = "ga-80po0c.3"
 
 	// MarkdownStart begins the generated TESTING.md table.
@@ -97,12 +105,27 @@ type ProofRef struct {
 	Runner       SymbolRef
 	AllowedCalls []SymbolRef
 
+	// Options, when non-nil, requires the contract runner call to pass a
+	// third argument: a runtimetest.Options{...} composite literal whose
+	// fields match exactly, and requires Runner to be
+	// runtimeProviderRunnerWithOptions instead of runtimeProviderRunner.
+	Options *ProofOptions
+
 	// Scope optionally narrows what a proved claim establishes when a
 	// source-bound constructor is proved on one execution path but not its
 	// whole surface. It is rendered alongside the proved status so the ledger
 	// does not overstate coverage — for example a router composition proved on
 	// its default route while its alternate route is covered by focused tests.
 	Scope string
+}
+
+// ProofOptions restricts which runtimetest.Options fields a proof may set on
+// the contract runner call to literal values the AST proof validator can
+// check statically. SkipStartError is deliberately excluded: a func value
+// can't be verified statically, so allowing it here could let a proved claim
+// hide a skip behind it.
+type ProofOptions struct {
+	DuplicateStartReconnects bool
 }
 
 // Waiver is a temporary, owned exception to an applicable contract.
@@ -141,6 +164,8 @@ type Entry struct {
 // Catalog returns fresh entries from the checked runtime-provider ledger.
 func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
+	guardConstructor := repoSymbol("internal/runtime/guard", "New")
+	hybridConstructor := repoSymbol("internal/runtime/hybrid", "New")
 	return []Entry{
 		reusableBuiltin(
 			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
@@ -182,7 +207,17 @@ func Catalog() []Entry {
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				"NewSeamBacked always uses shared os.TempDir()/gc-acp-<euid> state; the WithDir proof does not exercise that composition",
+				time.Date(2026, time.December, 21, 0, 0, 0, 0, time.UTC),
+				"TestACPDefaultDirConformance (internal/runtime/acp/conformance_test.go) calls "+
+					"NewSeamBacked directly through runtimetest.RunProviderTests with no dir injection, reusing "+
+					"the fakeacp fixture; verified clean on Linux (single run, -count=3 repeated, -race, and two "+
+					"concurrent OS-process runs against the shared default euid-scoped directory). The one "+
+					"remaining proof capability is a clean Darwin-lane run: ga-csh74h (Mac CI fleet-wide broken — "+
+					"setup-gascity-macos's go-version default is stale against go.mod's `go 1.26.6` requirement, "+
+					"failing mac-quality and skipping every downstream job including the packages-core shard "+
+					"this test would run in) currently blocks that evidence. Promote to proved once ga-csh74h "+
+					"is fixed and a clean Darwin run of TestACPDefaultDirConformance is recorded."+
+					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -196,61 +231,101 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"t3bridge", "exact:t3bridge", nil,
-			waivedRuntime(
+			provedRuntimeWithOptions(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract",
+				"internal/runtime/t3bridge/conformance_test.go",
+				"TestT3Bridge_RunProviderConformance",
+				ProofOptions{DuplicateStartReconnects: true},
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceConfig"),
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceNextSessionName"),
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceCurrentSessionName"),
 			),
 		),
 		builtin(
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				"the actual K8s production composition has no full shared runtime contract",
+				time.Date(2026, time.December, 16, 0, 0, 0, 0, time.UTC),
+				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s."+
+					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				"the existing full conformance run skips in short mode or when the herdr executable is absent",
+				time.Date(2026, time.December, 31, 0, 0, 0, 0, time.UTC),
+				"the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent",
 			),
 		),
 		builtin(
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
+				time.Date(2026, time.December, 26, 0, 0, 0, 0, time.UTC),
+				"cmd/gc.newHybridProvider is the selected registry construction boundary. It builds the K8s backend before it consults its routing predicate, so the shared runtime contract cannot run against the wrapper without a Kubernetes client configuration."+
+					" Its tmux and K8s constructors are not claimed here; internal/runtime/hybrid.New is proved separately by runtime.composition.hybrid, and the wrapper's own conditional construction stays ungated."+
+					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
 			"exec", "prefix:exec:", nil,
 			provedRuntime(
-				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
+				repoSymbol("internal/runtime/exec", "NewSeamBackedForCity"),
 				"internal/runtime/exec/exec_test.go",
 				"TestExecConformance",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
 				repoSymbol("internal/runtime/exec", "execConformanceScript"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
-			waivedRuntime(
+			provedRuntimeWithOptions(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
+				"internal/runtime/t3bridge/conformance_test.go",
+				"TestT3Bridge_RunProviderConformance",
+				ProofOptions{DuplicateStartReconnects: true},
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceConfig"),
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceNextSessionName"),
+				repoSymbol("internal/runtime/t3bridge", "t3BridgeConformanceCurrentSessionName"),
 			),
 		),
 		builtin(
 			"ssh", "prefix:ssh:", nil,
-			waivedRuntime(
+			provedRuntimeScoped(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				"the production SSH composition has no full shared runtime contract",
+				"internal/runtime/ssh/conformance_integration_test.go",
+				"TestSSHConformance",
+				"hermetic ssh-client boundary; real-client transport behavior (exit-255 collapse, BatchMode/known_hosts, interactive attach) not covered",
+				repoSymbol("internal/runtime/ssh", "sshConformanceEndpoint"),
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
 			"tmux", "exact:tmux", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				"the existing full conformance run skips when the tmux executable is absent",
+				"internal/runtime/tmux/adapter_test.go",
+				"TestTmuxConformance",
+				repoSymbol("internal/runtime/tmux", "tmuxConformanceConfig"),
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
+		{
+			ID:           "runtime.worker-site.guard",
+			Roles:        []Role{RoleProductionProvider},
+			Port:         PortRuntimeProvider,
+			Constructors: []SymbolRef{guardConstructor},
+			Source: &SourceRef{
+				File:     "cmd/gc/providers.go",
+				Function: "resolveWorkerSpec",
+				Reason:   "a worker site's control-plane descriptor selects the guard, outside the runtime registry",
+			},
+			Claims: []ContractClaim{notApplicableRuntime(
+				guardConstructor,
+				"worker-site guard: it refuses every runtime operation, so the successful-provider contract is not applicable",
+			)},
+		},
 		{
 			ID:           "runtime.composition.auto",
 			Roles:        []Role{RoleProductionProvider},
@@ -266,6 +341,26 @@ func Catalog() []Entry {
 				"internal/runtime/auto/conformance_test.go",
 				"TestAutoConformance",
 				"default-route conformance; ACP route covered by focused auto routing tests",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
+			)},
+		},
+		{
+			ID:           "runtime.composition.hybrid",
+			Roles:        []Role{RoleProductionProvider},
+			Port:         PortRuntimeProvider,
+			Constructors: []SymbolRef{hybridConstructor},
+			Source: &SourceRef{
+				File:     "cmd/gc/providers.go",
+				Function: "newHybridProvider",
+				Reason:   "conditional local/remote composition is constructed inside the wrapper, not the runtime registry",
+			},
+			Claims: []ContractClaim{provedRuntimeScoped(
+				hybridConstructor,
+				"internal/runtime/hybrid/conformance_test.go",
+				"TestHybridConformance",
+				"local-route conformance via RunProviderTests; remote-route delegation covered separately by internal/runtime/hybrid's fake-backed unit tests",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
 				repoSymbol("internal/runtime", "NewFake"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
@@ -324,22 +419,43 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 	return claim
 }
 
-// runtimeWaiverExpiry dates the eight remaining runtime.Provider waivers owned
-// by ga-80po0c.3. The 2026-08-26 waiver expired without these full contracts
-// landing. This 14-day extension is debt, not evidence of conformance: the
-// per-constructor gaps and reasons remain recorded in Catalog and TESTING.md.
-// The owner must land the missing proofs or seek a fresh explicit decision by
-// 2026-10-10 00:00 UTC; expiry remains enforced by the provider-ledger check.
-var runtimeWaiverExpiry = time.Date(2026, time.October, 10, 0, 0, 0, 0, time.UTC)
+// provedRuntimeWithOptions builds a proved claim whose contract runner call
+// passes a runtimetest.Options{...} literal as a third argument, restricted
+// to the fields opts declares.
+func provedRuntimeWithOptions(constructor SymbolRef, file, test string, opts ProofOptions, allowedCalls ...SymbolRef) ContractClaim {
+	return ContractClaim{
+		Constructor: constructor,
+		Contract:    ContractRuntimeProvider,
+		Disposition: DispositionProved,
+		Proof: &ProofRef{
+			File:         file,
+			Test:         test,
+			Runner:       runtimeProviderRunnerWithOptions,
+			AllowedCalls: append([]SymbolRef(nil), allowedCalls...),
+			Options:      &opts,
+		},
+	}
+}
 
-func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
+// waivedRuntime builds a claim that defers proof of the runtime.Provider
+// contract to a dated waiver. Each call site supplies its own expires
+// literal rather than a shared expiry: a single shared expiry previously
+// caused every remaining waiver to lapse in lockstep and turn the whole
+// ledger check red at once (GitHub #5195), which was "fixed" by pushing
+// the one shared date forward instead of dating each gap independently.
+//
+// Prefer a short horizon (weeks, not the 90-day maxWaiverHorizon the
+// validator allows): a long horizon hides a stalled contract behind a
+// green run, while a short one puts the question back in front of the
+// owner while the context is still fresh.
+func waivedRuntime(constructor SymbolRef, expires time.Time, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
 		Contract:    ContractRuntimeProvider,
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
 			Owner:   runtimeContractWaiverOwner,
-			Expires: runtimeWaiverExpiry,
+			Expires: expires,
 			Reason:  reason,
 		},
 	}
@@ -354,8 +470,12 @@ func notApplicableRuntime(constructor SymbolRef, reason string) ContractClaim {
 	}
 }
 
-// Validate checks ledger structure and waiver policy at the supplied time.
-func Validate(entries []Entry, now time.Time) error {
+// Validate checks ledger structure. It never reads or takes a clock: whether a
+// waiver's date is acceptable today is a separate question, answered by handing
+// Expiries to internal/testpolicy/waiverclock from the one never-cached date
+// check (internal/testpolicy/waiverexpiry). Keeping the two apart is what lets
+// this check's result be cached without going stale on the calendar.
+func Validate(entries []Entry) error {
 	var problems []string
 	seenIDs := make(map[string]bool)
 	seenCatalogKeys := make(map[string]string)
@@ -465,7 +585,7 @@ func Validate(entries []Entry, now time.Time) error {
 		}
 		seenClaims := make(map[claimKey]bool)
 		for _, claim := range entry.Claims {
-			claimPrefix := fmt.Sprintf("%s constructor %s contract %s", prefix, renderSymbolRef(claim.Constructor), claim.Contract)
+			claimPrefix := claimLabel(entry, claim)
 			if err := validateSymbolRef(claim.Constructor); err != nil {
 				problems = append(problems, fmt.Sprintf("%s claim constructor: %v", prefix, err))
 			} else if !seenConstructors[claim.Constructor] {
@@ -479,7 +599,7 @@ func Validate(entries []Entry, now time.Time) error {
 				problems = append(problems, claimPrefix+" is duplicated")
 			}
 			seenClaims[key] = true
-			problems = append(problems, validateClaim(claimPrefix, claim, now)...)
+			problems = append(problems, validateClaim(claimPrefix, claim)...)
 		}
 		for _, constructor := range entry.Constructors {
 			if !seenClaims[claimKey{constructor: constructor, contract: ContractRuntimeProvider}] {
@@ -491,6 +611,33 @@ func Validate(entries []Entry, now time.Time) error {
 	return joinProblems(problems)
 }
 
+// Expiries returns one dated expiry per waived claim, for the waiver clock to
+// judge against today. A waiver with no owner or no date is left out: Validate
+// already reports it, and handing it on would turn one authoring mistake into
+// two findings.
+func Expiries(entries []Entry) []waiverclock.Expiry {
+	var expiries []waiverclock.Expiry
+	for _, entry := range entries {
+		for _, claim := range entry.Claims {
+			waiver := claim.Waiver
+			if waiver == nil || waiver.Expires.IsZero() || strings.TrimSpace(waiver.Owner) == "" {
+				continue
+			}
+			expiries = append(expiries, waiverclock.Expiry{
+				Label:   claimLabel(entry, claim),
+				Owner:   waiver.Owner,
+				Expires: waiver.Expires,
+				Horizon: maxWaiverHorizon,
+			})
+		}
+	}
+	return expiries
+}
+
+func claimLabel(entry Entry, claim ContractClaim) string {
+	return fmt.Sprintf("entry %q constructor %s contract %s", entry.ID, renderSymbolRef(claim.Constructor), claim.Contract)
+}
+
 func hasRole(roles []Role, want Role) bool {
 	for _, role := range roles {
 		if role == want {
@@ -500,8 +647,9 @@ func hasRole(roles []Role, want Role) bool {
 	return false
 }
 
-func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
-	var problems []string
+// validateClaim reports the claim's structural problems. It deliberately does
+// not judge the waiver's date; see Expiries.
+func validateClaim(prefix string, claim ContractClaim) (problems []string) {
 	payloads := 0
 	if claim.Proof != nil {
 		payloads++
@@ -526,8 +674,14 @@ func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
 			}
 			if err := validateSymbolRef(claim.Proof.Runner); err != nil {
 				problems = append(problems, fmt.Sprintf("%s proof runner: %v", prefix, err))
-			} else if claim.Contract == ContractRuntimeProvider && claim.Proof.Runner != runtimeProviderRunner {
-				problems = append(problems, fmt.Sprintf("%s proof runner is %s, want %s", prefix, renderSymbolRef(claim.Proof.Runner), renderSymbolRef(runtimeProviderRunner)))
+			} else if claim.Contract == ContractRuntimeProvider {
+				wantRunner := runtimeProviderRunner
+				if claim.Proof.Options != nil {
+					wantRunner = runtimeProviderRunnerWithOptions
+				}
+				if claim.Proof.Runner != wantRunner {
+					problems = append(problems, fmt.Sprintf("%s proof runner is %s, want %s", prefix, renderSymbolRef(claim.Proof.Runner), renderSymbolRef(wantRunner)))
+				}
 			}
 			seenAllowed := make(map[SymbolRef]bool)
 			for _, allowed := range claim.Proof.AllowedCalls {
@@ -561,13 +715,6 @@ func validateClaim(prefix string, claim ContractClaim, now time.Time) []string {
 		}
 		if waiver.Expires.IsZero() {
 			problems = append(problems, prefix+" waiver expiry is required")
-		} else {
-			if !waiver.Expires.After(now) {
-				problems = append(problems, fmt.Sprintf("%s waiver owned by %s expired %s", prefix, waiver.Owner, waiver.Expires.Format("2006-01-02")))
-			}
-			if waiver.Expires.After(now.Add(maxWaiverHorizon)) {
-				problems = append(problems, fmt.Sprintf("%s waiver owned by %s exceeds the %s horizon", prefix, waiver.Owner, maxWaiverHorizon))
-			}
 		}
 	}
 	return problems
@@ -634,7 +781,7 @@ func RenderMarkdown(entries []Entry) string {
 	var out strings.Builder
 	out.WriteString(MarkdownStart)
 	out.WriteString("\n")
-	out.WriteString("This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.\n\n")
+	out.WriteString("This table is rendered from `internal/testutil/providerledger` and checked by `bazel test //internal/testutil/providerledger:providerledger_test`; edit the Go ledger, then regenerate this block from the repository root with `GC_TEST_REPO_ROOT=\"$PWD\" bazel run //internal/testutil/providerledger:providerledger_test -- -test.run='^TestCatalogMatchesProductionWiringAndDocumentation$' -update` (or paste the expected block printed on drift).\n\n")
 	out.WriteString("| Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |\n")
 	out.WriteString("|---|---|---|---|---|---|---|---|\n")
 	for _, entry := range entries {
@@ -731,19 +878,38 @@ func markdownCell(value string) string {
 
 // CheckMarkdown checks the single generated TESTING.md ledger block.
 func CheckMarkdown(document string, entries []Entry) error {
-	if strings.Count(document, MarkdownStart) != 1 || strings.Count(document, MarkdownEnd) != 1 {
-		return errors.New("TESTING.md must contain exactly one checked runtime provider ledger marker pair")
+	start, end, err := markerBlockBounds(document)
+	if err != nil {
+		return err
 	}
-	start := strings.Index(document, MarkdownStart)
-	end := strings.Index(document[start:], MarkdownEnd)
-	if end < 0 {
-		return errors.New("TESTING.md checked runtime provider ledger markers are out of order")
-	}
-	end += start + len(MarkdownEnd)
 	if got, want := document[start:end], RenderMarkdown(entries); got != want {
 		return fmt.Errorf("TESTING.md checked runtime provider table does not match the provider ledger; replace the marker block with:\n%s", want)
 	}
 	return nil
+}
+
+// ReplaceMarkdownBlock swaps the marked ledger block for replacement, leaving
+// the rest of the document byte-identical.
+func ReplaceMarkdownBlock(document, replacement string) (string, error) {
+	start, end, err := markerBlockBounds(document)
+	if err != nil {
+		return "", err
+	}
+	return document[:start] + replacement + document[end:], nil
+}
+
+// markerBlockBounds locates the single marked ledger block, returning the
+// half-open byte range that covers it including both markers.
+func markerBlockBounds(document string) (start, end int, err error) {
+	if strings.Count(document, MarkdownStart) != 1 || strings.Count(document, MarkdownEnd) != 1 {
+		return 0, 0, errors.New("TESTING.md must contain exactly one checked runtime provider ledger marker pair")
+	}
+	start = strings.Index(document, MarkdownStart)
+	end = strings.Index(document[start:], MarkdownEnd)
+	if end < 0 {
+		return 0, 0, errors.New("TESTING.md checked runtime provider ledger markers are out of order")
+	}
+	return start, end + start + len(MarkdownEnd), nil
 }
 
 func joinProblems(problems []string) error {

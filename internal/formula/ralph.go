@@ -53,6 +53,9 @@ func expandRalph(step *Step) ([]*Step, error) {
 	if step.Ralph.Check == nil {
 		return nil, fmt.Errorf("expanding ralph %q: missing check spec", step.ID)
 	}
+	if step.Ralph.MaxAttemptsVar != "" {
+		return nil, fmt.Errorf("expanding ralph %q: max_attempts var %q is unresolved", step.ID, step.Ralph.MaxAttemptsVar)
+	}
 
 	attempt := 1
 	iterationID := fmt.Sprintf("%s.iteration.%d", step.ID, attempt)
@@ -99,6 +102,7 @@ func expandRalph(step *Step) ([]*Step, error) {
 	// formula syntax, so they intentionally retain legacy ralph naming.
 	iteration.Metadata = withMetadata(iteration.Metadata, map[string]string{
 		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+		beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.StepRefMetadataKey:     iterationID,
@@ -145,6 +149,7 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 		beadmeta.StepIDMetadataKey:      step.ID,
 		beadmeta.RalphStepIDMetadataKey: step.ID,
 		beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+		beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 		beadmeta.StepRefMetadataKey:     iterationID,
 		// gc.control_for on the scope root only (body children hang off it via
 		// gc.scope_ref and are not attempt roots — they must not be stamped).
@@ -159,6 +164,59 @@ func expandNestedRalph(step, control, specStep *Step, iterationID string, attemp
 	out := []*Step{control, specStep, iteration}
 	out = append(out, flattenedBody...)
 	return out, nil
+}
+
+// RalphBodyChildAttempt returns the gc.attempt a ralph body child carries: the
+// iteration it runs in. That is the v1.4.2 contract, and pack gates join the
+// beads of one iteration on it (workflows adopt-pr-review-approved.sh
+// load_verdict matches gc.attempt == the iteration). #5635 briefly stamped a
+// retry child's own counter here instead, which silently wedged those loops
+// from iteration 2 on; the counter now lives in gc.retry_attempt
+// (RalphBodyChildRetryAttempt), so gc.attempt can keep meaning the iteration.
+//
+// Both the compile-time expansion (namespaceRalphBodySteps) and the runtime
+// re-spawn (dispatch.buildAttemptRecipe) route through here so iteration 1 and
+// iterations 2+ cannot disagree about what a child's counters mean.
+func RalphBodyChildAttempt(_ *Step, iterationNum int) string {
+	return strconv.Itoa(iterationNum)
+}
+
+// RalphBodyChildRetryAttempt returns the gc.retry_attempt a ralph body child
+// carries, or "" when the child is not a retry attempt root. A frozen body
+// arrives already retry-expanded, so a retry child's first attempt is in the
+// child list as <step>.attempt.1; it restarts at that number in every
+// iteration, which is what keeps a retry first reached in iteration N from
+// being born at attempt N against its own max_attempts (ga-v7pu5).
+//
+// Specs frozen before gc.retry_attempt existed carry the counter only in the
+// ".attempt.<n>" suffix of the child ID (and, for v1.5.0 pre-releases, in
+// gc.attempt), so the ID is the fallback: it is the one place every binary has
+// always written the retry number.
+func RalphBodyChildRetryAttempt(child *Step) string {
+	if v := strings.TrimSpace(child.Metadata[beadmeta.RetryAttemptMetadataKey]); v != "" {
+		return v
+	}
+	// Only an attempt root carries a lineage stamp or a spec attempt; a plain
+	// step whose ID merely ends in ".attempt.<n>" is not one.
+	if strings.TrimSpace(child.Metadata[beadmeta.ControlForMetadataKey]) == "" &&
+		strings.TrimSpace(child.Metadata[beadmeta.AttemptMetadataKey]) == "" {
+		return ""
+	}
+	return trailingAttemptOrdinal(child.ID)
+}
+
+// trailingAttemptOrdinal returns n when id ends in ".attempt.<n>", else "".
+func trailingAttemptOrdinal(id string) string {
+	const marker = ".attempt."
+	idx := strings.LastIndex(id, marker)
+	if idx < 0 {
+		return ""
+	}
+	n := id[idx+len(marker):]
+	if _, err := strconv.Atoi(n); err != nil || n == "" {
+		return ""
+	}
+	return n
 }
 
 func collectRalphBodyStepIDs(steps []*Step) map[string]bool {
@@ -206,7 +264,8 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
 				beadmeta.StepIDMetadataKey:      childStepID,
 				beadmeta.RalphStepIDMetadataKey: owner.ID,
-				beadmeta.AttemptMetadataKey:     strconv.Itoa(attempt),
+				beadmeta.AttemptMetadataKey:     RalphBodyChildAttempt(node, attempt),
+				beadmeta.IterationMetadataKey:   strconv.Itoa(attempt),
 				beadmeta.StepRefMetadataKey:     clone.ID,
 			}
 			// A nested control's attempt/iteration root carries gc.control_for as
@@ -349,4 +408,97 @@ func appendUniqueCopy(slice []string, item string) []string {
 	out = append(out, slice...)
 	out = append(out, item)
 	return out
+}
+
+// bindCheckMaxAttemptsVars records, on every check in steps at any depth whose
+// max_attempts names a var, that var's value in scope: the vars of the
+// expansion whose template defines the steps, layered over its invoker's. It
+// does not validate the value; ResolveCheckMaxAttemptsVars does, after
+// condition filtering, so a check a condition excludes never fails on it. A
+// check keeps the first value bound to it, and a var scope has no value for
+// stays unbound.
+func bindCheckMaxAttemptsVars(steps []*Step, scope map[string]string) {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		bindCheckMaxAttemptsVar(step, scope)
+		bindCheckMaxAttemptsVars(step.Children, scope)
+		if step.Loop != nil {
+			bindCheckMaxAttemptsVars(step.Loop.Body, scope)
+		}
+	}
+}
+
+func bindCheckMaxAttemptsVar(step *Step, scope map[string]string) {
+	spec := step.Ralph
+	if spec == nil || spec.MaxAttemptsVar == "" || spec.maxAttemptsVarBound {
+		return
+	}
+	raw, ok := scope[spec.MaxAttemptsVar]
+	if !ok {
+		return
+	}
+	bound := cloneRalphSpec(spec)
+	bound.maxAttemptsVarValue = raw
+	bound.maxAttemptsVarBound = true
+	step.Ralph = bound
+}
+
+// ResolveCheckMaxAttemptsVars replaces every check's max_attempts "{{name}}"
+// placeholder, at any depth, with the integer value of that formula var: the
+// value bound from the expansion that defines the check, else the var's value
+// in vars. It runs after condition filtering, so it validates only the checks
+// a condition keeps, and before ApplyRalph freezes max_attempts into control
+// metadata and step specs, so everything downstream sees a literal count. The
+// value must be an integer of at least 1.
+func ResolveCheckMaxAttemptsVars(steps []*Step, vars map[string]string) error {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		if err := resolveCheckMaxAttemptsVar(step, vars); err != nil {
+			return err
+		}
+		if err := ResolveCheckMaxAttemptsVars(step.Children, vars); err != nil {
+			return err
+		}
+		if step.Loop != nil {
+			if err := ResolveCheckMaxAttemptsVars(step.Loop.Body, vars); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// resolveCheckMaxAttemptsVar replaces step's check max_attempts placeholder,
+// if it has one, with the integer value of its var.
+func resolveCheckMaxAttemptsVar(step *Step, vars map[string]string) error {
+	spec := step.Ralph
+	if spec == nil || spec.MaxAttemptsVar == "" {
+		return nil
+	}
+	name := spec.MaxAttemptsVar
+	raw, ok := vars[name]
+	if spec.maxAttemptsVarBound {
+		raw, ok = spec.maxAttemptsVarValue, true
+	}
+	if !ok {
+		return fmt.Errorf("step %q: check max_attempts references var %q, which has no value", step.ID, name)
+	}
+	if residual := CheckResidualVars(raw); len(residual) > 0 {
+		return fmt.Errorf("step %q: check max_attempts var %q = %q contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, name, raw, strings.Join(residual, ", "))
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 1 {
+		return fmt.Errorf("step %q: check max_attempts var %q = %q, want an integer >= 1", step.ID, name, raw)
+	}
+	resolved := cloneRalphSpec(spec)
+	resolved.MaxAttempts = n
+	resolved.MaxAttemptsVar = ""
+	resolved.maxAttemptsVarValue = ""
+	resolved.maxAttemptsVarBound = false
+	step.Ralph = resolved
+	return nil
 }

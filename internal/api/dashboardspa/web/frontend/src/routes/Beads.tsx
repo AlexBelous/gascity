@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router';
 import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { formatApiError } from '../api/client';
 import { getActiveCity } from '../api/cityBase';
 import { useAttentionModel } from '../attention/context';
+import { inProgressCardNote } from '../attention/beadsNeedingAttention';
 import { resourceAttentionSeverity } from '../attention/routeHighlight';
 import { BeadAttentionPanel } from '../components/beads/BeadAttentionPanel';
 import { BeadBoardSection } from '../components/beads/BeadBoardSection';
@@ -14,6 +15,7 @@ import { ListSearchBar } from '../components/ListSearchBar';
 import { Modal } from '../components/Modal';
 import { PageHeader } from '../components/PageHeader';
 import { StatusBadge } from '../components/StatusBadge';
+import { useNow } from '../contexts/NowContext';
 import { READ_ONLY_CONTROL_TITLE, ReadOnlyBadge, useReadOnly } from '../contexts/ReadOnlyContext';
 import { buildBeadGraph } from '../lib/beadGraph';
 import { resolveRigName, rigNameOptions } from '../lib/rigNames';
@@ -22,7 +24,7 @@ import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { useListFilters, type FilterChip } from '../hooks/useListFilters';
 import { beadProject } from '../hooks/projectOf';
 import { listSupervisorAgents, type SupervisorAgent } from '../supervisor/agentReads';
-import { listSupervisorBeads, type SupervisorBead } from '../supervisor/beadReads';
+import { listSupervisorBeads, routedAgent, type SupervisorBead } from '../supervisor/beadReads';
 import { listSupervisorRigs } from '../supervisor/rigReads';
 import { closeSupervisorBead, createAndSlingSupervisorBead } from '../supervisor/beadWrites';
 import { listSupervisorSessions } from '../supervisor/sessionReads';
@@ -55,6 +57,7 @@ const BEAD_SEARCH_FIELDS = (b: SupervisorBead): ReadonlyArray<string | undefined
   b.id,
   b.title,
   b.assignee,
+  routedAgent(b),
   ...(b.labels ?? []),
 ];
 
@@ -66,6 +69,7 @@ export function BeadsPage() {
   const [searchParams] = useSearchParams();
   const selectedBeadParam = normalizeSelectedBeadParam(searchParams.get('bead'));
   const [rigFilter, setRigFilter] = useState<string>(RIG_FILTER_ALL);
+  const [agentFilter, setAgentFilter] = useState('');
   // Closed beads dwarf the open queue (~199.7K closed vs ~1K open on this
   // city), so scanning them on every load makes the `task` query spike and
   // trips the fetch-window truncation warning. Default the board to the
@@ -149,7 +153,15 @@ export function BeadsPage() {
     }
   }, [dispatchRigOptions, rigFilter]);
 
-  const filteredRows = rows;
+  const routedAgentOptions = useMemo(() => {
+    const names = new Set(rows.map(routedAgent));
+    if (agentFilter) names.add(agentFilter);
+    return [...names].filter((name): name is string => name !== undefined).sort();
+  }, [rows, agentFilter]);
+  const filteredRows = useMemo(
+    () => (agentFilter ? rows.filter((bead) => routedAgent(bead) === agentFilter) : rows),
+    [rows, agentFilter],
+  );
 
   const filters = useListFilters<SupervisorBead>({
     viewKey: 'beads',
@@ -262,7 +274,11 @@ export function BeadsPage() {
   }, [newAgent, newBody, newRig, newTitle, readOnly, refresh]);
 
   const matched = useMemo(() => filters.groups.flatMap((group) => group.rows), [filters.groups]);
-  const graph = useMemo(() => buildBeadGraph(matched), [matched]);
+  // Keep dependencies on work routed to other agents visible in the filtered board.
+  const graph = useMemo(
+    () => buildBeadGraph(agentFilter ? rows : matched),
+    [agentFilter, rows, matched],
+  );
   const groupIds = useMemo(() => {
     const map = new Map<string, Set<string>>();
     for (const group of filters.groups) {
@@ -282,6 +298,33 @@ export function BeadsPage() {
     () => (beadId: string) => resourceAttentionSeverity(attention, 'beads', beadId),
     [attention],
   );
+
+  // In-progress liveness notes (gp-6xd): who holds the bead and whether they
+  // are alive, or the waiting/stalled reason. Computed from the sessions the
+  // page already fetches for the detail modal, via the same selector module
+  // the nav badge reads — one rule set, three surfaces. While the session
+  // read is pending, failed, or partial, `sessionsForNotes` stays undefined
+  // so the selector skips session-dependent stall checks instead of calling
+  // every assigned card "no live session" against an empty roster. The
+  // app-level 1s clock keeps ages advancing and lets a quiet card cross the
+  // stalled threshold without a data refresh.
+  const nowMs = useNow();
+  const sessionsForNotes = useMemo(
+    () =>
+      sessions.data === undefined || sessions.data.partial === true
+        ? undefined
+        : (sessions.data.items ?? []),
+    [sessions.data],
+  );
+  const beadNoteOf = useMemo(() => {
+    const notes = new Map<string, string>();
+    for (const bead of matched) {
+      if (bead.status !== 'in_progress') continue;
+      const note = inProgressCardNote(bead, sessionsForNotes, nowMs);
+      if (note !== null) notes.set(bead.id, note);
+    }
+    return (beadId: string) => notes.get(beadId) ?? null;
+  }, [matched, sessionsForNotes, nowMs]);
 
   // The "Needs you" section (gascity-dashboard-2j8e.3) renders the same
   // beads-domain attention items the nav badge counts, so the page count and the
@@ -321,8 +364,8 @@ export function BeadsPage() {
   );
 
   const synopsis = useMemo(
-    () => (hasLoadedBoard ? buildSynopsis(filteredRows, totalShown, rigFilter) : 'Loading beads.'),
-    [filteredRows, hasLoadedBoard, totalShown, rigFilter],
+    () => (hasLoadedBoard ? buildSynopsis(rows, totalShown, rigFilter) : 'Loading beads.'),
+    [rows, hasLoadedBoard, totalShown, rigFilter],
   );
 
   const isTruncated =
@@ -414,7 +457,7 @@ export function BeadsPage() {
         <ListSearchBar
           value={filters.search}
           onChange={filters.setSearch}
-          placeholder="Search beads by id, title, label, assignee"
+          placeholder="Search beads by id, title, label, assignee, or routed agent"
           matchCount={filters.totalMatches}
           totalCount={filteredRows.length}
           ariaLabel="Search beads"
@@ -426,6 +469,23 @@ export function BeadsPage() {
             onToggle={toggleStatusChip}
             legend="Status"
           />
+          {routedAgentOptions.length > 0 && (
+            <label className="flex items-baseline gap-2 text-label">
+              <span className="uppercase tracking-wider text-fg-muted">For agent</span>
+              <select
+                value={agentFilter}
+                onChange={(event) => setAgentFilter(event.target.value)}
+                className="text-label text-fg-muted bg-transparent border-0 focus-mark cursor-pointer hover:text-fg transition-colors duration-150 ease-out-quart"
+              >
+                <option value="">all agents</option>
+                {routedAgentOptions.map((agent) => (
+                  <option key={agent} value={agent}>
+                    {agent}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {dispatchRigOptions.length > 1 && (
             <label className="flex items-baseline gap-2 text-label">
               <span className="uppercase tracking-wider text-fg-muted">Rig</span>
@@ -451,7 +511,7 @@ export function BeadsPage() {
         <p className="text-body text-fg-muted italic">Loading beads.</p>
       ) : matched.length === 0 ? (
         <p className="text-body text-fg-muted italic">
-          {filters.search.length > 0 || filters.activeChipIds.size > 0
+          {agentFilter || filters.search.length > 0 || filters.activeChipIds.size > 0
             ? 'No beads match the current search or filter.'
             : 'Nothing on the queue right now.'}
         </p>
@@ -466,6 +526,7 @@ export function BeadsPage() {
               ids={groupIds.get(group.projectKey) ?? EMPTY_IDS}
               selectedId={selectedId}
               attentionSeverity={beadAttentionSeverity}
+              noteOf={beadNoteOf}
               onSelect={setSelectedId}
             />
           ))}
@@ -615,7 +676,10 @@ export function BeadsPage() {
               >
                 {filteredDispatchAgents.map((agent) => (
                   <option key={agent.name} value={agent.name}>
-                    {agent.display_name ?? agent.name}
+                    {/* display_name is the provider's label (e.g. "Claude Code"), not the agent's. */}
+                    {agent.display_name && agent.display_name !== agent.name
+                      ? `${agent.name} (${agent.display_name})`
+                      : agent.name}
                   </option>
                 ))}
               </select>

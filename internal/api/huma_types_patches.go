@@ -1,6 +1,9 @@
 package api
 
-import "github.com/gastownhall/gascity/internal/beads"
+import (
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime/observation"
+)
 
 // Per-domain Huma input/output types for the patches handler
 // group. Split out of the original huma_types.go; mirrors the layout
@@ -156,29 +159,31 @@ type PatchDeletedResponse struct {
 
 // StatusBody is the response body for GET /v0/status.
 type StatusBody struct {
-	Name                string                     `json:"name" doc:"City name."`
-	Path                string                     `json:"path" doc:"City directory path."`
-	Version             string                     `json:"version,omitempty" doc:"Server version."`
-	UptimeSec           int                        `json:"uptime_sec" doc:"Server uptime in seconds."`
-	Suspended           bool                       `json:"suspended" doc:"Whether the city is suspended."`
-	AgentCount          int                        `json:"agent_count" doc:"Total agent count (deprecated, use agents.total)."`
-	RigCount            int                        `json:"rig_count" doc:"Total rig count (deprecated, use rigs.total)."`
-	Running             int                        `json:"running" doc:"Number of running agent processes."`
-	Agents              StatusAgentCounts          `json:"agents" doc:"Agent state counts."`
-	Rigs                StatusRigCounts            `json:"rigs" doc:"Rig state counts."`
-	Work                StatusWorkCounts           `json:"work" doc:"Work item counts."`
-	Mail                StatusMailCounts           `json:"mail" doc:"Mail counts."`
-	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty" doc:"Dolt bead store health summary. Omitted when unavailable."`
-	Beads               *beads.BeadsDiagnostic     `json:"beads,omitempty" doc:"Bead store selection diagnostic. Omitted when unavailable."`
-	DoltVersion         string                     `json:"dolt_version,omitempty" doc:"Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable."`
-	BeadsVersion        string                     `json:"beads_version,omitempty" doc:"Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable."`
-	Partial             bool                       `json:"partial,omitempty" doc:"True when one or more status backing reads returned incomplete data."`
-	PartialErrors       []string                   `json:"partial_errors,omitempty" doc:"Human-readable errors from incomplete status backing reads."`
-	AgentDetails        []StatusAgentDetail        `json:"agent_details,omitempty" doc:"Per-agent state (for CLI status views). Empty when none."`
-	RigDetails          []StatusRigDetail          `json:"rig_details,omitempty" doc:"Per-rig detail (for CLI status views). Empty when none."`
-	NamedSessionDetails []StatusNamedSessionDetail `json:"named_session_details,omitempty" doc:"Per-named-session detail. Empty when none configured."`
-	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty" doc:"Active/suspended session counts. Omitted when unavailable."`
-	ConditionalWrites   *StatusConditionalWrites   `json:"conditional_writes,omitempty" doc:"Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface."`
+	RuntimeSessions     *observation.RuntimeSessions `json:"runtime_sessions,omitempty" doc:"Complete per-SID native/provider identity projection; separate from configured UI agents."`
+	Name                string                       `json:"name" doc:"City name."`
+	Path                string                       `json:"path" doc:"City directory path."`
+	Version             string                       `json:"version,omitempty" doc:"Server version."`
+	UptimeSec           int                          `json:"uptime_sec" doc:"Server uptime in seconds."`
+	Suspended           bool                         `json:"suspended" doc:"Whether the city is suspended."`
+	StoresNotRead       bool                         `json:"stores_not_read,omitempty" doc:"True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent."`
+	AgentCount          int                          `json:"agent_count" doc:"Total agent count (deprecated, use agents.total)."`
+	RigCount            int                          `json:"rig_count" doc:"Total rig count (deprecated, use rigs.total)."`
+	Running             int                          `json:"running" doc:"Number of running agent processes."`
+	Agents              StatusAgentCounts            `json:"agents" doc:"Agent state counts."`
+	Rigs                StatusRigCounts              `json:"rigs" doc:"Rig state counts."`
+	Work                StatusWorkCounts             `json:"work" doc:"Work item counts."`
+	Mail                StatusMailCounts             `json:"mail" doc:"Mail counts."`
+	StoreHealth         *StatusStoreHealth           `json:"store_health,omitempty" doc:"Dolt bead store health summary. Omitted when unavailable."`
+	Beads               *beads.BeadsDiagnostic       `json:"beads,omitempty" doc:"Bead store selection diagnostic. Omitted when unavailable."`
+	DoltVersion         string                       `json:"dolt_version,omitempty" doc:"Version of the dolt engine binary the supervisor drives. Omitted when the probe failed or the binary is unavailable."`
+	BeadsVersion        string                       `json:"beads_version,omitempty" doc:"Version of the bd (beads) CLI the supervisor drives. Omitted when the probe failed or the binary is unavailable."`
+	Partial             bool                         `json:"partial,omitempty" doc:"True when one or more status backing reads returned incomplete data."`
+	PartialErrors       []string                     `json:"partial_errors,omitempty" doc:"Human-readable errors from incomplete status backing reads."`
+	AgentDetails        []StatusAgentDetail          `json:"agent_details,omitempty" doc:"Per-agent state (for CLI status views). Empty when none."`
+	RigDetails          []StatusRigDetail            `json:"rig_details,omitempty" doc:"Per-rig detail (for CLI status views). Empty when none."`
+	NamedSessionDetails []StatusNamedSessionDetail   `json:"named_session_details,omitempty" doc:"Per-named-session detail. Empty when none configured."`
+	SessionCountsDetail *StatusSessionCountsDetail   `json:"session_counts_detail,omitempty" doc:"Active/suspended session counts. Omitted when unavailable."`
+	ConditionalWrites   *StatusConditionalWrites     `json:"conditional_writes,omitempty" doc:"Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface."`
 }
 
 // StatusConditionalWrites is the daemon's own latched conditional-writes
@@ -219,7 +224,8 @@ type StatusRolloutNotice struct {
 
 // StatusAgentDetail mirrors the CLI's StatusAgentJSON with the additional
 // display hints (group name, scale label, session name) that the text
-// formatter needs when rendering pool-expanded rows.
+// formatter needs when rendering pool-expanded rows. It also carries the
+// session bead ID that `gc rig status --json` prints as session_id.
 type StatusAgentDetail struct {
 	Name          string `json:"name" doc:"Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1')."`
 	QualifiedName string `json:"qualified_name" doc:"Rig-qualified name when applicable, else the bare agent name."`
@@ -228,6 +234,7 @@ type StatusAgentDetail struct {
 	Suspended     bool   `json:"suspended" doc:"Whether the agent (or its rig) is suspended."`
 	Draining      bool   `json:"draining,omitempty" doc:"True when the pool is draining this instance."`
 	SessionName   string `json:"session_name,omitempty" doc:"tmux session name CLI drain-ops key on."`
+	SessionID     string `json:"session_id,omitempty" doc:"Bead ID of the session the row's runtime session resolved to. Omitted when no open session bead records that runtime session (always while the city is suspended, when no bead store is read)."`
 	GroupName     string `json:"group_name,omitempty" doc:"Pool group label for expanded rows; same as QualifiedName for singletons."`
 	ScaleLabel    string `json:"scale_label,omitempty" doc:"'scaled (min=N, max=M)' header emitted once per pool group."`
 	Expanded      bool   `json:"expanded,omitempty" doc:"True when this row is a pool-expanded instance (renderer indents differently)."`
@@ -260,11 +267,20 @@ type StatusSessionCountsDetail struct {
 // and last maintenance run. Surfaced by GET /v0/status for operator
 // dashboards; see ADR 0002 / bead ga-d5y design D9.
 type StatusStoreHealth struct {
-	Path         string  `json:"path" doc:"On-disk path of the Dolt store."`
-	SizeBytes    int64   `json:"size_bytes" doc:"Total bytes of the store directory."`
-	LiveRows     int     `json:"live_rows" doc:"Retained bead row count used as the denominator, including open and closed beads."`
-	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per retained row, including open and closed beads."`
-	Warning      bool    `json:"warning" doc:"True when maintenance is overdue."`
+	Path      string `json:"path" doc:"On-disk path of the Dolt store."`
+	SizeBytes int64  `json:"size_bytes" doc:"Total bytes of the store directory."`
+	LiveRows  int    `json:"live_rows" doc:"Retained bead row count used as the denominator, including open and closed beads. Meaningless unless rows_measured is true."`
+	// RowsMeasured says whether live_rows is a real count. A consumer MUST
+	// check it before trusting live_rows or ratio_mb_per_row: a count that
+	// failed or timed out is reported as a zero that is otherwise
+	// indistinguishable from a genuinely empty store. The flag is spelled
+	// for the measured state on purpose, so a payload that omits it — an
+	// older supervisor, a third-party implementation — decodes to false and
+	// renders as unknown rather than silently asserting a measurement
+	// nobody took.
+	RowsMeasured bool    `json:"rows_measured" doc:"True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless."`
+	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true."`
+	Warning      bool    `json:"warning" doc:"True when maintenance is overdue. Meaningless unless rows_measured is true."`
 	ThresholdMB  float64 `json:"threshold_mb_per_row" doc:"Ratio threshold; a ratio above this trips warning."`
 	LastGCAt     string  `json:"last_gc_at,omitempty" doc:"RFC3339 timestamp of last maintenance run."`
 	LastGCStatus string  `json:"last_gc_status,omitempty" doc:"Status of last maintenance run ('success' or 'failed')."`

@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/test/processfloor"
 )
 
 func TestFirstRootCommandMatchesPersistentScopeGrammar(t *testing.T) {
@@ -80,13 +82,29 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinCommands(t *testing.T) {
 		{name: "dolt state helper", args: []string{"dolt-state", "allocate-port", "--city", "/tmp/city"}, skip: true},
 		{name: "scoped dolt config helper", args: []string{"--city", "/tmp/city", "dolt-config", "normalize-scope"}, skip: true},
 		{name: "beads store bridge helper", args: []string{"bd-store-bridge", "--dir", "/tmp/rig", "list"}, skip: true},
+		{name: "managed hook wrapper", args: []string{"hook", "run", "--timeout", "15s", "--", "nudge", "drain", "--inject"}, skip: true},
+		{name: "scoped managed hook wrapper", args: []string{"--city", "/tmp/city", "hook", "run", "--", "mail", "check", "--inject"}, skip: true},
+		{name: "nudge drain hook", args: []string{"nudge", "drain", "--inject"}, skip: true},
+		{name: "scoped nudge", args: []string{"--city=/tmp/city", "nudge", "drain", "--inject"}, skip: true},
+		{name: "mail check hook", args: []string{"mail", "check", "--inject"}, skip: true},
+		{name: "scoped mail", args: []string{"--city", "/tmp/city", "mail", "check", "--inject"}, skip: true},
+		{name: "session start prime hook", args: []string{"prime", "--hook", "--hook-format", "codex"}, skip: true},
+		{name: "scoped prime", args: []string{"--city", "/tmp/city", "prime", "worker"}, skip: true},
+		{name: "work query ready read", args: []string{"ready", "--assignee=x", "--json", "--limit=1"}, skip: true},
+		{name: "scoped ready", args: []string{"--city", "/tmp/city", "ready", "--status", "in_progress"}, skip: true},
 		{name: "ordinary", args: []string{"status"}},
 		{name: "metrics is city value", args: []string{"--city", "metrics", "status"}},
 		{name: "bd is city value", args: []string{"--city", "bd", "status"}},
+		{name: "hook is city value", args: []string{"--city", "hook", "status"}},
+		{name: "mail is rig value", args: []string{"--rig", "mail", "status"}},
 		{name: "after terminator", args: []string{"--", "metrics"}},
 		{name: "bd after terminator", args: []string{"--", "bd"}},
+		{name: "nudge after terminator", args: []string{"--", "nudge"}},
 		{name: "unknown flag", args: []string{"--unknown", "metrics"}},
 		{name: "bd after unknown flag", args: []string{"--unknown", "bd"}},
+		{name: "mail after unknown flag", args: []string{"--unknown", "mail"}},
+		{name: "prime is rig value", args: []string{"--rig=x", "--rig", "prime", "status"}},
+		{name: "ready is city value", args: []string{"--city", "ready", "status"}},
 	}
 
 	for _, test := range tests {
@@ -103,6 +121,33 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinCommands(t *testing.T) {
 				t.Fatalf("root options args = %q, want %q", options.invocationArgs, test.args)
 			}
 		})
+	}
+}
+
+// TestAcceptanceProcessFloorTakesGCBDsDiscoveryBranch pins the process floor
+// the native-lane acceptance budget subtracts (test/processfloor.Args, used by
+// test/acceptance/beads_proxied_default_test.go's bd-list-gc-side-budget) to
+// the startup path of the command it is subtracted from.
+//
+// The row reads `gc bd list --json`'s marginal cost as its gc side minus a
+// floor: one gc process that starts and does nothing else. Eager pack-command
+// discovery loads the city config and the pack tree before the command runs,
+// and `gc bd` skips it (rootCommandSkipsPackDiscovery). A floor that does not
+// skip it carries city-config loading the gc side never does, and on a loaded
+// box that work alone puts the floor more than the whole budget above the gc
+// side (gate tracker ga-97b2v9wd).
+func TestAcceptanceProcessFloorTakesGCBDsDiscoveryBranch(t *testing.T) {
+	t.Parallel()
+
+	floorArgs := processfloor.Args()
+	measuredArgs := []string{"bd", "list", "--json"}
+	floor := rootCommandOptionsForArgs(floorArgs)
+	measured := rootCommandOptionsForArgs(measuredArgs)
+	if floor.discoverPackCommands != measured.discoverPackCommands ||
+		floor.eagerPackCommandDiscovery != measured.eagerPackCommandDiscovery {
+		t.Fatalf("the acceptance process floor gc %q runs pack discovery=%t (eager=%t), but the gc side it is subtracted from, gc %q, runs discovery=%t (eager=%t): the floor must take the measured command's discovery branch, or it measures city-config loading the gc side never does",
+			floorArgs, floor.discoverPackCommands, floor.eagerPackCommandDiscovery,
+			measuredArgs, measured.discoverPackCommands, measured.eagerPackCommandDiscovery)
 	}
 }
 
@@ -191,16 +236,16 @@ func TestRootConstructionUsesInjectedArgsInsteadOfAmbientOSArgs(t *testing.T) {
 		wantPack    bool
 	}{
 		{
-			name:        "ordinary injected args discover packs",
+			name:        "built-in version skips pack discovery",
 			ambientArgs: []string{"version"},
 			injected:    []string{"version"},
-			wantPack:    true,
+			wantPack:    false,
 		},
 		{
-			name:        "ambient metrics cannot suppress ordinary discovery",
+			name:        "ambient metrics do not change built-in detection",
 			ambientArgs: []string{"metrics", "status"},
 			injected:    []string{"version"},
-			wantPack:    true,
+			wantPack:    false,
 		},
 		{
 			name:        "injected metrics suppresses ordinary ambient discovery",
@@ -215,15 +260,51 @@ func TestRootConstructionUsesInjectedArgsInsteadOfAmbientOSArgs(t *testing.T) {
 			wantPack:    false,
 		},
 		{
-			name:        "ambient credential helper cannot suppress ordinary discovery",
+			name:        "injected hook wrapper suppresses ordinary ambient discovery",
+			ambientArgs: []string{"version"},
+			injected:    []string{"hook", "run", "--", "nudge", "drain", "--inject"},
+			wantPack:    false,
+		},
+		{
+			name:        "injected nudge drain suppresses ordinary ambient discovery",
+			ambientArgs: []string{"version"},
+			injected:    []string{"nudge", "drain", "--inject"},
+			wantPack:    false,
+		},
+		{
+			name:        "injected mail check suppresses ordinary ambient discovery",
+			ambientArgs: []string{"version"},
+			injected:    []string{"mail", "check", "--inject"},
+			wantPack:    false,
+		},
+		{
+			name:        "injected prime hook suppresses ordinary ambient discovery",
+			ambientArgs: []string{"version"},
+			injected:    []string{"prime", "--hook"},
+			wantPack:    false,
+		},
+		{
+			name:        "ambient credential helper does not change built-in detection",
 			ambientArgs: []string{"git-credential", "get"},
 			injected:    []string{"version"},
-			wantPack:    true,
+			wantPack:    false,
 		},
 		{
 			name:        "injected credential helper suppresses ordinary ambient discovery",
 			ambientArgs: []string{"version"},
 			injected:    []string{"git-credential", "get"},
+			wantPack:    false,
+		},
+		{
+			name:        "mail skips pack discovery",
+			ambientArgs: []string{"version"},
+			injected:    []string{"mail", "count", "mayor"},
+			wantPack:    false,
+		},
+		{
+			name:        "session skips pack discovery",
+			ambientArgs: []string{"version"},
+			injected:    []string{"session", "list"},
 			wantPack:    false,
 		},
 	}

@@ -26,6 +26,9 @@ type BlockerPairSnapshot struct {
 // Callers must first validate the primary source predicate and then read back
 // the parent. Unsupported stores must not emulate this with two key writes.
 func (s *NativeDoltStore) ClearBlockerPairIfMatch(id string, expected BlockerPairSnapshot) (bool, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return false, err
+	}
 	if id == "" || expected.Revision <= 0 || expected.Text == "" || expected.Typed == "" ||
 		expected.Route == "" || expected.Owner == "" {
 		return false, fmt.Errorf("clear blocker pair: incomplete exact snapshot")
@@ -108,4 +111,16 @@ func (s *NativeDoltStore) ClearBlockerPairIfMatch(id string, expected BlockerPai
 		return false, err
 	}
 	return swapped, nil
+}
+
+// metadataRawValuesFromNative preserves unrelated JSON values during deletion.
+func metadataRawValuesFromNative(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, fmt.Errorf("unmarshaling metadata: %w", err)
+	}
+	return values, nil
 }

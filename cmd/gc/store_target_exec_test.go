@@ -225,7 +225,7 @@ func TestGcExecLifecycleInitProcessEnvDoesNotLeakAmbientBEADS_DIRForGcBeadsK8s(t
 func TestGcExecStoreEnvProjectsGCBinForGcBeadsBd(t *testing.T) {
 	cityDir := t.TempDir()
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "/opt/gc/bin/gc", nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	env := gcExecStoreEnv(cityDir, execStoreTarget{
@@ -242,7 +242,7 @@ func TestGcExecStoreEnvProjectsGCBinForGcBeadsBd(t *testing.T) {
 func TestGcExecStoreEnvDoesNotProjectGCBinForUnrelatedExecProvider(t *testing.T) {
 	cityDir := t.TempDir()
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "/opt/gc/bin/gc", nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	env := gcExecStoreEnv(cityDir, execStoreTarget{
@@ -253,6 +253,38 @@ func TestGcExecStoreEnvDoesNotProjectGCBinForUnrelatedExecProvider(t *testing.T)
 
 	if got := env["GC_BIN"]; got != "" {
 		t.Fatalf("GC_BIN = %q, want empty for unrelated exec provider", got)
+	}
+}
+
+// gcExecStoreEnv opens a store for a read or a write. A gc whose own on-disk
+// path an upgrade removed must still serve the dashboard, the API and its
+// supervisor's reconciler, so an unresolvable GC_BIN degrades here rather than
+// failing every store open until the process restarts. The strict refusal stays
+// where bd re-invokes gc through a hook: the bd store bridge and the
+// provider-owned lifecycle env.
+func TestGcExecStoreEnvDegradesOnGCBinaryResolutionFailureForGcBeadsBd(t *testing.T) {
+	cityDir := t.TempDir()
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", fmt.Errorf("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+	stubRemovedGCExecutable(t)
+
+	degraded := gcExecStoreEnv(cityDir, execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "gc",
+	}, "exec:/tmp/gc-beads-bd")
+	if degraded["GC_STORE_ROOT"] != cityDir {
+		t.Fatalf("degraded env lost its store root: %v", degraded)
+	}
+
+	env := gcExecStoreEnv(cityDir, execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "gc",
+	}, "exec:/tmp/custom-provider")
+	if got := env["GC_BIN"]; got != "" {
+		t.Fatalf("GC_BIN = %q, want empty for unrelated provider", got)
 	}
 }
 
@@ -379,11 +411,13 @@ func TestGcExecStoreEnvProjectsCityAndRigTargets(t *testing.T) {
 }
 
 func TestOpenStoreAtForCityExecProjectsConfiguredTargets(t *testing.T) {
-	cityDir := t.TempDir()
+	cityDir := canonicalTestPath(t.TempDir())
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	canonicalCityDir := canonicalTestPath(cityDir)
+	canonicalRigDir := canonicalTestPath(rigDir)
 	writeExecStoreCityConfig(t, cityDir, "metro-city", "ct", []config.Rig{{
 		Name:   "frontend",
 		Path:   "rigs/frontend",
@@ -416,8 +450,8 @@ func TestOpenStoreAtForCityExecProjectsConfiguredTargets(t *testing.T) {
 	}
 
 	cityEnv := readExecCaptureEnv(t, filepath.Join(captureDir, "city.env"))
-	if got := cityEnv["GC_STORE_ROOT"]; got != cityDir {
-		t.Fatalf("city GC_STORE_ROOT = %q, want %q", got, cityDir)
+	if got := cityEnv["GC_STORE_ROOT"]; got != canonicalCityDir {
+		t.Fatalf("city GC_STORE_ROOT = %q, want canonical path %q", got, canonicalCityDir)
 	}
 	if got := cityEnv["GC_STORE_SCOPE"]; got != "city" {
 		t.Fatalf("city GC_STORE_SCOPE = %q, want city", got)
@@ -428,8 +462,8 @@ func TestOpenStoreAtForCityExecProjectsConfiguredTargets(t *testing.T) {
 	if got := cityEnv["GC_PROVIDER"]; got != provider {
 		t.Fatalf("city GC_PROVIDER = %q, want %q", got, provider)
 	}
-	if got := cityEnv["GC_CITY_PATH"]; got != cityDir {
-		t.Fatalf("city GC_CITY_PATH = %q, want %q", got, cityDir)
+	if got := cityEnv["GC_CITY_PATH"]; got != canonicalCityDir {
+		t.Fatalf("city GC_CITY_PATH = %q, want canonical path %q", got, canonicalCityDir)
 	}
 	if got := cityEnv["GC_RIG"]; got != "" {
 		t.Fatalf("city GC_RIG = %q, want empty", got)
@@ -445,8 +479,8 @@ func TestOpenStoreAtForCityExecProjectsConfiguredTargets(t *testing.T) {
 	}
 
 	rigEnv := readExecCaptureEnv(t, filepath.Join(captureDir, "frontend.env"))
-	if got := rigEnv["GC_STORE_ROOT"]; got != rigDir {
-		t.Fatalf("rig GC_STORE_ROOT = %q, want %q", got, rigDir)
+	if got := rigEnv["GC_STORE_ROOT"]; got != canonicalRigDir {
+		t.Fatalf("rig GC_STORE_ROOT = %q, want canonical path %q", got, canonicalRigDir)
 	}
 	if got := rigEnv["GC_STORE_SCOPE"]; got != "rig" {
 		t.Fatalf("rig GC_STORE_SCOPE = %q, want rig", got)
@@ -457,8 +491,8 @@ func TestOpenStoreAtForCityExecProjectsConfiguredTargets(t *testing.T) {
 	if got := rigEnv["GC_RIG"]; got != "frontend" {
 		t.Fatalf("rig GC_RIG = %q, want frontend", got)
 	}
-	if got := rigEnv["GC_RIG_ROOT"]; got != rigDir {
-		t.Fatalf("rig GC_RIG_ROOT = %q, want %q", got, rigDir)
+	if got := rigEnv["GC_RIG_ROOT"]; got != canonicalRigDir {
+		t.Fatalf("rig GC_RIG_ROOT = %q, want canonical path %q", got, canonicalRigDir)
 	}
 	if got := rigEnv["GC_PROVIDER"]; got != provider {
 		t.Fatalf("rig GC_PROVIDER = %q, want %q", got, provider)

@@ -1,0 +1,478 @@
+package git
+
+import (
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const fakeGitEnvLog = "GASCITY_FAKE_GIT_ENV_LOG"
+
+func init() {
+	base := strings.ToLower(filepath.Base(os.Args[0]))
+	if base != "git" && base != "git.exe" {
+		return
+	}
+	logPath := os.Getenv(fakeGitEnvLog)
+	if logPath == "" {
+		os.Exit(0)
+	}
+	var b strings.Builder
+	b.WriteString("argv=")
+	b.WriteString(strings.Join(os.Args[1:], " "))
+	b.WriteString("\n")
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GIT_LFS_SKIP_SMUDGE=") {
+			b.WriteString(entry)
+			b.WriteString("\n")
+		}
+	}
+	if err := os.WriteFile(logPath, []byte(b.String()), 0o600); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func fakeGitOnPath(t *testing.T) string {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	name := "git"
+	if filepath.Ext(self) == ".exe" {
+		name = "git.exe"
+	}
+	fake := filepath.Join(dir, name)
+	if err := os.Link(self, fake); err != nil {
+		copyTestExecutable(t, self, fake)
+	}
+	t.Cleanup(func() { _ = os.Remove(fake) })
+	logPath := filepath.Join(t.TempDir(), "git-env.log")
+	t.Setenv(fakeGitEnvLog, logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func copyTestExecutable(t *testing.T, from, to string) {
+	t.Helper()
+	src, err := os.Open(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close() //nolint:errcheck
+	dst, err := os.OpenFile(to, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close() //nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBranchExists(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	exists, err := g.BranchExists(branch)
+	if err != nil || !exists {
+		t.Errorf("BranchExists(%q) = %v, %v; want true, nil", branch, exists, err)
+	}
+	exists, err = g.BranchExists("no-such-branch")
+	if err != nil || exists {
+		t.Errorf("BranchExists(no-such-branch) = %v, %v; want false, nil", exists, err)
+	}
+}
+
+// A probe that cannot answer must report an error, never "absent": callers
+// use absence to authorize creating and later deleting the branch.
+func TestBranchExistsFailsClosedOutsideRepo(t *testing.T) {
+	g := New(t.TempDir())
+	exists, err := g.BranchExists("main")
+	if err == nil {
+		t.Fatalf("BranchExists outside a repo = %v, nil; want an error", exists)
+	}
+	if exists {
+		t.Error("BranchExists reported true on a failed probe")
+	}
+}
+
+func TestRevParseVerifyCommit(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	sha, err := g.RevParseVerifyCommit(branch)
+	if err != nil {
+		t.Fatalf("RevParseVerifyCommit(%q): %v", branch, err)
+	}
+	if len(sha) != 40 {
+		t.Errorf("RevParseVerifyCommit returned %q, want 40-char SHA", sha)
+	}
+	if _, err := g.RevParseVerifyCommit("no-such-ref"); err == nil {
+		t.Error("RevParseVerifyCommit(no-such-ref) succeeded, want error")
+	}
+	// A tree-ish that is not a commit must be rejected.
+	if _, err := g.RevParseVerifyCommit(sha + "^{tree}"); err == nil {
+		t.Error("RevParseVerifyCommit of a tree object succeeded, want error")
+	}
+}
+
+func TestWorktreeAddNewBranch(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	base, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := g.WorktreeAddNewBranch(wtPath, "feature-x", base); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+	wg := New(wtPath)
+	branch, err := wg.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch in worktree: %v", err)
+	}
+	if branch != "feature-x" {
+		t.Errorf("worktree branch = %q, want feature-x", branch)
+	}
+	// Branch tip must equal the base commit.
+	baseSHA, err := g.RevParseVerifyCommit(base)
+	if err != nil {
+		t.Fatalf("RevParseVerifyCommit(base): %v", err)
+	}
+	tipSHA, err := g.RevParseVerifyCommit("feature-x")
+	if err != nil {
+		t.Fatalf("RevParseVerifyCommit(feature-x): %v", err)
+	}
+	if tipSHA != baseSHA {
+		t.Errorf("feature-x tip = %s, want base %s", tipSHA, baseSHA)
+	}
+	// Creating over an existing branch must fail (no clobber).
+	other := filepath.Join(t.TempDir(), "wt2")
+	if err := g.WorktreeAddNewBranch(other, "feature-x", base); err == nil {
+		t.Error("WorktreeAddNewBranch with existing branch succeeded, want error")
+	}
+}
+
+func TestWorktreeAddExistingBranch(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	base, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	runGit(t, dir, "branch", "feature-y", base)
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := g.WorktreeAddExistingBranch(wtPath, "feature-y"); err != nil {
+		t.Fatalf("WorktreeAddExistingBranch: %v", err)
+	}
+	branch, err := New(wtPath).CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch in worktree: %v", err)
+	}
+	if branch != "feature-y" {
+		t.Errorf("worktree branch = %q, want feature-y", branch)
+	}
+}
+
+func TestWorktreeAddDefaultDoesNotSkipLFSSmudge(t *testing.T) {
+	logPath := fakeGitOnPath(t)
+	g := New(t.TempDir())
+	if err := g.WorktreeAddNewBranch(filepath.Join(t.TempDir(), "wt"), "feature-default", "main"); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile fake git log: %v", err)
+	}
+	if strings.Contains(string(data), "GIT_LFS_SKIP_SMUDGE=") {
+		t.Fatalf("default worktree add set GIT_LFS_SKIP_SMUDGE:\n%s", data)
+	}
+}
+
+func TestWorktreeAddOptionSkipsLFSSmudge(t *testing.T) {
+	logPath := fakeGitOnPath(t)
+	g := New(t.TempDir())
+	if err := g.WorktreeAddNewBranchWithOptions(filepath.Join(t.TempDir(), "wt"), "feature-lfs", "main", WorktreeAddOptions{SkipLFSSmudge: true}); err != nil {
+		t.Fatalf("WorktreeAddNewBranchWithOptions: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile fake git log: %v", err)
+	}
+	if !strings.Contains(string(data), "GIT_LFS_SKIP_SMUDGE=1") {
+		t.Fatalf("option-scoped worktree add did not set GIT_LFS_SKIP_SMUDGE:\n%s", data)
+	}
+}
+
+func TestBranchDelete(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	base, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	runGit(t, dir, "branch", "doomed", base)
+	if exists, err := g.BranchExists("doomed"); err != nil || !exists {
+		t.Fatalf("setup: branch doomed missing (%v, %v)", exists, err)
+	}
+	if err := g.BranchDeleteIfMerged("doomed"); err != nil {
+		t.Fatalf("BranchDeleteIfMerged: %v", err)
+	}
+	if exists, err := g.BranchExists("doomed"); err != nil || exists {
+		t.Errorf("branch doomed after BranchDeleteIfMerged = %v, %v; want false, nil", exists, err)
+	}
+}
+
+func TestCommonDir(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	common, err := g.CommonDir()
+	if err != nil {
+		t.Fatalf("CommonDir: %v", err)
+	}
+	if !filepath.IsAbs(common) {
+		t.Errorf("CommonDir = %q, want absolute path", common)
+	}
+	// A worktree of the same repo shares the common dir.
+	base, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := g.WorktreeAddNewBranch(wtPath, "common-check", base); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+	wtCommon, err := New(wtPath).CommonDir()
+	if err != nil {
+		t.Fatalf("CommonDir in worktree: %v", err)
+	}
+	resolve := func(p string) string {
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", p, err)
+		}
+		return r
+	}
+	if resolve(wtCommon) != resolve(common) {
+		t.Errorf("worktree CommonDir = %q, repo CommonDir = %q; want same", wtCommon, common)
+	}
+}
+
+func TestGitDirIsWorktreeSpecific(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	base, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := g.WorktreeAddNewBranch(wtPath, "gitdir-check", base); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+
+	mainGitDir, err := g.GitDir()
+	if err != nil {
+		t.Fatalf("GitDir main: %v", err)
+	}
+	wtGitDir, err := New(wtPath).GitDir()
+	if err != nil {
+		t.Fatalf("GitDir worktree: %v", err)
+	}
+	if !filepath.IsAbs(mainGitDir) || !filepath.IsAbs(wtGitDir) {
+		t.Fatalf("GitDir paths must be absolute: main=%q worktree=%q", mainGitDir, wtGitDir)
+	}
+	if mainGitDir == wtGitDir {
+		t.Fatalf("GitDir returned shared directory %q for both worktrees", mainGitDir)
+	}
+	if _, err := os.Stat(wtGitDir); err != nil {
+		t.Fatalf("worktree GitDir %q is not readable: %v", wtGitDir, err)
+	}
+}
+
+func TestHeadSymbolicRef(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	ref, err := g.HeadSymbolicRef()
+	if err != nil {
+		t.Fatalf("HeadSymbolicRef: %v", err)
+	}
+	if ref != "refs/heads/"+branch {
+		t.Errorf("HeadSymbolicRef = %q, want refs/heads/%s", ref, branch)
+	}
+	// Detached HEAD must return an error, never a ref.
+	sha, err := g.RevParseVerifyCommit(branch)
+	if err != nil {
+		t.Fatalf("RevParseVerifyCommit: %v", err)
+	}
+	if err := g.CheckoutDetach(sha); err != nil {
+		t.Fatalf("CheckoutDetach: %v", err)
+	}
+	if ref, err := g.HeadSymbolicRef(); err == nil {
+		t.Errorf("HeadSymbolicRef on detached HEAD = %q, want error", ref)
+	}
+}
+
+func TestTopLevel(t *testing.T) {
+	dir := initTestRepo(t)
+	sub := filepath.Join(dir, "nested", "deep")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	top, err := New(sub).TopLevel()
+	if err != nil {
+		t.Fatalf("TopLevel: %v", err)
+	}
+	resolve := func(p string) string {
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", p, err)
+		}
+		return r
+	}
+	if resolve(top) != resolve(dir) {
+		t.Errorf("TopLevel from subdir = %q, want %q", top, dir)
+	}
+}
+
+func TestWorktreeOpsRefuseOptionInjection(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	// A branch or ref starting with "-" must not be interpreted as a flag.
+	if exists, err := g.BranchExists("--help"); err == nil || exists {
+		t.Errorf("BranchExists(--help) = %v, %v; want false and an error", exists, err)
+	}
+	if _, err := g.RevParseVerifyCommit("--help"); err == nil {
+		t.Error("RevParseVerifyCommit(--help) succeeded, want error")
+	}
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := g.WorktreeAddNewBranch(wtPath, "--force", "HEAD"); err == nil {
+		t.Error("WorktreeAddNewBranch with flag-like branch succeeded, want error")
+	}
+	if _, statErr := os.Stat(wtPath); statErr == nil {
+		t.Error("flag-like branch attempt created the worktree path")
+	}
+}
+
+func TestWorktreeAddNeverDetaches(t *testing.T) {
+	// Guard the bead's core invariant at the helper layer: the add helpers
+	// must never produce a detached-HEAD worktree.
+	dir := initTestRepo(t)
+	g := New(dir)
+	base, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := g.WorktreeAddNewBranch(wtPath, "attached", base); err != nil {
+		t.Fatalf("WorktreeAddNewBranch: %v", err)
+	}
+	ref, err := New(wtPath).HeadSymbolicRef()
+	if err != nil {
+		t.Fatalf("HeadSymbolicRef: %v", err)
+	}
+	if !strings.HasPrefix(ref, "refs/heads/") {
+		t.Errorf("worktree HEAD = %q, want refs/heads/*", ref)
+	}
+}
+
+func TestIsHexObjectIDAcceptsBothObjectFormats(t *testing.T) {
+	sha1 := strings.Repeat("a", 40)
+	sha256ID := strings.Repeat("b", 64)
+	for _, id := range []string{sha1, sha256ID} {
+		if !isHexObjectID(id) {
+			t.Fatalf("isHexObjectID(%d-char id) = false, want true", len(id))
+		}
+	}
+	for _, bad := range []string{"", strings.Repeat("a", 39), strings.Repeat("a", 41), strings.Repeat("A", 40), strings.Repeat("z", 40)} {
+		if isHexObjectID(bad) {
+			t.Fatalf("isHexObjectID(%q) = true, want false", bad)
+		}
+	}
+}
+
+// BaseRefMissing is the sling-time base_branch check, so it must refuse only
+// when it can prove the ref is absent: a local branch, a remote-tracking ref
+// (bare name resolved as origin/<name>, or a full "remote/branch" ref) and a
+// directory it cannot read as a repository are all "not missing".
+func TestBaseRefMissing(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	local, err := g.CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	// A remote-tracking ref for a branch that exists nowhere locally.
+	runGit(t, dir, "update-ref", "refs/remotes/origin/only-on-origin", "HEAD")
+	runGit(t, dir, "update-ref", "refs/remotes/headfork/restack/foo", "HEAD")
+
+	tests := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{"local branch", local, false},
+		{"bare name found as origin/<name>", "only-on-origin", false},
+		{"full remote-tracking ref", "headfork/restack/foo", false},
+		{"unknown ref", "no-such-base", true},
+		{"typo of a real ref", local + "x", true},
+		// A probe that fails for any reason but git's "no such ref" status
+		// (here, an argument git would read as an option) proves nothing.
+		{"unprobeable ref", "-x", false},
+	}
+	for _, tt := range tests {
+		if got := g.BaseRefMissing(tt.ref); got != tt.want {
+			t.Errorf("%s: BaseRefMissing(%q) = %v, want %v", tt.name, tt.ref, got, tt.want)
+		}
+	}
+
+	// Inconclusive is not "missing": a non-repository cannot prove anything.
+	if New(t.TempDir()).BaseRefMissing("main") {
+		t.Error("BaseRefMissing in a non-repository = true, want false (cannot decide)")
+	}
+}
+
+// TestBaseRefMissingIsFalseWhenGitFailsAnotherWay pins the other half of the
+// "cannot decide" contract in BaseRefMissing's doc: in a directory git accepts
+// as a repository, a probe that fails with any status but git's "no such ref"
+// 1 proves nothing about the ref, so the refusal built on it must not fire. A
+// damaged packed-refs file is such a failure: rev-parse dies with 128 while
+// rev-parse --git-dir, which IsRepo runs, still succeeds.
+func TestBaseRefMissingIsFalseWhenGitFailsAnotherWay(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	// Control: before the damage, the same unknown ref is missing.
+	if !g.BaseRefMissing("no-such-base") {
+		t.Fatal("BaseRefMissing(no-such-base) = false in a healthy repository, want true")
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "packed-refs"), []byte("not a packed-refs line\n"), 0o600); err != nil {
+		t.Fatalf("damaging packed-refs: %v", err)
+	}
+	// The probe, not the repository check, has to be what fails here;
+	// otherwise the IsRepo guard alone would satisfy this test.
+	if !g.IsRepo() {
+		t.Fatal("IsRepo() = false with a damaged packed-refs file, want true")
+	}
+	if g.BaseRefMissing("no-such-base") {
+		_, probeErr := g.RevParseVerifyCommit("no-such-base")
+		t.Errorf("BaseRefMissing(no-such-base) = true with a damaged packed-refs file, want false (cannot decide); the probe itself says: %v", probeErr)
+	}
+}

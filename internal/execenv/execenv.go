@@ -1,5 +1,5 @@
-// Package execenv centralizes environment filtering and log redaction for
-// subprocess boundaries.
+// Package execenv centralizes environment filtering, log redaction and the
+// Windows batch-file argument check for subprocess boundaries.
 package execenv
 
 import (
@@ -48,6 +48,21 @@ func usageMetricsDisableKeyEqual(key, goos string) bool {
 	return key == UsageMetricsDisableEnv
 }
 
+// IsExecRequestKey reports whether key names a GC_*_INFO variable, the
+// channel a gc exec helper's request travels on, comparing it as the platform
+// compares environment names: case-insensitively on Windows. A helper must not
+// inherit another helper's request under any spelling it would read.
+func IsExecRequestKey(key string) bool {
+	return isExecRequestKeyForGOOS(key, runtime.GOOS)
+}
+
+func isExecRequestKeyForGOOS(key, goos string) bool {
+	if goos == "windows" {
+		key = strings.ToUpper(key)
+	}
+	return strings.HasPrefix(key, "GC_") && strings.HasSuffix(key, "_INFO")
+}
+
 // IsSensitiveKey reports whether an environment key is likely to contain a
 // secret. Callers should strip inherited values for these keys and require
 // explicit config when a child process truly needs one.
@@ -78,18 +93,31 @@ func IsSensitiveKey(key string) bool {
 	return false
 }
 
-// FilterInherited removes sensitive KEY=VALUE entries from an inherited
-// environment. Explicit overrides should be appended after filtering.
+// FilterInherited removes sensitive values and the complete ambient process
+// owner tuple from an inherited environment. Explicit overrides should be
+// appended after filtering; inherited routing context is not process authority.
 func FilterInherited(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		key, _, ok := strings.Cut(entry, "=")
+		if isProcessOwnerKey(key) {
+			continue
+		}
 		if ok && IsSensitiveKey(key) {
 			continue
 		}
 		out = append(out, entry)
 	}
 	return out
+}
+
+func isProcessOwnerKey(key string) bool {
+	switch key {
+	case "GC_SESSION_ID", "GC_TEMPLATE", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN":
+		return true
+	default:
+		return false
+	}
 }
 
 // MergeMap filters inherited secrets, removes keys replaced by overrides, and
